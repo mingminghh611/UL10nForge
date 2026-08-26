@@ -306,6 +306,20 @@ class ReviewModelService:
                     parts[3] == "LISTENING":
                 pids.add(parts[4])
         for pid in pids:
+            # 2026-08-26 安全加固：只杀 llama-server.exe——此前对端口上
+            # 任意 PID 直接 taskkill /F，若用户有无关服务占用该端口会被
+            # 误杀（与 local_model._kill_llama_on_port 同判据：先 tasklist
+            # 校验进程名再杀）。杀不掉的（权限/已消失）静默继续。
+            try:
+                rows = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                    capture_output=True, text=True, errors="replace",
+                    timeout=10, creationflags=nowindow).stdout
+                name = rows.split(",")[0].strip('"') if rows else ""
+                if name.lower() != "llama-server.exe":
+                    continue
+            except (OSError, subprocess.TimeoutExpired):
+                continue
             try:
                 subprocess.run(["taskkill", "/F", "/PID", pid],
                                capture_output=True, timeout=10,
