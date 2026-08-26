@@ -77,3 +77,116 @@ def test_raw_string_entries_still_extracts_display_text():
     # 至少一个显示文本进入待翻译池，且 m_Name 绝不在内
     assert texts_found, "display texts should be extracted"
     assert "SomeObject" not in [e.original for e in entries]
+
+
+# ── 写回侧 m_Name 兜底（2026-08-26 任务三补漏） ─────────────────────
+# 提取器已排除 m_Name；写回侧 _patch_asset 再按同一布局兜底，防提取器
+# 漏判/旧库残留的定位器仍指向 m_Name 跨度。MonoBehaviour 固定布局：
+# m_GameObject PPtr(12) + m_Enabled(4) + m_Script PPtr(8) + 长度头(4 @28)
+# + 内容(内容 @32) + 对齐零 + 后续字段（含显示文本）。
+import json
+import tempfile
+from pathlib import Path
+
+import UnityPy
+
+from hanhua.core.unity.extractor import _mono_object_name_span
+from hanhua.core.unity.writer import WriteResult, _patch_asset
+
+
+def _fake_mono_with_display(mname: str, display: str) -> tuple[bytes, int, int]:
+    """构造 MonoBehaviour：m_Name 内容 @32，紧随一个显示文本（内容偏移返回）。
+
+    返回 (raw, mname_content_offset, display_content_offset)。"""
+    head = struct.pack("<i", 0) + struct.pack("<q", 0)      # m_GameObject @0..11
+    head += struct.pack("<i", 1)                             # m_Enabled @12
+    head += struct.pack("<i", 0) + struct.pack("<q", 2000)   # m_Script @16..27
+    nb = mname.encode()
+    head += struct.pack("<i", len(nb)) + nb                  # 长度头@28, 内容@32
+    head += b"\x00" * ((4 - (len(head) % 4)) % 4)
+    mname_off = 32
+    db = display.encode()
+    disp_off = len(head) + 4
+    head += struct.pack("<i", len(db)) + db
+    head += b"\x00" * ((4 - (len(head) % 4)) % 4)
+    return head, mname_off, disp_off
+
+
+class _FakeMonoObject:
+    def __init__(self, raw, assets_name):
+        self.path_id = 7
+        self.assets_file = type("AF", (), {"name": assets_name})()
+        self.type = type("OT", (), {"name": "MonoBehaviour"})()
+        self.raw = raw
+
+    def get_raw_data(self):
+        return self.raw
+
+    def set_raw_data(self, r):
+        self.raw = bytes(r)
+
+
+class SerializedFile:
+    reader = None
+
+    def __init__(self, environment):
+        self.environment = environment
+
+    def save(self):
+        return self.environment.objects[0].get_raw_data()
+
+
+class _FakeEnv:
+    def __init__(self):
+        self.objects, self.files = [], {}
+
+    def load(self, paths):
+        self.objects = [_FakeMonoObject(Path(paths[0]).read_bytes(), "g.assets")]
+        self.files = {"main": SerializedFile(self)}
+
+
+def _write_patch(tmp_path, raw, entry, assets_name="g.assets"):
+    import UnityPy
+    UnityPy.Environment = _FakeEnv
+    path = tmp_path / assets_name
+    path.write_bytes(raw)
+    result = WriteResult()
+    _patch_asset(path, [entry], result)
+    return path, result
+
+
+def _rawstr_entry(key_path, original, translation, offset, assets_name="g.assets"):
+    return {
+        "file_id": "fixture",
+        "key_path": key_path,
+        "original": original,
+        "translation": translation,
+        "meta": json.dumps({
+            "kind": "rawstr", "asset_file": assets_name, "obj": 7,
+            "offset": offset, "obj_has_values": True,
+            "role": "display", "disposition": "translate",
+        }),
+    }
+
+
+def test_writer_side_reverts_rawstr_pointing_at_mname(tmp_path):
+    """写回侧兜底：定位器指向 m_Name 跨度 → 回退保留原文（对象名不译）。"""
+    raw, mname_off, disp_off = _fake_mono_with_display("Start", "Start")
+    assert _mono_object_name_span(raw) == (28, 32 + len("Start"))
+    path, result = _write_patch(
+        tmp_path, raw,
+        _rawstr_entry("asset#g.assets#7/str/0", "Start", "开始", mname_off))
+    assert result.entries == 0
+    assert result.logic_reverted == 1
+    assert "rawstr_object_mname" in result.logic_reverted_items[0]
+    assert path.read_bytes()[mname_off:mname_off + 5] == b"Start"  # 原文保留
+
+
+def test_writer_side_display_text_outside_mname_still_writes(tmp_path):
+    """兜底不越界：m_Name 之后的真实显示文本仍正常写回。"""
+    raw, mname_off, disp_off = _fake_mono_with_display("Start", "Start")
+    path, result = _write_patch(
+        tmp_path, raw,
+        _rawstr_entry("asset#g.assets#7/str/1", "Start", "开始", disp_off))
+    assert result.entries == 1
+    assert path.read_bytes()[disp_off:disp_off + len("开始".encode())] == "开始".encode()

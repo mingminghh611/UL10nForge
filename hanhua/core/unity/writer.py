@@ -1366,6 +1366,17 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                 )
                 string_sequence = snapshot_object_strings(bytes(raw))
                 obj_strings = string_sequence
+                # 写回侧 m_Name 兜底（2026-08-26 任务三补漏）：MonoBehaviour/
+                # ScriptableObject 的 m_Name 是对象标识名（Inspector 标签/
+                # Find 查找键），翻译必断链（Rendezvous 崩溃根因）。提取器
+                # 已按固定布局排除（_mono_object_name_span），但漏判/旧库
+                # 残留的定位器可能仍指向 m_Name 跨度——写回侧按同一布局
+                # 再判一次，命中跨度的条目宁可漏写（保留原文防断链）也
+                # 不译对象名（宁漏勿坏，与 object_name_shared_word 同原则）。
+                # 与逻辑键语义回退同记账（resolved + reverted_locators +
+                # 排除表），避免尾部兜底误记 rejected。
+                from hanhua.core.unity.extractor import _mono_object_name_span
+                _mname = _mono_object_name_span(bytes(raw))
                 string_translations: dict[str, str] = {}
                 for e, meta in raw_items:
                     expansion = audit_raw_expansion(
@@ -1390,6 +1401,24 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                 # 疑似键（report 级）照常写入并进审计段供复核。
                 reverted_locators: set[str] = set()
                 for e, meta in raw_items:
+                    # 写回侧 m_Name 兜底：rawstr 偏移落在 m_Name 跨度内的
+                    # 定位器一律回退（对象名绝不写译）——提取器漏判或旧库
+                    # 残留时仍安全。语义回退记账，防尾部兜底误记 rejected。
+                    off = meta.get("offset")
+                    if (_mname is not None and isinstance(off, int)
+                            and _mname[0] <= off <= _mname[1]):
+                        e["status"] = "skipped"
+                        reverted_locators.add(str(off))
+                        result.note_logic_reverted(e, "rawstr_object_mname")
+                        result.logic_audit.append({
+                            "stage": "semantic_revert",
+                            "locator": str(e.get("key_path") or ""),
+                            "obj": meta.get("obj"),
+                            "original": e["original"],
+                            "translation": e["translation"],
+                            "reason": "rawstr_object_mname",
+                        })
+                        continue
                     stripped = str(e["original"]).strip()
                     verdict = logic_key_evidence(stripped, meta, obj_strings)
                     if not verdict:
