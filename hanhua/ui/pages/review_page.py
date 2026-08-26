@@ -694,9 +694,15 @@ class ReviewPage(QWidget):
         self.lock_check.blockSignals(False)
         # #38：有译文可审（translated 行）；failed 行无有效候选（机械门
         # 兜底会直接 BLOCKED 清译文），pending 行无译文——均不可审。
+        # 2026-08-26 修复「选项消失」：BLOCKED 条目（status=blocked、
+        # 发布译文已被清空）恰是最需人工复核的一类——坏译文在
+        # meta.rejected_candidate，此前因 bool(row["translation"]) 为
+        # False 且 status!=translated 被永久禁用，最该审的反而审不了。
+        # 放宽：translated 用当前译文、blocked 用 rejected_candidate 送审。
+        candidate = row["translation"] or _row_meta(row).get("rejected_candidate")
         self.review_btn.setEnabled(
-            not self._review_running and bool(row["translation"])
-            and row["status"] == "translated")
+            not self._review_running and bool(candidate)
+            and row["status"] in ("translated", "blocked"))
         self.detail_context.setText(self._context_text(meta))
         self.detail_reason.setText(self._quality_text(row, meta))
         self._detail_stack.setCurrentWidget(self.detail_panel)
@@ -806,12 +812,17 @@ class ReviewPage(QWidget):
                              "请等翻译完成后再审核", "warning")
             return
         row = self.model._rows[self._current_row]
-        if not row.get("translation") or row["status"] != "translated":
-            return
         meta = _row_meta(row)
+        # 2026-08-26：BLOCKED 条目（status=blocked、发布译文已清空）可审——
+        # 用坏译文 meta.rejected_candidate 作送审候选，以 translated 身份进
+        # 管线（review_entries 只收 translated/failed），让最需复核的条目
+        # 能重新送审；通过则 APPROVED 可写回，未过则按意见修改后再审。
+        candidate = row["translation"] or meta.get("rejected_candidate")
+        if not candidate or row["status"] not in ("translated", "blocked"):
+            return
         entry = TextEntry(
             file_id=row["file_id"], key_path=row["key_path"],
-            original=row["original"], translation=row["translation"],
+            original=row["original"], translation=candidate,
             status="translated", locked=bool(row.get("locked")),
             id=row.get("id"), meta=meta,
             confidence=str(meta.get("confidence", "medium")),
@@ -1179,6 +1190,15 @@ class ReviewPage(QWidget):
         chip = self.filter_chips.get("needs_review")
         if chip is not None:
             chip.setVisible(needs_review > 0)
+            # 2026-08-26：胶囊隐藏但用户仍选中它时，若停留在「待审核」
+            # 筛选会陷入空表（选项看似消失）——自动回落到「全部」，让
+            # 空胶囊隐藏不留下被过滤的死态。仅处理本胶囊自身，避免在
+            # 无不合格条目时重进 _apply_filters 造成循环。
+            if needs_review == 0 and chip.isChecked() \
+                    and self.filter_chips.get("all") is not None:
+                self.filter_chips["all"].setChecked(True)
+                self._apply_filters()
+                return
         retranslated = sum(
             1 for r in rows if _row_meta(r).get("retranslated"))
         chip = self.filter_chips.get("retranslated")

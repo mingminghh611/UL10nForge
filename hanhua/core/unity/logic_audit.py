@@ -152,8 +152,14 @@ def logic_key_evidence(stripped: str, meta: dict,
     #     断裂（2026-08-15 多游戏实证：按键 UI 失灵、游戏卡住无法
     #     推进）。写回侧兜底（提取器漏判时仍安全）：全组保留原文
     #     （宁漏勿坏）。单次出现不 revert（静态按钮文本场景）。
+    #     2026-08-26 冲突缺口修复：F44 让非白名单按钮词（西语 'Jugar'
+    #     等 _WORD_CASE 单词式）可译，但此处只认 LOGIC_COMPARE_WORDS
+    #     （英语词表）——非英语按钮词与对象名同值重复时兜底失效。
+    #     把 _WORD_CASE 形态词并入（与提取器 shared_with_name 同源），
+    #     非英语按钮词同样受对象名保护。
+    from hanhua.core.unity.extractor import _WORD_CASE
     if (obj_reason == "code_heavy_display_word"
-            and low in LOGIC_COMPARE_WORDS
+            and (low in LOGIC_COMPARE_WORDS or _WORD_CASE.match(stripped))
             and obj_strings is not None
             and obj_strings.count(stripped) >= 2):
         return "revert", "display_word_shared_with_object_name"

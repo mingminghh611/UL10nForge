@@ -1124,25 +1124,58 @@ def _high_freq_threshold(freq: dict[str, int]) -> int:
 
 
 def _mono_object_name_span(raw: bytes) -> tuple[int, int] | None:
-    """MonoBehaviour/ScriptableObject 的 m_Name 字符串跨度（@28 长度头+内容）。
+    """MonoBehaviour/ScriptableObject 的 m_Name 字符串跨度（长度头+内容）。
 
     m_Name 是对象标识名（Inspector 标签/Find 查找键），翻译必断链
     （Rendezvous 2026-08-18 实证：场景对象名被 rawstr 路径翻译后，
     游戏代码按原名查找 → 过场流程空指针崩溃）。typetree 路径已有
     m_Name 排除（_IMMUTABLE_FIELD_NAMES），rawstr 路径此前缺失——
     此处按 MonoBehaviour 固定布局定位 m_Name 并排除。
+
+    2026-08-26 布局缺陷修复（写回按键失灵根因之一）：原实现只认新版
+    PPtr（4+8 字节）布局——m_GameObject(4+8) + m_Enabled(4) +
+    m_Script(4+8) = 28，m_Name 长度头在 @28。老 Unity（<2019.3）PPtr
+    为 4+4 字节：m_GameObject(4+4) + m_Enabled(4) + m_Script(4+4) = 20，
+    m_Name 长度头在 @20。老布局下 @28 读到的是 m_Name 内容区，n 大概率
+    非法 → 返回 None → m_Name 未被排除 → 对象名被当文本翻译 → 断链。
+    现对两种布局都尝试定位（新布局优先，头部校验失败再试老布局），
+    任一命中即返回该跨度。提取器与写回侧兜底共享本函数，一处修复
+    双层防线同时生效。
     """
-    if raw is None or len(raw) < 32:
+    if raw is None or len(raw) < 24:
         return None
-    # 头部校验：m_GameObject PPtr(fileID 0..2, pathID) + m_Enabled(0/1)
-    # + m_Script PPtr(fileID 0..2)——防止把「payload 从 @0 开始」的
-    # 假对象（如测试构造的 raw 池）误判 m_Name 位置。
+    # 两种布局的 m_Name 长度头偏移：新 PPtr(4+8)=28，老 PPtr(4+4)=20。
+    # 每种布局的头部校验字段偏移不同，分别尝试。
+    for name_off, go_off, en_off, sc_off in (
+        (28, 0, 12, 16),   # 新版 PPtr：m_GameObject@0(4+8) m_Enabled@12 m_Script@16(4+8)
+        (20, 0, 8, 12),    # 老版 PPtr：m_GameObject@0(4+4) m_Enabled@8 m_Script@12(4+4)
+    ):
+        span = _try_mono_name_at(raw, name_off, go_off, en_off, sc_off)
+        if span is not None:
+            return span
+    # 注：ScriptableObject 的 m_Name 在 @0，但「@0 起是合法长度头+可打印
+    # 内容」与「rawstr 对象从 @0 起的显示串」无法区分（_with_len 构造的
+    # 对象即此形态）——@0 检测会误伤真实显示文本，故不做。MonoBehaviour
+    # 两种布局（新/老 PPtr）的头部校验已覆盖对象名保护主战场。
+    return None
+
+
+def _try_mono_name_at(raw: bytes, name_off: int, go_off: int,
+                      en_off: int, sc_off: int) -> tuple[int, int] | None:
+    """在指定布局偏移下定位 MonoBehaviour m_Name 跨度。
+
+    头部校验：m_GameObject PPtr(fileID 0..2, pathID≥0) + m_Enabled(0/1)
+    + m_Script PPtr(fileID 0..2)——防止把「payload 从 @0 开始」的
+    假对象（如测试构造的 raw 池）误判 m_Name 位置。校验通过后读
+    m_Name 长度头（@name_off）与内容（@name_off+4），内容须为可打印
+    UTF-8 才认定是名字。
+    """
     try:
-        go_fid = struct.unpack_from("<i", raw, 0)[0]
-        go_pid = struct.unpack_from("<q", raw, 4)[0]
-        enabled = struct.unpack_from("<i", raw, 12)[0]
-        sc_fid = struct.unpack_from("<i", raw, 16)[0]
-        sc_pid = struct.unpack_from("<q", raw, 20)[0]
+        go_fid = struct.unpack_from("<i", raw, go_off)[0]
+        go_pid = struct.unpack_from("<q", raw, go_off + 4)[0]
+        enabled = struct.unpack_from("<i", raw, en_off)[0]
+        sc_fid = struct.unpack_from("<i", raw, sc_off)[0]
+        sc_pid = struct.unpack_from("<q", raw, sc_off + 4)[0]
     except (struct.error, IndexError):
         return None
     if go_fid not in (0, 1, 2) or go_pid < 0 or enabled not in (0, 1):
@@ -1150,18 +1183,18 @@ def _mono_object_name_span(raw: bytes) -> tuple[int, int] | None:
     if sc_fid not in (0, 1, 2) or sc_pid < 0:
         return None
     try:
-        n = struct.unpack_from("<i", raw, 28)[0]
+        n = struct.unpack_from("<i", raw, name_off)[0]
     except (struct.error, IndexError):
         return None
-    if not (0 < n < 500) or 32 + n > len(raw):
+    if not (0 < n < 500) or name_off + 4 + n > len(raw):
         return None
     try:
-        name = raw[32:32 + n].decode("utf-8")
+        name = raw[name_off + 4:name_off + 4 + n].decode("utf-8")
         if not all(c.isprintable() or c in " \t" for c in name):
             return None
     except Exception:  # noqa: BLE001 非 UTF-8 内容不是名字
         return None
-    return (28, 32 + n)
+    return (name_off, name_off + 4 + n)
 
 
 def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
@@ -1672,9 +1705,16 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
             # 名字+文本共享词结构——全组跳过保留原文（宁漏勿坏；
             # 此类词几乎都有本地化表副本可翻）。单次出现不跳
             # （hotel-paradise 静态按钮文本场景）。
+            # 2026-08-26 冲突缺口修复（写回按键失灵根因之一）：F44 让
+            # 非白名单按钮词（西语 'Jugar' 等 _WORD_CASE 单词式）可译，
+            # 但 shared_with_name 只认 DISPLAY_WORDS（英语词表）——非英语
+            # 按钮词与对象名同值重复时保护失效，对象名被改断链。把
+            # _WORD_CASE 形态词并入共享词判定（与 F44 的按钮文本证据
+            # 同源），非英语按钮词同样受对象名保护。
             shared_with_name = (
                 has_ui_evidence and not in_control_state
-                and stripped.casefold() in DISPLAY_WORDS
+                and (stripped.casefold() in DISPLAY_WORDS
+                     or _WORD_CASE.match(stripped))
                 and counts.get(stripped, 1) >= 2)
             if (_has_sentence_shape(stripped)
                     or (has_ui_evidence and not in_control_state

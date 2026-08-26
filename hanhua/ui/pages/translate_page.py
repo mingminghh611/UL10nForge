@@ -23,7 +23,8 @@ from hanhua.core.glossary import GlossaryStore
 from hanhua.core.knowledge import KnowledgeBase
 from hanhua.core.local_model import LocalModelError, sanitize_exception
 from hanhua.core.memory import settle_translation_memory
-from hanhua.core.models import (GameProfile, TextEntry, entry_from_row,
+from hanhua.core.models import (GameProfile, REVIEW_PENDING_OUTCOMES,
+                                TextEntry, entry_from_row,
                                 is_actionable_translation)
 from hanhua.core.prompts import build_system_prompt, collect_known_names
 from hanhua.core.quality import is_write_ready
@@ -429,6 +430,11 @@ class TranslatePage(QWidget):
         self.state.projectOpened.connect(self._on_project)
         self.state.projectAboutToChange.connect(self._on_project_changing)
         self.state.settingsChanged.connect(lambda: self._refresh_chips())
+        # 2026-08-26 写回按键失灵：写回使能并入 analysis_report.unblocked
+        # 判定后，报告变化（写回后 set_analysis_report 更新终态、或重新
+        # 分析）必须触发刷新，否则按钮状态与报告脱节（报告被阻断但按钮
+        # 仍亮着）。analysisChanged 是报告更新的唯一广播，接上。
+        self.state.analysisChanged.connect(lambda _r: self._refresh_chips())
         self._set_primary(self.start_btn)
         self._on_project(None)
 
@@ -1031,10 +1037,21 @@ class TranslatePage(QWidget):
                         flagged = review_summary["flagged"]
                         added = review_summary["pairs_added"]
                         rejected_n = len(review_summary["pairs_rejected"])
+                        # 口径修正（2026-08-26）：日志数字与审校页「待审核」
+                        # 筛选完全一致——审校页 filterAcceptsRow 用的是
+                        # 终态 review_outcome ∈ REVIEW_PENDING_OUTCOMES ∪
+                        # 机械失败（models.needs_review + status=="failed"），
+                        # 而非判定时刻的 MAJOR/CRITICAL 计数（flagged）。
+                        # 判为不合格但反馈重译+再审收敛到 APPROVED 系的
+                        # 条目不显示在待审核，若用 len(flagged) 报数，去
+                        # 审校页筛选总是少于日志所示。改用终态口径聚合。
+                        outcomes = review_summary.get("outcomes") or {}
+                        pending_manual = sum(
+                            outcomes.get(k, 0) for k in REVIEW_PENDING_OUTCOMES)
                         # Phase A：终态已由管线原子落库（store 的
                         # batch_update_translation_results），此处只做汇总日志
-                        line = (f"语义审核：不合格 {len(flagged)} 条"
-                                f"（已标「需要优化」，审校页可筛选）")
+                        line = (f"语义审核：不合格 {pending_manual} 条"
+                                f"（审校页「待审核」可筛选）")
                         if review_summary["blocked"]:
                             line += (f" · 重译未收敛阻塞 "
                                      f"{review_summary['blocked']} 条"
@@ -1064,10 +1081,10 @@ class TranslatePage(QWidget):
                         self.state.pipelinePhase.emit(
                             "review",
                             ("succeeded"
-                             if not flagged
+                             if not pending_manual
                              and not review_summary["errors"] else "warning"),
-                            (f"审校完成：不合格 {len(flagged)} 条"
-                             if flagged else "审校完成：全部通过"),
+                            (f"审校完成：不合格 {pending_manual} 条"
+                             if pending_manual else "审校完成：全部通过"),
                             f"重译收敛 {review_summary['converged']}"
                             f" · 阻塞 {review_summary['blocked']}"
                             if review_summary.get("retranslated")
@@ -1967,16 +1984,33 @@ class TranslatePage(QWidget):
         else:
             self._set_quality_reason(None)
         # 写回可用性与核心质量门同源，翻译/写回进行中禁用；SafetyBar
-        # 统一管理按钮状态与原因（§6.3：禁用时说明具体原因）
+        # 统一管理按钮状态与原因（§6.3：禁用时说明具体原因）。
+        # 2026-08-26 写回按键失灵根因：按钮使能只看 write_ready，而
+        # write_back() 点击守卫还要求 analysis_report.unblocked——两者
+        # 不一致时按钮「亮着但点了没反应」（报告被必需步骤阻断却仍可
+        # 点）。此处把报告阻断并入使能判定，与点击守卫同源，杜绝
+        # 亮着失灵。
+        report = self.state.analysis_report
+        # 报告存在但被必需步骤阻断 → 按钮禁用（与 write_back 点击守卫
+        # 同源，杜绝「亮着但点了没反应」）。report 为 None（测试/未分析
+        # 的假项目）不阻断，保持既有行为。
+        report_blocked = (report is not None and not report.unblocked)
         if self._running:
             self.write_safety.set_ready(False, "翻译进行中，写回已锁定")
         elif self._write_running:
             self.write_safety.set_ready(False, "写回进行中…")
         else:
-            if write_ready > 0:
+            if write_ready > 0 and not report_blocked:
                 self.write_safety.set_ready(
                     True,
                     f"{write_ready} 条已通过质量门，写回生成汉化副本并验证")
+            elif report_blocked:
+                blocked = [
+                    step.reason for step in (report.route if report else ())
+                    if step.required
+                    and step.status in {"blocked", "failed"}]
+                detail = blocked[0] if blocked else "分析报告尚未满足写回条件"
+                self.write_safety.set_ready(False, f"写回已阻断：{detail}")
             elif failed > 0:
                 self.write_safety.set_ready(
                     False, f"仍有 {failed} 条翻译失败，请先在审校页处理")

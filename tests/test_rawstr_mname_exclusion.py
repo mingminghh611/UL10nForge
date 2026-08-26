@@ -190,3 +190,59 @@ def test_writer_side_display_text_outside_mname_still_writes(tmp_path):
         _rawstr_entry("asset#g.assets#7/str/1", "Start", "开始", disp_off))
     assert result.entries == 1
     assert path.read_bytes()[disp_off:disp_off + len("开始".encode())] == "开始".encode()
+
+
+# ── 2026-08-26 布局缺陷修复回归：老 Unity PPtr(4+4) 与 ScriptableObject ──
+# 原 _mono_object_name_span 只认新版 PPtr(4+8) 布局（m_Name 长度头 @28）。
+# 老 Unity（<2019.3）PPtr 为 4+4 字节，m_Name 长度头在 @20；ScriptableObject
+# 无 m_GameObject/m_Enabled/m_Script 头部，m_Name 从 @0 起。两种布局下
+# 原实现都返回 None → m_Name 未被排除 → 对象名被当文本翻译 → 断链。
+# 修复后对三种布局都尝试定位，任一命中即排除。
+
+
+def _fake_mono_old_pptr(name: str, payload: bytes = b"\x00" * 16) -> bytes:
+    """老 Unity（<2019.3）PPtr(4+4) 布局的 MonoBehaviour。
+
+    m_GameObject(4+4) + m_Enabled(4) + m_Script(4+4) = 20，m_Name 长度头
+    在 @20、内容在 @24。
+    """
+    head = struct.pack("<i", 0) + struct.pack("<i", 0)   # m_GameObject PPtr(8)
+    head += struct.pack("<i", 1)                          # m_Enabled @8
+    head += struct.pack("<i", 0) + struct.pack("<i", 2000)  # m_Script PPtr(8) @12
+    name_b = name.encode("utf-8")
+    head += struct.pack("<i", len(name_b)) + name_b       # 长度头@20, 内容@24
+    head += b"\x00" * 4                                    # 对齐
+    return head + payload
+
+
+def test_mono_object_name_span_detects_old_pptr_layout():
+    """老 Unity PPtr(4+4)：m_Name 长度头在 @20、内容在 @24。"""
+    raw = _fake_mono_old_pptr("OldScene_Start")
+    span = _mono_object_name_span(raw)
+    assert span is not None
+    assert span == (20, 24 + len("OldScene_Start"))
+
+
+def test_mono_object_name_span_does_not_false_positive_on_display_string():
+    """@0 起是合法长度头+可打印内容 ≠ ScriptableObject m_Name——rawstr
+    对象从 @0 起的显示串（_with_len 构造形态）不得被误判为对象名跳过。
+    宁漏勿坏原则下，ScriptableObject 的 m_Name 保护不做 @0 检测（会误伤
+    真实显示文本），只靠 MonoBehaviour 两种布局的头部校验。"""
+    raw = struct.pack("<i", 12) + b"Hello world!".ljust(12, b"\x00")
+    assert _mono_object_name_span(raw) is None
+
+
+def test_raw_string_entries_excludes_old_pptr_mname():
+    """老布局 m_Name 不得进入翻译池（断链根因回归）。
+
+    注意：老布局对象（m_Enabled@8 非零）不被判为 scriptable 形态，孤立
+    显示串会被对象级过滤跳过（工具既有设计）——本测试只断言 m_Name
+    被排除（断链根因），不断言显示文本被提取。
+    """
+    raw = _fake_mono_old_pptr(
+        "OldName",
+        struct.pack("<i", 12) + b"Hello world!".ljust(12, b"\x00"),
+    )
+    entries = _raw_string_entries("test#1", 5, raw, {})
+    texts = [e.original for e in entries]
+    assert "OldName" not in texts
