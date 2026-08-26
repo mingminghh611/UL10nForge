@@ -2149,6 +2149,19 @@ class Project:
                 persisted += 1
             if persisted:
                 verification["reverted_persisted"] = persisted
+            # 写回 C10 补漏：语义回退（按钮名/对象名/逻辑键等宁漏勿坏）的
+            # 原文必须在翻译记忆中同步撤销——审后 settle_translation_memory
+            # 已把此类回退原文 promote 进 memory（pending=0），若不撤销，
+            # get_memory_hits 会在后续游戏翻译时把同一坏译文直接命中应用，
+            # 跨游戏重复引入按键失灵/断链（用户「知识库是否会导致后续失败」）。
+            # remove_memory_all 按原文跨 model/lang 全撤：此类原文无论哪个
+            # 模型翻译都危险，不得再自动命中。rejected_sources 不撤（纯写
+            # 失败，译文未必坏，且 reject 已阻断默认发布）。
+            purged = 0
+            for original in (set(v2.logic_reverted_sources) or set()):
+                purged += self.store.remove_memory_all(original)
+            if purged:
+                verification["reverted_memory_purged"] = purged
             self._last_analysis_report = final_report
             if progress_cb:
                 progress_cb(progress_total, progress_total)

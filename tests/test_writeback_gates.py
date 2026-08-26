@@ -359,6 +359,39 @@ def test_write_all_persists_reverted_locators_to_store(
     assert still["status"] == "translated"
 
 
+def test_write_all_purges_reverted_originals_from_translation_memory(
+        tmp_path, monkeypatch):
+    """写回 C10 补漏：语义回退（对象名/按钮名宁漏勿坏）原文须从翻译记忆
+    撤销——审后 settle_translation_memory 已把它 promote 进 memory
+    （pending=0），不回撤则 get_memory_hits 在后续游戏直接命中同一坏译文，
+    跨游戏重复引入按键失灵/断链。"""
+    _install_fake_raw_asset_environment(monkeypatch)
+    proj = _make_write_ready_project(tmp_path, monkeypatch)
+    # 预置一条已提交记忆（模拟审后 promote 的按钮名坏译文）
+    bad_original = "Start"
+    proj.store.add_memory(bad_original, "开始", "test-model", "→zh-CN")
+    assert proj.store.get_memory_hits(
+        [bad_original], "test-model", "→zh-CN")[bad_original] == "开始"
+    # 该原文进逻辑回退源
+    fake_outcome = WriteResult(
+        files=1, entries=1, attempted=2,
+        logic_reverted_sources={bad_original},
+        logic_reverted=1)
+
+    def capture_v2(store, game_dir, staging, typetree_generator=None):
+        return fake_outcome
+
+    monkeypatch.setattr("hanhua.core.project.write_back_v2", capture_v2)
+
+    result = proj.write_all()
+
+    assert result["verification"]["reverted_memory_purged"] == 1
+    # 记忆已撤——后续翻译不再命中
+    hits = proj.store.get_memory_hits(
+        [bad_original], "test-model", "→zh-CN")
+    assert bad_original not in hits
+
+
 def test_normalize_store_font_punctuation_persists(tmp_path, monkeypatch):
     """字体标点兼容归一化（hickory 实证回归）：译文里的 U+2013 – → U+2014 —
     持久化到 store，保留 status 与 meta，幂等且不误改无缺字条目。"""
