@@ -605,6 +605,170 @@ def translate_source_directive(
     return client.chat("", [{"role": "user", "content": "\n".join(lines)}])
 
 
+# 交互式单条直译专用：动作词身份表（知识库词表，跨游戏通用）——
+# TitleCase 动作词（Interact/Press/Use…）不是专名，注入 (词,词) 保留
+# 引用会让小模型把整条短语当术语回显（containment 实证）；裸翻译模型
+# 反而能直译（'互动保持'）。与 batch_translator._retry_with_proper_
+# name_reference 同源判定（避免重复 import batch_translator 引入重量级
+# 依赖，这里按需导入）。
+_ACTION_VERB_ZH = None
+_DISPLAY_WORDS_CASEFOLD = None
+
+# 英语常见功能词/代词/句首虚词：TitleCase 形态下仍非专名（'This is…'、
+# 'The…'、'And'），与 batch_translator 的 UI 词表互补——这些词在真实
+# 专名提取中极少是名称（人名/地名/品牌名几乎不落入此表）。
+_STOP_WORDS_CASEFOLD = frozenset(
+    w.casefold() for w in
+    "the a an and or but nor for yet so this that these those i you he she it "
+    "we they me him her us them my your his her its our their mine yours ours "
+    "to of in on at by with from into onto upon of per via as than then now "
+    "was were is are be been being am do does did will would shall should can "
+    "could may might must has have had not no off out up down over under again "
+    "further once here there when where why how all any both each few more most "
+    "other some such only own same very just too also quite rather".split())
+
+
+def _load_translate_helpers():
+    """按需加载专名提取用词表（延迟 import 规避循环依赖）。"""
+    global _ACTION_VERB_ZH, _DISPLAY_WORDS_CASEFOLD
+    if _ACTION_VERB_ZH is None:
+        from hanhua.core.knowledge import _ACTION_VERB_ZH as _AV
+        from hanhua.core.placeholders import DISPLAY_WORDS
+        _ACTION_VERB_ZH = _AV
+        _DISPLAY_WORDS_CASEFOLD = {w.casefold() for w in DISPLAY_WORDS}
+
+
+def proper_words_of(source: str) -> list[str]:
+    """提取原文中可注入保留引用的专名（TitleCase 且非 UI 词）。
+
+    与批量翻译 _retry_with_proper_name_reference 同源启发式。相邻
+    TitleCase 词合并为一个专名（'Doctor Strange'、'Out of the Loop'
+    的品牌名整段保留）；'This is a simple sentence'（无专名）→ 空，
+    不触发保留引用（真漏翻仍失败）。
+    """
+    _load_translate_helpers()
+    tokens = str(source or "").split()
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        w = tokens[i].strip(".,;:!?\"'()[]{}")
+        if (w and w[0].isupper() and w[1:].islower()
+                and len(w) >= 3
+                and w.casefold() not in _DISPLAY_WORDS_CASEFOLD
+                and w.casefold() not in _ACTION_VERB_ZH
+                and w.casefold() not in _STOP_WORDS_CASEFOLD
+                and w.casefold() not in BUILTIN_UI_SOURCE_TERMS):
+            merged = w
+            j = i + 1
+            while j < len(tokens):
+                nxt = tokens[j].strip(".,;:!?\"'()[]{}")
+                if (nxt and nxt[0].isupper() and nxt[1:].islower()
+                        and nxt.casefold() not in _DISPLAY_WORDS_CASEFOLD
+                        and nxt.casefold() not in _ACTION_VERB_ZH
+                        and nxt.casefold() not in _STOP_WORDS_CASEFOLD):
+                    merged += " " + nxt
+                    j += 1
+                else:
+                    break
+            out.append(merged)
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def _is_only_punct(text: str) -> bool:
+    """是否纯标点/符号残渣（AI 翻译剥原文回显后只剩 '.' 等无义标点）。
+
+    与审校页 _is_only_punctuation 同源（统一收口到 translator）。
+    """
+    import unicodedata
+    if not text:
+        return False
+    for ch in text:
+        if ch.isspace():
+            continue
+        cat = unicodedata.category(ch)
+        if cat[0] in ("L", "N"):
+            return False
+    return True
+
+
+def _direct_zh_directive(client, source: str,
+                         target_lang: str) -> str:
+    """中文「逐词补译」指令：整条原文作一个整体译名强制翻译（禁止回显）。
+
+    1.8B 模型把整段原文当整体回显时（'Out of the Loop studio' 等短
+    专名/品牌名），中文显式「整体译名」指令是翻译意图最强信号，实测
+    稳定产出 'Out of the Loop 工作室'。返回 strip 后的原文剥离结果。
+    """
+    try:
+        # 2026-08-26 用户实证「adsadsadasda 等实在无法翻译的文本」：中文
+        # 「整体译名」指令下 1.8B 仍回显整段原文（模型无法区分不可译文本
+        # 与名称）。明确禁止回显 + 若无法翻译就输出原文（保证绝无空输出，
+        # 交 translate_interactive 的 ④ 原文兜底；剥回显后为空也走兜底）。
+        direct = ("请将以下名称翻译为简体中文，直接输出译名，不得回显"
+                  "原文，不要添加任何解释。若确实无法翻译，直接输出原"
+                  "文本身：\n\n" + source)
+        out, _usage = client.chat("", [{"role": "user",
+                                        "content": direct}])
+    except Exception:  # noqa: BLE001 二次尝试失败交 ④ 原文兜底
+        return ""
+    return strip_prompt_echo(out, "", source)
+
+
+def translate_interactive(client, source_text: str,
+                          target_lang: str = "zh-CN",
+                          glossary=()) -> str:
+    """交互式单条直译：本地/API 通用多级降级链，返回最终译文（绝不空）。
+
+    供「翻译」工具页与审校页「AI 翻译」共用的稳健翻译入口（2026-08-26
+    修复「模型未产出译文」误报——1.8B 在英文 prompt 下回显简单原文被
+    strip_prompt_echo 剥空后误报未产出）：
+
+    ① 中文显式指令 + 术语引用（翻译意图最强信号，实测正确产出）；
+    ② 剥离指令前缀回显的干净译文为空 → 中文「逐词补译」指令（把整条
+       原文当整体译名，根治品牌名被剥成空串的误杀）；
+    ③ 仍空 → 专名「保留引用」重译（'Doctor Strange 是主角。'）；
+    ④ 全空 → 返回原文兜底（2026-08-26 用户要求「绝不能空输出」：模型
+       确无法产出时直接输出原文本，保证交互 UI 必有可见输出）。
+
+    各级输出经 strip_prompt_echo 清洗；纯标点残渣（剥原文回显后剩 '.'）
+    不算译文，继续降级。调用方负责本地模式 ensure_running 与 create_client。
+    """
+    from hanhua.core.quality import _CJK as _cjk_re
+    out, _usage = translate_source_directive(
+        client, source_text, target_lang, glossary)
+    clean = strip_prompt_echo(out, "", source_text)
+    # ① 有中文即视为有效译文（含 'Out of the Loop 工作室' 这类品牌名
+    # 保留 + 直译组合，正是期望译文）。无中文（纯英文/纯标点）视为回显
+    # 或不可译 → 继续降级（与批量翻译 untranslated_text 口径一致：
+    # 纯英文输出不视为已翻译）。
+    if clean.strip() and _cjk_re.search(clean):
+        return clean.strip()
+    # ② 中文「逐词补译」指令（整条原文作整体译名，禁止回显）。纯标点
+    # 残渣不算译文 → 继续 ③（2026-08-26 修复：此前的 `return ""` 短路
+    # 让 ③ 永不触发，与「继续降级」注释矛盾）。
+    clean2 = _direct_zh_directive(client, source_text, target_lang)
+    if not _is_only_punct(clean2) and clean2.strip():
+        return clean2.strip()
+    # ③ 专名「保留引用」重译：'Markiplier was here' 注入 (Markiplier,
+    # Markiplier) → 模型保留专名只译其余部分 → 'Markiplier 曾来过这里'
+    proper_words = proper_words_of(source_text)
+    if proper_words:
+        try:
+            ref_out, _u3 = translate_source_directive(
+                client, source_text, target_lang,
+                tuple((w, w) for w in proper_words))
+            clean3 = strip_prompt_echo(ref_out, "", source_text)
+            if not _is_only_punct(clean3) and clean3.strip():
+                return clean3.strip()
+        except Exception:  # noqa: BLE001 引用重试失败交 ④ 原文兜底
+            pass
+    # ④ 全空 → 返回原文（用户要求「绝不能空输出」）。
+    return str(source_text or "").strip()
+
+
 def _is_prompt_line(line: str, sys_line: str) -> bool:
     """输出行是否回显了提示词行（含模型常见变形）。
 

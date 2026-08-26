@@ -30,7 +30,7 @@ from hanhua.core.quality import is_write_ready
 from hanhua.core.reviewer import review_entries
 from hanhua.core.translator import create_client
 from hanhua.ui.app_state import AppState
-from hanhua.ui.design_system import TOKENS, motion_enabled
+from hanhua.ui.design_system import motion_enabled
 from hanhua.ui.widgets import (ActivityFeed, PageHeader,
                                SafetyBar, Toast, Worker)
 
@@ -698,10 +698,12 @@ class TranslatePage(QWidget):
             if self.state.is_current_project(p, g) else None)
         # 写回后地毯式审计进度（2026-08-26 任务四：audit_writeback 逐文件
         # 确定性 PASS/FAIL + 模型软复核 FLAG/不可用，worker 线程经此信号
-        # 回主线程——写回审计在 GUI 实时处理流/运行记录中必须可见）
+        # 回主线程——写回审计在 GUI 实时处理流/运行记录中必须可见。
+        # 2026-08-26 用户要求：实时处理流 AND 运行记录都要有信息显示，
+        # 与审校/翻译一致——此处同时写入 activity_feed 与 log_view。）
         worker.signals.audit.connect(
             lambda status, text, p=project, g=generation:
-            self.activity_feed.append_event(status, text)
+            self._on_audit_event(status, text)
             if self.state.is_current_project(p, g) else None)
         worker.signals.log.connect(
             lambda line, p=project, g=generation:
@@ -1292,6 +1294,24 @@ class TranslatePage(QWidget):
         Toast.show(self, line.replace(" · ", "\n"), "success",
                    duration_ms=8000)
 
+    def _on_audit_event(self, status: str, text: str) -> None:
+        """写回审计事件：同时进实时处理流与运行记录（用户要求两者可见）。
+
+        2026-08-26 用户实证「写回检查看不到实际信息」：audit 信号此前只
+        进 activity_feed（实时处理流），运行记录（log_view）没有——与
+        审校/翻译不一致。统一：状态标签（running/success/warning/error）
+        驱动活动流样式，明细行同步追加到运行记录。终态（success/warning/
+        error）除活动流外再 Toast 一次，保证用户一定能看到审计结论。
+        """
+        self.activity_feed.append_event(status, text)
+        self.log_view.appendPlainText(text)
+        if status in {"success", "warning", "error"}:
+            Toast.show(
+                self, text,
+                "success" if status == "success" else
+                "warning" if status == "warning" else "error",
+                duration_ms=8000)
+
     def _on_finished(self, stats):
         self._running = False
         # 先复位再广播：审校页挂起的 reload 由本次 entriesChanged 补跑
@@ -1474,6 +1494,16 @@ class TranslatePage(QWidget):
             lambda line, p=project, g=generation:
             self.log_view.appendPlainText(line)
             if self.state.is_current_project(p, g) else None)
+        # 写回后地毯式审计进度回主线程（2026-08-26 用户实证「写回检查
+        # 看不到实际信息」的根因：audit.emit 发生在 _write_worker 内，但
+        # 此前只在 start()（翻译 worker）挂 audit.connect，写回按钮触发的
+        # 本 worker 从未连接 → 审计信息全部丢弃。这里接上：_write_worker
+        # 内 signals.audit.emit 的 running/逐文件 info/success/warning/error
+        # 经 _on_audit_event 同时进实时处理流与运行记录。）
+        worker.signals.audit.connect(
+            lambda status, text, p=project, g=generation:
+            self._on_audit_event(status, text)
+            if self.state.is_current_project(p, g) else None)
         worker.signals.finished.connect(
             lambda _result, w=worker: self._on_write_drained(w))
         worker.signals.error.connect(
@@ -1566,6 +1596,14 @@ class TranslatePage(QWidget):
                         f"写回审计通过：{len(audit_res.files)} 文件结构完整"
                         f" · 模型复核 FLAG {len(audit_res.model_flags)} 条"
                         f"（软复核，详见 writeback/audit.txt）")
+                elif audit_res.model_unavailable:
+                    # 2026-08-26 明确区分「模型可用无 FLAG」与「模型不可用
+                    # 仅确定性审计」——用户要求写回检查信息明确，不可用是
+                    # 覆盖缺口，必须显式告知而非静默成功。
+                    signals.audit.emit(
+                        "warning",
+                        f"写回审计通过：{len(audit_res.files)} 文件结构完整"
+                        f" · 审校模型服务不可用（仅确定性审计，报告已留档）")
                 else:
                     signals.audit.emit(
                         "success",

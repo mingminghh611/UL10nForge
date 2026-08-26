@@ -31,11 +31,9 @@ from hanhua.core.manual_correction import manual_correction
 from hanhua.core import models
 from hanhua.core.models import (TextEntry, entry_from_row,
                                 is_actionable_translation)
-from hanhua.core.prompts import build_system_prompt
 from hanhua.core.reviewer import review_entries
-from hanhua.core.translator import (create_client, strip_prompt_echo,
-                                    merge_translation_references,
-                                    translate_source_directive)
+from hanhua.core.translator import (create_client, translate_interactive,
+                                    merge_translation_references)
 from hanhua.ui.app_state import AppState
 from hanhua.ui import theme
 from hanhua.ui.design_system import TOKENS
@@ -59,53 +57,6 @@ def _row_meta(row: dict) -> dict:
     except (json.JSONDecodeError, TypeError):
         return {}
     return value if isinstance(value, dict) else {}
-
-
-def _is_only_punctuation(text: str) -> bool:
-    """是否纯标点/符号残渣（AI 翻译剥原文回显后只剩 '.' 等无义标点）。"""
-    if not text:
-        return False
-    import unicodedata
-    for ch in text:
-        if ch.isspace():
-            continue
-        cat = unicodedata.category(ch)
-        if cat[0] in ("L", "N"):
-            return False
-    return True
-
-
-def _proper_words_of(text: str) -> list[str]:
-    """提取原文中可注入保留引用的专名（TitleCase 非 UI 词）。
-
-    批量翻译 _retry_with_proper_name_reference 同源启发式：TitleCase
-    且非 UI 词典词。'Doctor Strange' 命中 → 注入保留引用后模型识别
-    专名只保留、翻译其余部分。普通句子（'This is a simple sentence'
-    无专名）→ 返回空，不触发保留引用（真漏翻仍失败）。
-    """
-    import re as _re
-    _UI_WORDS = {
-        "settings", "quit", "resolution", "volume", "resume", "play",
-        "controls", "back", "hello", "default", "interact", "new", "game",
-        "exit", "save", "load", "continue", "options", "inventory", "attack",
-        "quest", "enemy", "level", "screen", "select", "confirm", "cancel",
-        "main", "menu", "this", "the", "and", "but", "for", "with", "into",
-    }
-    tokens = text.split()
-    out = []
-    i = 0
-    while i < len(tokens):
-        w = tokens[i].strip(".,;:!?\"'()[]{}")
-        if (w and w[0].isupper() and w[1:].islower()
-                and len(w) >= 3 and w.casefold() not in _UI_WORDS
-                and w not in out):
-            # 相邻 TitleCase 词合并为一个专名（'Doctor Strange'、
-            # 'Out of the Loop' 中的 Loop——但 'Out of the Loop' 是
-            # 品牌名，'Loop' 单独注入也会让模型保留该词 → 保持简单，
-            # 只注入独立的 TitleCase 词）
-            out.append(w)
-        i += 1
-    return out
 
 
 # 审核待处理终态（#38/#47）：「待审核」筛选/胶囊以此为准。
@@ -953,79 +904,19 @@ class ReviewPage(QWidget):
                           local_model, refs, target_lang: str) -> str:
         """后台线程：本地模式先确保服务运行，再单条翻译。
 
-        多级降级（2026-08-26 修复「模型未产出译文」误报——1.8B 模型在
-        英文 prompt 下回显简单原文（Out of the Loop studio 实证），
-        strip_prompt_echo 剥空后误报「未产出译文」）：
-        ① 中文显式指令 + 术语引用（翻译意图最强信号，实测正确产出）；
-        ② 剥离指令前缀回显的干净译文，空 → 中文「逐词补译」指令（把
-        原文当作一个专名整体翻译，根治 'Out of the Loop 工作室' 被
-        strip 剥成空串的误杀——剥离只针对「整段回显原文」）；
-        ③ 仍空 → 专名「保留引用」重译（'Doctor Strange 是主角。'）；
-        ④ 全空 → 返回空串交 UI 提示（模型确无法产出，非回显误报）。
+        2026-08-26 修复「模型未产出译文」误报——1.8B 模型在英文 prompt
+        下回显简单原文（'Out of the Loop studio' 实证）被剥空后误报未
+        产出。统一收口到 translator.translate_interactive 多级降级链
+        （中文显式指令 → 整体译名 → 专名保留引用），与「翻译」工具页
+        同源，消除此前的品牌名拆分、重复重试、异常处理不一致。返回空串
+        交 UI 提示（模型确无法产出，非回显误报）。
         """
-
         if api.mode == "local":
             runtime = local_model.ensure_running(api)
             api = replace(api, base_url=runtime.endpoint,
                           api_key=runtime.api_key, model=runtime.model)
         client = create_client(api)
-        out, _usage = translate_source_directive(
-            client, original, target_lang, refs)
-        clean = strip_prompt_echo(out, "", original)
-        # ① 回显剥空可能残留纯标点（'Doctor Strange is the main
-        # character' 裸 prompt 回显整段 → 剥成 '.' 无义）——纯标点残渣
-        # 不算译文，继续走降级
-        if clean.strip() and not _is_only_punctuation(clean):
-            return clean
-        # 空：尝试中文「逐词补译」指令（整条原文作整体译名，禁止回显）
-        direct = (
-            "请将以下名称翻译为简体中文，直接输出译名，不得回显原文，"
-            "不要添加任何解释：\n\n" + original)
-        try:
-            out2, _usage2 = client.chat(
-                "", [{"role": "user", "content": direct}])
-        except Exception:  # noqa: BLE001 二次尝试失败同样返回空
-            return ""
-        clean2 = strip_prompt_echo(out2, "", original)
-        # ① 回显剥空（'Doctor Strange is the main character' 裸 prompt
-        # 回显整段 → 剥成 '.' 无义）仍可能残留标点——滤掉纯标点残渣
-        # ② 中文「逐词补译」指令实测已能正确产出（'奇异博士是主角。'）
-        #    ——走此路径直接返回，不再二次提示
-        if _is_only_punctuation(clean2):
-            return ""
-        if clean2.strip():
-            return clean2.strip()
-        # 仍空：注入专名「保留引用」重译整句（英文 prompt 下回显整段
-        # 原文的根因是模型把整句当专名——给模型 (专名, 专名) 保留引用
-        # 后它识别出专名只需保留，其余部分才翻译：'Doctor Strange 是
-        # 主角。'。纯回显 + 剩余部分确实可译时触发，避免二次提示）
-        proper_words = _proper_words_of(original)
-        if proper_words:
-            try:
-                ref_out, _usage3 = translate_source_directive(
-                    client, original, target_lang,
-                    tuple((w, w) for w in proper_words))
-            except Exception:  # noqa: BLE001 引用重试失败交 UI 提示
-                return ""
-            clean3 = strip_prompt_echo(ref_out, "", original)
-            if _is_only_punctuation(clean3):
-                return ""
-            return clean3.strip()
-        # 仍空且无专名可保留：原句可能本就是难翻译的短专名/品牌名
-        # （'Out of the Loop studio' 之类）——把整条原文作一个整体译名
-        # 强制翻译（已证明对 'Out of the Loop工作室' 有效），不交 UI
-        # 提示，而是用「逐词补译」指令的重试（不同温度采样可能成功）。
-        if refs:
-            try:
-                ref_out, _usage4 = translate_source_directive(
-                    client, original, target_lang, refs)
-            except Exception:  # noqa: BLE001 重试失败交 UI 提示
-                return ""
-            clean4 = strip_prompt_echo(ref_out, "", original)
-            if _is_only_punctuation(clean4):
-                return ""
-            return clean4.strip()
-        return ""
+        return translate_interactive(client, original, target_lang, refs)
 
     def _on_ai_translate_done(self, result) -> None:
         self._ai_translating = False
@@ -1033,12 +924,18 @@ class ReviewPage(QWidget):
         self.ai_translate_btn.setText("AI 翻译")
         out = str(result or "").strip()
         if not out:
-            # 2026-08-26 修复误报：中文显式指令 + 术语引用 + 逐词补译
-            # 已尽（多级降级全部为空才走到这里——模型确无法产出，
-            # 而非仅回显原文被剥空）。提示不再暗示「回显原文被剥」，
-            # 因为回显原文恰恰是被新剥离逻辑正确保留下来的唯一情形。
-            Toast.show(self, "模型无法产出译文，请人工填写", "warning")
-            return
+            # 2026-08-26：translate_interactive 已尽四级降级（中文指令 →
+            # 整体译名 → 专名引用 → 原文兜底）——走到这里（out 为空）只剩
+            # 一种可能：原文本身为空。译文区绝不空白，仍填充原文本让用户
+            # 明确可见（绝无空输出）。
+            if self._current_row is not None:
+                out = str(self.model._rows[self._current_row]
+                          .get("original") or "")
+            if out:
+                Toast.show(self, "未能产出译文，已填回原文供参考", "warning")
+            else:
+                Toast.show(self, "原文为空，无可翻译内容", "warning")
+                return
         self.detail_edit.setPlainText(out)
         self._detail_dirty = True
         Toast.show(self, "AI 译文已填充，确认无误后点「保存译文」", "success")

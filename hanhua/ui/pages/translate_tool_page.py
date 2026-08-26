@@ -19,9 +19,8 @@ from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel,
 
 from hanhua.core.local_model import LocalModelError, discover_model
 from hanhua.core.prompts import build_system_prompt
-from hanhua.core.translator import (create_client, strip_prompt_echo,
-                                    translate_source_directive,
-                                    merge_translation_references)
+from hanhua.core.translator import (create_client, merge_translation_references,
+                                    strip_prompt_echo, translate_interactive)
 from hanhua.core.glossary import GlossaryStore
 from hanhua.ui.app_state import AppState
 from hanhua.ui.design_system import TOKENS
@@ -49,6 +48,20 @@ def _is_symbol_only(text: str) -> bool:
         if cat[0] in ("L", "N"):
             return False
     return bool(text.strip())
+
+
+def _is_only_punctuation(text: str) -> bool:
+    """是否纯标点/符号残渣（AI 翻译剥原文回显后只剩 '.' 等无义标点）。"""
+    if not text:
+        return False
+    import unicodedata
+    for ch in text:
+        if ch.isspace():
+            continue
+        cat = unicodedata.category(ch)
+        if cat[0] in ("L", "N"):
+            return False
+    return True
 
 
 def _load_glossary_pairs(app_dir) -> list[tuple[str, str]]:
@@ -296,12 +309,19 @@ class TranslateToolPage(QWidget):
                     local_model, app_dir):
         """后台线程：本地模式先确保服务运行，然后逐块翻译。
 
-        本地模型优先走 Hy-MT2 原生中文指令 prompt（translate_source_
-        directive）——英文提示词下 1.8B 模型对简单原文稳定回显（Out of
-        the Loop studio 实证），中文显式指令强制输出译文。同时注入术语
-        库引用（翻译意图信号 + 术语译名约束）。用户自定义提示词
-        （system 非空）时仍用原 chat 路径（保留自定提示词控制权）。
-        输出经 strip_prompt_echo 清洗提示词/原文回显。
+        2026-08-26 根治「模型回显提示词」：根因是本地 1.8B 模型的
+        LocalOpenAIClient.chat 会把 system 提示词**合并进 user 消息**
+        （Hy-MT2 无 system-prompt 契约），而本页默认提示词是长角色提示词
+        （build_system_prompt）——模型把整段提示词当 user 输入回显塞满
+        译文栏（用户多次实证 wada/setting/out of the loop 均回显整段
+        提示词）。因此：
+
+        - 本地模式：**一律不走 system**——直接走 translate_interactive
+          共享多级降级链（纯中文短指令，无长提示词，1.8B 稳定产译文）。
+          自定义提示词对本地 1.8B 是回显之源，故本地模式下忽略 system。
+        - API 模式：模型支持独立 system 消息（Anthropic/OpenAI），才
+          透传自定义提示词；输出经 strip_prompt_echo 清洗提示词/原文回显，
+          回显整段提示词时剥空交降级链兜底。
         """
         if api.mode == "local":
             runtime = local_model.ensure_running(api)
@@ -311,22 +331,19 @@ class TranslateToolPage(QWidget):
         refs = merge_translation_references(_load_glossary_pairs(app_dir))
         parts = []
         for block in blocks:
-            if api.mode == "local" and not system:
-                text, _usage = translate_source_directive(
-                    client, block, "zh-CN", refs)
-                if not strip_prompt_echo(text, "", block).strip():
-                    # 中文指令下仍回显原文（'Out of the Loop studio'
-                    # 品牌名被当整体专名回显）→ 逐词补译指令（整条原文
-                    # 作整体译名，禁止回显）
-                    text2, _usage2 = client.chat(
-                        "", [{"role": "user", "content":
-                              "请将以下名称翻译为简体中文，直接输出译名，"
-                              "不得回显原文，不要添加任何解释：\n\n" + block}])
-                    text = text2
-            else:
+            if api.mode == "api" and system and system.strip():
+                # API 模式支持独立 system：自定义提示词直译，回显清洗
                 text, _usage = client.chat(
                     system, [{"role": "user", "content": block}])
-            parts.append(strip_prompt_echo(text, system, block))
+                cleaned = strip_prompt_echo(text, system, block)
+                if not cleaned.strip() or _is_only_punctuation(cleaned):
+                    cleaned = translate_interactive(client, block, "zh-CN",
+                                                    refs)
+                parts.append(cleaned)
+            else:
+                # 本地模式（及未填提示词的 API）一律走共享降级链
+                parts.append(
+                    translate_interactive(client, block, "zh-CN", refs))
         return parts
 
     @staticmethod
@@ -351,17 +368,13 @@ class TranslateToolPage(QWidget):
         self._running = False
         self.translate_btn.setEnabled(True)
         self.translate_btn.setText("翻译")
+        # 2026-08-26 用户要求「绝不能空输出」：translate_interactive 已
+        # 保证每段非空（无法翻译时返回原文兜底）；此处再兜底一次——任何
+        # 空段用对应原文段填充，译文区绝不空白。
+        parts = [p if str(p).strip() else src
+                 for p, src in zip(parts, blocks)]
         joined = "\n".join(parts)
         self.dst_edit.setPlainText(joined)
-        # 2026-08-15 用户实证：难翻译内容模型直接不输出（全空）或
-        # 仅回显原文被剥空——译文区一片空白无提示，用户以为卡死。
-        # 空结果显式提示（回显剥空同理），并跳过空历史记录。
-        if not any(str(p).strip() for p in parts):
-            self.status_label.setText("完成 · 模型未产出译文（可能无法翻译"
-                                      "或仅回显原文，可尝试简化输入）")
-            Toast.show(self, "模型未产出译文：可能无法翻译或仅回显原文，"
-                             "可尝试简化输入", "warning")
-            return
         self.status_label.setText(f"完成 · {len(parts)} 段")
         api = self.state.api
         model = ((self._active_local_model

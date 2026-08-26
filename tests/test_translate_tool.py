@@ -44,7 +44,13 @@ def _state(tmp_path: Path) -> AppState:
 
 
 class _FakeClient:
-    """假翻译客户端：译文 = 原文前缀「译：」。"""
+    """假翻译客户端：译文 = 原文前缀「译：」。
+
+    2026-08-26 起工具页本地模式走共享降级链 translate_interactive，其
+    经 translate_source_directive 优先调用客户端 translate_text（Hy-MT2
+    契约，真实 LocalOpenAIClient 有该方法）——假客户端补齐同名方法以
+    匹配真实契约。
+    """
 
     def __init__(self, config=None):
         self.config = config
@@ -53,6 +59,10 @@ class _FakeClient:
     def chat(self, system, messages):
         self.calls.append((system, messages))
         return "译：" + (messages[0]["content"] or ""), None
+
+    def translate_text(self, source_text, target_lang, glossary=()):
+        self.calls.append(("translate_text", source_text))
+        return "译：" + source_text, None
 
 
 def _fake_client_factory(client):
