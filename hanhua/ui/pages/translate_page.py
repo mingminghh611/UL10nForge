@@ -705,10 +705,6 @@ class TranslatePage(QWidget):
             lambda status, text, p=project, g=generation:
             self._on_audit_event(status, text)
             if self.state.is_current_project(p, g) else None)
-        worker.signals.log.connect(
-            lambda line, p=project, g=generation:
-            self.log_view.appendPlainText(line)
-            if self.state.is_current_project(p, g) else None)
         worker.signals.finished.connect(
             lambda stats, p=project, g=generation:
             self._on_finished(stats)
@@ -1591,11 +1587,14 @@ class TranslatePage(QWidget):
                         + (f" 等 {len(audit_res.failed_files)} 个文件"
                            if len(audit_res.failed_files) > 5 else ""))
                 elif audit_res.model_flags:
+                    flags = ", ".join(
+                        f"{rel}[{verdict}]" for rel, verdict, _ in
+                        audit_res.model_flags[:5])
                     signals.audit.emit(
                         "warning",
                         f"写回审计通过：{len(audit_res.files)} 文件结构完整"
                         f" · 模型复核 FLAG {len(audit_res.model_flags)} 条"
-                        f"（软复核，详见 writeback/audit.txt）")
+                        f"（{flags}…，软复核，详见 writeback/audit.txt）")
                 elif audit_res.model_unavailable:
                     # 2026-08-26 明确区分「模型可用无 FLAG」与「模型不可用
                     # 仅确定性审计」——用户要求写回检查信息明确，不可用是

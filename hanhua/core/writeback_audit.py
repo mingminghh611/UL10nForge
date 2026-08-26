@@ -482,9 +482,15 @@ def _encode_from_store(body: str, src: Path, f: dict) -> bytes:
 
 def audit_deterministic(store, game_dir: Path, out_dir: Path,
                         entries_by_file: dict[str, list[dict]],
-                        *, font_enabled: bool = False
+                        *, font_enabled: bool = False,
+                        on_note: Callable[[str], None] | None = None,
                         ) -> list[FileAudit]:
-    """第 1 层：只读确定性结构审计所有文本文件（不修改任何文件）。"""
+    """第 1 层：只读确定性结构审计所有文本文件（不修改任何文件）。
+
+    on_note 逐文件回调（2026-08-26 用户要求写回审计实时处理流信息更
+    多更明确）：每个文件审计完即报「PASS/FAIL + 译文条数 + 问题摘要」，
+    让 GUI 活动流逐文件可见进度，而非只等终态一条。
+    """
     audits: list[FileAudit] = []
     game_root = game_dir.resolve()
     out_root = out_dir.resolve()
@@ -576,6 +582,19 @@ def audit_deterministic(store, game_dir: Path, out_dir: Path,
                 audit.render_consistent = False
                 audit.detail.append("渲染/编码异常")
         audits.append(audit)
+        if on_note:
+            if audit.passed:
+                on_note(f"[写回审计] PASS {rel}（{audit.changed_entries} 条译文）")
+            else:
+                issues = []
+                for attr, label in _ISSUE_LABELS:
+                    if not getattr(audit, attr):
+                        issues.append(label)
+                if audit.placeholder_lost:
+                    issues.append(f"占位符丢失 {len(audit.placeholder_lost)} 条")
+                if audit.ref_field_lost:
+                    issues.append(f"引用字段被译 {len(audit.ref_field_lost)} 条")
+                on_note(f"[写回审计] FAIL {rel}：{'、'.join(issues)}")
     return audits
 
 
@@ -780,7 +799,7 @@ def audit_writeback(store, game_dir: Path, out_dir: Path,
 
     audits = audit_deterministic(
         store, game_dir, out_dir, entries_by_file,
-        font_enabled=font_enabled)
+        font_enabled=font_enabled, on_note=on_note)
     result = AuditResult(files=audits)
     result.needs_rewrite = bool(result.failed_files)
 
