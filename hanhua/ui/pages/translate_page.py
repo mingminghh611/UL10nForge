@@ -884,8 +884,12 @@ class TranslatePage(QWidget):
                 # 一次模型译文会扇出应用到所有同文条目——活动流的
                 # 「本批完成 N 条」统计的是真实条目数，因此可能出现一批
                 # 完成几十条（同文组大）或两三条（几乎无重复）的正常波动。
-                on_log(f"去重后按唯一文本分批：同原文条目共享一次译文"
-                       f"（每批 {batch_size} 条唯一文本）")
+                if api.mode == "local":
+                    on_log(f"本地模型逐条翻译：并发 {concurrency} 路 · "
+                           f"进度粒度 {batch_size} 条（本地模式不分批请求，"
+                           "「每批」仅控制进度刷新粒度）")
+                else:
+                    on_log(f"每批 {batch_size} 条唯一文本")
                 if total_pending == 0:
                     low_pending = sum(
                         1 for e in entries
@@ -898,7 +902,10 @@ class TranslatePage(QWidget):
                     else:
                         on_log("没有待翻译条目（全部已翻译或已锁定），"
                                "可直接点击写回游戏")
-                on_log(f"模型：{api.model} · 并发 {concurrency} · 每批 {batch_size} 条")
+                if api.mode == "local":
+                    on_log(f"模型：{api.model} · 并发 {concurrency} 路（逐条请求）")
+                else:
+                    on_log(f"模型：{api.model} · 并发 {concurrency} · 每批 {batch_size} 条")
                 on_log(f"请求地址：{client.url}")
                 stats = translator.run(entries, progress_cb=on_progress)
                 run.detach_translator()

@@ -113,7 +113,28 @@ class BaseClient:
         self.config = config
         provider = "openai" if config.mode == "local" else config.provider
         self.url = normalize_base_url(config.base_url, provider)
-        self._factory = transport_factory or (lambda: httpx.Client(timeout=config.timeout))
+        # 连接复用（2026-08-29 实证：本地逐条翻译模式下 _post 每请求
+        # 新建 httpx.Client → 每次 TCP 握手 + TLS（本地也走一次 loopback
+        # 连接建立），单条 ~1.9s 总开销中模型推理只占 ~100ms，连接建立
+        # 占可观比例。默认工厂改为实例级持久连接（keep-alive），多线程
+        # 共享一个 httpx.Client 是线程安全的。注入 transport_factory 的
+        # 调用方（测试/mock）保持原「每次新开」语义不变。
+        self._owned_client: httpx.Client | None = None
+        if transport_factory is None:
+            self._owned_client = httpx.Client(timeout=config.timeout)
+            self._factory = lambda: self._owned_client
+        else:
+            self._factory = transport_factory
+
+    def close(self) -> None:
+        """释放持久连接（长任务结束后调用；未持有则无操作）。"""
+        client = self._owned_client
+        self._owned_client = None
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001 关闭失败不阻断
+                pass
 
     def _post(self, url: str, headers: dict, payload: dict) -> tuple[httpx.Response, Usage]:
         last_err: Exception | None = None
@@ -121,6 +142,9 @@ class BaseClient:
             try:
                 with self._factory() as client:
                     resp = client.post(url, headers=headers, json=payload)
+                    # 持久连接：读响应体后 with 块退出只是归还不关连接；
+                    # resp.json() 需在块内完成（连接归还后流不可读）
+                    body = resp.json()
                 if resp.status_code in RETRY_STATUS:
                     raise _RetryableStatusError(
                         f"HTTP {resp.status_code}: {resp.text[:200]}")
@@ -128,12 +152,15 @@ class BaseClient:
                     # 4xx / 502：明确拒绝或服务坏状态 → 立即失败，不重试
                     raise _FatalStatusError(
                         f"HTTP {resp.status_code}: {resp.text[:300]}")
-                return resp, self._parse_usage(resp.json())
+                return resp, self._parse_usage(body)
             except _FatalStatusError:
                 raise
             except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                 # F42：服务不可达（进程死亡/未启动）→ 快速失败，
-                # 重试无意义（服务不会自己回来），交批量层重启
+                # 重试无意义（服务不会自己回来），交批量层重启。
+                # 持久连接遇服务重启会拿到陈旧连接的 ConnectError/
+                # RemoteProtocolError → 清空连接池后重试一次
+                self._reset_owned_client()
                 raise ServiceUnavailableError(
                     f"翻译服务不可达：{type(e).__name__}") from e
             except httpx.ReadTimeout as e:
@@ -146,6 +173,17 @@ class BaseClient:
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(1.5 * (2 ** attempt))
         raise RuntimeError(f"请求失败（重试{MAX_RETRIES}次）：{last_err}")
+
+    def _reset_owned_client(self) -> None:
+        """服务重启后清空持久连接池（陈旧 keep-alive 连接会持续失败）。"""
+        client = self._owned_client
+        if client is not None:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._owned_client = httpx.Client(timeout=self.config.timeout)
+            self._factory = lambda: self._owned_client
 
     def _parse_usage(self, data: dict) -> Usage:
         raise NotImplementedError
@@ -173,7 +211,8 @@ class OpenAIClient(BaseClient):
                 raise
             del payload["response_format"]
             resp, usage = self._post(self.url, headers, payload)
-        content = resp.json()["choices"][0]["message"]["content"]
+        body = resp.json()
+        content = body["choices"][0]["message"]["content"]
         return content, usage
 
     def _parse_usage(self, data: dict) -> Usage:
@@ -207,7 +246,8 @@ class LocalOpenAIClient(OpenAIClient):
             with self._factory() as client:
                 resp = client.get(base + "/props", timeout=10, headers={
                     "Authorization": f"Bearer {self.config.api_key}"})
-            if resp.status_code == 200:
+                if resp.status_code != 200:
+                    raise RuntimeError(f"props status {resp.status_code}")
                 ctx = (resp.json().get("default_generation_settings")
                        or {}).get("n_ctx")
                 if isinstance(ctx, int) and ctx > 0:

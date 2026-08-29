@@ -34,10 +34,11 @@ def test_local_parallel_defaults_and_hardware_caps():
     automatic = ApiConfig(local_concurrency=0)
     excessive = ApiConfig(local_concurrency=99)
 
-    # 默认单槽（并发 1）：本地推理服务是单槽串行，多 slot 的 KV 显存按倍数
-    # 占用且请求排队，长文本会触发 CUDA OOM / 排队超时雪崩 → 后半段全部
-    # request_error。显存富余用户可在设置里手动调高 local_concurrency。
-    assert resolve_local_parallel(automatic, "gpu") == 1
+    # GPU 默认双槽（2026-08-29）：单槽时模型 p50 ~100ms 推理大部分时间在
+    # 等客户端的下一条请求，双槽吞吐接近翻倍；CPU 推理本身跑满核心保持
+    # 单槽。上限不放宽（GPU 4 / CPU 2）——多槽 KV 显存倍增 + 长文本排队
+    # 超时雪崩的风险边界仍在；显存紧张可手动调回 local_concurrency=1。
+    assert resolve_local_parallel(automatic, "gpu") == 2
     assert resolve_local_parallel(automatic, "cpu") == 1
     assert resolve_local_parallel(excessive, "gpu") == 4
     assert resolve_local_parallel(excessive, "cpu") == 2
@@ -259,7 +260,7 @@ def test_local_manager_starts_once_reports_runtime_and_stops_owned_process(tmp_p
     assert first.api_key == "local-token"
     assert first.backend == "gpu"
     assert first.pid == 321
-    assert first.parallel == 1  # 默认单槽：串行请求，避免排队超时/OOM 雪崩
+    assert first.parallel == 2  # GPU 默认双槽（2026-08-29 提速），CPU 保持单槽
 
     config.local_concurrency = 4
     third = manager.ensure_running(config)

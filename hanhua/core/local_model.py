@@ -277,13 +277,18 @@ def build_server_command(
 
 
 def resolve_local_parallel(config: ApiConfig, backend: str) -> int:
-    # 默认单槽：本地推理服务是多 slot 串行处理，多 slot 的 KV 显存按倍数
-    # 占用（n_slots × ctx 的 KV cache），并发请求还会排队。长文本后半段
-    # 会让槽位占用时间变长 → 排队 → httpx 超时 → 超时请求仍占用槽位 →
-    # 后续请求全部超时（雪崩）。默认 1 保证单条串行、每一条都有完整 GPU
-    # 与 KV 显存；显存富余的用户可在设置里手动调高 local_concurrency。
+    # GPU 默认双槽（2026-08-29 用户实证：单槽逐条串行 + 每条 ~1.9s 客户端
+    # 开销 → 活动流「本批完成 2 条」龟速推进）。实测 llama-server 日志显示
+    # 单槽模型推理仅 p50 ~100ms / 长文 ~1.4s，瓶颈是客户端侧开销，GPU
+    # 推理大部分时间在等下一条请求 → 双槽吞吐接近翻倍。--cache-reuse 512
+    # 前缀缓存已默认开启（共享 prompt 前缀的 KV 复用），多槽显存开销
+    # 显著低于裸算。CPU 推理本身已跑满核心，保持默认单槽。
+    # 防雪崩下限依然成立：长文本排队 → httpx 超时 → 超时请求仍占槽 →
+    # 连锁超时。因此上限不放宽（GPU 4 / CPU 2），且 _chat_each 有
+    # FALLBACK_TIMEOUT=45s + 快速失败 + restart_conservative 兜底；
+    # 显存紧张的用户可在设置里手动调回 local_concurrency=1。
     maximum = 4 if backend == "gpu" else 2
-    default = 1
+    default = 2 if backend == "gpu" else 1
     requested = int(getattr(config, "local_concurrency", 0) or 0)
     return min(maximum, max(1, requested or default))
 
