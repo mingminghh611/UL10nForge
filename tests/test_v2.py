@@ -3208,3 +3208,71 @@ def test_signature_credit_single_x_not_matched_f49():
     assert not _SIGNATURE_CREDIT_RE.search("pixiv123")
     assert _SIGNATURE_CREDIT_RE.search("x (twitter): @user")
     assert _SIGNATURE_CREDIT_RE.search("林まか (pixiv: 10768714)")
+
+
+# ── give-me-strength 按键失灵根因（2026-08-29）──
+# 写回后主菜单「开始」按键失灵：Play 按钮的 UnityEvent 回调
+# m_MethodName="Play"（target=PlayableDirector）被汉化成「开始」→ 反射
+# 按名绑定断链 → 点击无反应。字节级铁证：UnityEvent 持久化回调的字段名
+# （m_Target/m_MethodName）**不序列化进 raw 字节**，只有值——obj508 的
+# raw 串池是 [Normal…Disabled 状态名, Play 回调方法名, UnityEngine.Object,
+# UnityEngine ×2 (两个回调的 m_Target 类型引用), TriggerMusicPressPlay]。
+# 事件绑定结构的唯一 raw 值证据 = m_Target 类型引用同值 ≥2（多个回调）。
+# 另有次因哑破坏：FMOD event:/ 路径（184 条译成「事件：/音乐/…」→ 音效
+# 静默）、StandaloneInputModule 轴名 Horizontal/Vertical/Submit/Cancel
+# （word_list_object 放行 → 菜单导航失灵）、Cinemachine Mouse X（相机轴
+# 断裂）。本组测试锚定这些形态在提取层被确定性跳过。
+
+def test_unityevent_target_type_pair_marks_object_structural():
+    """UnityEvent 回调对象（m_Target 类型引用 'UnityEngine.Object,
+    UnityEngine' 同值 ≥2 = 多个回调）→ 对象内全部结构跳过，含 Play 方法名。
+    这正是 give-me-strength obj508（此前 Play 被 code_heavy_display_word
+    放行翻译 → 写回后按钮无反应）。"""
+    raw = (_with_len("Normal") + _with_len("Pressed")
+           + _with_len("Play") + _with_len("TriggerMusicPressPlay")
+           + _with_len("UnityEngine.Object, UnityEngine")
+           + _with_len("UnityEngine.Object, UnityEngine"))
+    entries = _raw_string_entries("level1", 508, raw, {}, "level1")
+    by_orig = {e.original: e for e in entries}
+    assert by_orig["Play"].status == "skipped"
+    assert by_orig["Play"].meta["reason"] == "unityevent_object"
+    assert by_orig["Play"].meta["obj_is_unityevent"] is True
+    assert by_orig["Normal"].status == "skipped"
+    assert by_orig["TriggerMusicPressPlay"].status == "skipped"
+
+
+def test_single_target_type_reference_is_not_unityevent():
+    """对照：单次类型引用（普通按钮文本对象 a-catfiends obj1319 'Save' +
+    'UnityEngine.Object, UnityEngine' count=1）不是事件绑定——Play 之类
+    白名单按钮词照常按 code_heavy_display_word 放行，不误杀。"""
+    raw = (_with_len("Save") + _with_len("UnityEngine.Object, UnityEngine"))
+    entries = _raw_string_entries("f1", 1319, raw, {})
+    by_orig = {e.original: e for e in entries}
+    assert by_orig["Save"].status == "pending"
+    assert by_orig["Save"].meta["obj_is_unityevent"] is False
+
+
+def test_input_axis_object_skipped():
+    """InputManager 轴配置对象（StandaloneInputModule：Horizontal+Vertical
+    +Submit+Cancel 四轴）→ 轴名全跳过（此前 word_list_object 放行 → 菜单
+    键盘导航失灵）。"""
+    raw = (b"\x00" * 16) + b"".join(_with_len(t) for t in (
+        "Horizontal", "Vertical", "Submit", "Cancel"))
+    entries = _raw_string_entries("level1", 550, raw, {}, "level1")
+    by_orig = {e.original: e for e in entries}
+    for axis in ("Horizontal", "Vertical", "Submit", "Cancel"):
+        assert by_orig[axis].status == "skipped", axis
+        assert by_orig[axis].meta["reason"] == "input_axis_object", axis
+        assert by_orig[axis].meta["obj_is_input_axis"] is True, axis
+
+
+def test_cinemachine_mouse_x_skipped():
+    """Cinemachine 相机轨道对象孤立 'Mouse X' 单串（give-me-strength
+    obj513）→ 轴名跳过（此前 single_visible_string 放行 → 相机轨道轴
+    断裂）。"""
+    raw = (b"\x00" * 16) + _with_len("Mouse X")
+    entries = _raw_string_entries("level1", 513, raw, {}, "level1")
+    by_orig = {e.original: e for e in entries}
+    assert by_orig["Mouse X"].status == "skipped"
+    assert by_orig["Mouse X"].meta["reason"] == "unambiguous_axis_name"
+    assert by_orig["Mouse X"].meta["obj_is_input_axis"] is True

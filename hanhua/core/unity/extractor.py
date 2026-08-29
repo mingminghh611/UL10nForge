@@ -122,10 +122,59 @@ _LOCALIZATION_MARKERS = ("UnityEngine.Localization", "Unity.Localization", "Dist
 # 回调字段（m_PersistentCalls/m_Target/m_MethodName）——方法名/目标名是
 # 反射按名绑定键，翻译必断绑（知识库 writeback_case「替换 prefab/资源后
 # UnityEvent 事件绑定断裂按钮无反应」转规则：点击回调链断裂 = 按键没反应）。
+# 注意：这些**字段名**只存在于 typetree/字段路径，rawstr 字节层只序列化
+# 值不序列化字段名（give-me-strength obj508 实证：UnityEvent 回调的值是
+# PPtr+方法名+mode，m_Target/m_MethodName 字段名不进入 raw 字节）。
 _UNITYEVENT_SIGNALS = frozenset({
     "m_PersistentCalls", "persistentCalls", "m_Listener",
     "m_Target", "m_MethodName", "m_Arguments",
 })
+# 程序集限定名「UnityEngine.Object, UnityEngine」/「UnityEngine.EventSystems.
+# UnityEvent, UnityEngine.UI」是 UnityEvent 回调持久化里 m_Target 的类型
+# 引用——**rawstr 值**里唯一能证明「对象内含事件绑定结构」的信号（字段名
+# 不进 raw 字节，give-me-strength obj508 实证：Play 按钮回调链含此串
+# 2 次 = 两个回调各一个 m_Target 类型引用）。对象字符串池含此信号
+# （同值 count≥2 更能证明是多个 m_Target 而非普通文本）→ 对象内方法名/
+# 目标名按反射绑定键处置。普通按钮文本对象（'Save'+类型引用单次，
+# a-catfiends obj1319）不触发。
+_UNITYEVENT_TARGET_TYPES = frozenset({
+    "UnityEngine.Object, UnityEngine",
+    "UnityEngine.EventSystems.UnityEvent, UnityEngine.UI",
+    "UnityEngine.Events.UnityEvent, UnityEngine.CoreModule",
+    "UnityEngine.EventSystems.EventTrigger, UnityEngine.UI",
+})
+
+# InputManager 轴名（Unity 旧输入系统 Input.GetAxis 查找键）：Standalone
+# InputModule 的 Horizontal/Vertical/Submit/Cancel、相机 Orbit 轴的
+# Mouse X/Mouse Y、Fire1/2/3、Jump 等。轴名是运行时按名查找键，翻译必
+# 断输入绑定（give-me-strength 实证：每 level 的 StandaloneInputModule
+# 配置对象 Horizontal/Vertical/Submit/Cancel 全被 word_list_object 放行
+# 翻译 → 键盘/手柄菜单导航失灵；CinemachineOrbitalTransposer 的
+# Mouse X 被 single_visible_string 放行 → 相机轨道轴断裂）。与
+# _INPUTSYSTEM_ACTION_NAMES（InputSystem action 名）区分：本集是
+# 老 InputManager 轴名。
+_INPUT_AXIS_NAMES = frozenset({
+    "horizontal", "vertical", "submit", "cancel", "fire1", "fire2", "fire3",
+    "jump", "mouse x", "mouse y", "mouse scrollwheel",
+    "mouse scroll x", "mouse scroll y",
+})
+# 无歧义轴名（独立出现必是轴名，不可能是显示文本）：带「Mouse+轴后缀」
+# 的相机/输入轴名。Cinemachine 相机轨道对象（give-me-strength obj513
+# 实证：单串 'Mouse X' 孤立出现）由本规则拦截——'Submit'/'Cancel' 等
+# 同时是常见按钮文本，不放本集（靠对象级 ≥2 轴名信号），防误杀。
+_UNAMBIGUOUS_AXIS_NAMES = frozenset({
+    "mouse x", "mouse y", "mouse scroll x", "mouse scroll y",
+})
+# InputManager 轴配置对象信号：串池含 ≥2 个不同轴名（StandaloneInputModule
+# 有 Horizontal+Vertical+Submit+Cancel 四轴）→ 对象是输入轴配置，轴名是
+# 查找键。单轴名对象（'Mouse X' 孤立）由 Cinemachine 类信号/轴名直接跳过
+# 覆盖。
+_INPUT_AXIS_OBJECT_MIN = 2
+
+# Cinemachine 相机类前缀：CinemachineOrbitalTransposer/CinemachineFreeLook
+# 等的轨道轴名（Mouse X/Mouse Y/Orbit X）是相机控制查找键，翻译断相机
+# 轨道（give-me-strength obj513 实证）。
+_CINEMACHINE_CLASS_PREFIX = "Cinemachine."
 
 # 署名/credit 形态：作者名 + 作品平台 ID/URL（pixiv/twitter/artstation 等
 # 平台名 + 数字 ID 或用户名，或括号包裹）。「林まか (pixiv: 10768714)」
@@ -1356,9 +1405,32 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
     # 其中方法名/目标名是反射按名绑定键（知识库案例「UnityEvent 事件
     # 绑定断裂按钮无反应」转规则）。判定在完整扫描列表上做（引擎串被
     # 过滤不影响信号——与 InputSystem/Timeline 信号同模式）。
-    is_unityevent_object = any(
-        sig in s for s in (s for _, _, s in scanned)
-        for sig in _UNITYEVENT_SIGNALS)
+    # 2026-08-29 补盲（give-me-strength 实证）：UnityEvent 字段名只存在
+    # 于 typetree/字段路径，rawstr 字节层只序列化值——Play 按钮回调链
+    # （m_Target 类型引用 + m_MethodName=Play）的字段名不进 raw 字节，
+    # 字段信号检测不到。rawstr 值里唯一的事件绑定结构证据是 m_Target 的
+    # 程序集限定名（UnityEngine.Object, UnityEngine）——序列化对象内
+    # 同值出现 ≥2 次 = 多个回调的目标类型引用（obj508 实证：两个回调各
+    # 一个，count=2）。计数条件防普通按钮文本对象（a-catfiends obj1319
+    # 'Save'+单次类型引用，count=1）误触发。
+    _unityevent_target_count = sum(
+        s.strip() in _UNITYEVENT_TARGET_TYPES for _, _, s in scanned)
+    is_unityevent_object = (
+        any(sig in s for s in (s for _, _, s in scanned)
+            for sig in _UNITYEVENT_SIGNALS)
+        or _unityevent_target_count >= 2)
+
+    # InputManager 轴配置对象信号（give-me-strength 实证 2026-08-29）：
+    # StandaloneInputModule 序列化含 Horizontal/Vertical/Submit/Cancel
+    # 四轴名——轴名是 Input.GetAxis 运行时查找键，翻译必断输入绑定
+    # （菜单键盘导航失灵）。串池含 ≥2 个不同轴名 → 轴配置对象，轴名
+    # 全部跳过。Cinemachine 相机类信号（script_class 前缀 Cinemachine.）
+    # 或孤立轴名（Mouse X 单串）由 _INPUT_AXIS_NAMES 直接拦截（见分类链）。
+    axis_names_in_pool = {
+        s.strip().casefold() for _, _, s in scanned
+        if s.strip().casefold() in _INPUT_AXIS_NAMES}
+    is_input_axis_object = len(axis_names_in_pool) >= _INPUT_AXIS_OBJECT_MIN
+    is_cinemachine_object = script_class.startswith(_CINEMACHINE_CLASS_PREFIX)
 
     # 共享资源小配置对象：非场景文件（level*）里无句子形态、≤2 个不同短词串的对象
     # （Timeline 剪辑 displayName 'Timothy'、'White Flash'、动画状态 'Player Idle' 等）。
@@ -1493,6 +1565,12 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
                     for s in non_engine)
         and not is_code_heavy and not is_input_system_object
         and not is_timeline_object and not is_unityevent_object
+        # 2026-08-29（give-me-strength 实证）：StandaloneInputModule 的
+        # 轴名 Horizontal/Vertical/Submit/Cancel 全是 _WORD_CASE TitleCase
+        # 词（占比 4/4 ≥0.6）→ 此前被本规则放行翻译成「水平/垂直/提交/取消」，
+        # Input.GetAxis 查找键断裂 → 菜单键盘导航失灵。轴配置对象信号
+        # （≥2 不同轴名）优先于「命名列表=显示文本」的形态猜测。
+        and not is_input_axis_object
         and not is_small_config_object and not is_key_list
         and not is_word_table and not is_tmp_asset_object
         and not is_config_class)
@@ -1507,6 +1585,7 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
     obj_will_release = not (
         is_code_heavy or is_input_system_object or is_timeline_object
         or is_unityevent_object or is_small_config_object
+        or is_input_axis_object or is_cinemachine_object
         or is_key_list or is_word_table or is_tmp_asset_object
         or is_config_class or is_single_visible)
     for entry in entries:
@@ -1634,6 +1713,28 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
                     else "unityevent_object" if is_unityevent_object
                     else "shared_resource_config_object")
                 confidence, role = "low", "structural"
+        elif is_input_axis_object or is_cinemachine_object:
+            # InputManager 轴配置对象 / Cinemachine 相机对象（give-me-
+            # strength 实证 2026-08-29）：轴名（Horizontal/Vertical/Submit/
+            # Cancel/Mouse X）是 Input.GetAxis 运行时查找键，翻译必断输入
+            # 绑定（菜单键盘导航失灵、相机轨道轴断裂）。对象级整体跳过。
+            entry.status = STATUS_SKIPPED
+            entry.meta["obj_is_key_list"] = True
+            entry.meta["obj_is_input_axis"] = True
+            reason = ("input_axis_object" if is_input_axis_object
+                      else "cinemachine_object")
+            confidence, role = "low", "structural"
+        elif stripped.casefold() in _UNAMBIGUOUS_AXIS_NAMES:
+            # 无歧义轴名（Mouse X/Mouse Y 等带 Mouse 前缀的输入轴）：即使
+            # 孤立单串（Cinemachine 相机轨道对象 give-me-strength obj513
+            # 实证）也是 Input.GetAxis 查找键——翻译断相机轨道轴。Cinemachine
+            # 类对象已由上一分支整体跳过；此处兜底非 Cinemachine 类的孤立
+            # 轴名对象（未登记类/typetree 失败时 script_class 为空）。
+            entry.status = STATUS_SKIPPED
+            entry.meta["obj_is_key_list"] = True
+            entry.meta["obj_is_input_axis"] = True
+            reason = "unambiguous_axis_name"
+            confidence, role = "low", "structural"
         elif (is_single_visible
               and Path(asset_file_name).name.casefold() == "resources.assets"
               and _IDENTIFIER.match(stripped)):
@@ -1796,6 +1897,10 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
             "disposition": "translate" if role == "display" else "structural",
             "reason": reason,
             "obj_is_code_heavy": is_code_heavy,
+            "obj_is_unityevent": is_unityevent_object,
+            "obj_is_input_axis": (
+                is_input_axis_object or is_cinemachine_object
+                or stripped.casefold() in _UNAMBIGUOUS_AXIS_NAMES),
         })
     for e in entries:
         e.meta["obj_has_values"] = has_value_evidence

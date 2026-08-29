@@ -447,3 +447,57 @@ class TestWritebackAuditSeverityLink:
         assert any(e["key_path"] == "str/1" and e["translation"] == "Exit"
                    for e, _ in reverted)
         assert records
+
+
+# ── give-me-strength 按键失灵写回侧兜底（2026-08-29）──
+# 提取层已把 UnityEvent 回调对象/InputManager 轴配置/FMOD 路径确定性跳过；
+# 写回侧按同一规则兜底——旧库残留（本次修复前已翻译的坏条目）或识别层
+# 漏判的 locator，写回时确定性回退译文（保留原文，不写补丁防断链）。
+
+def test_meta_unityevent_signal_reverts():
+    """meta 显式 obj_is_unityevent（事件绑定对象）→ 写回确定性回退。"""
+    from hanhua.core.unity.logic_audit import logic_key_evidence
+    verdict = logic_key_evidence(
+        "Play", {"obj_is_unityevent": True, "reason": "code_heavy_display_word",
+                 "role": "display"},
+        obj_strings=["Play", "Normal", "UnityEngine.Object, UnityEngine"])
+    assert verdict and verdict[0] == "revert"
+    assert verdict[1] == "unityevent_binding"
+
+
+def test_meta_input_axis_signal_reverts():
+    """meta 显式 obj_is_input_axis（InputManager/Cinemachine 轴配置）→
+    写回确定性回退（give-me-strength：Mouse X 相机轴断链兜底）。"""
+    from hanhua.core.unity.logic_audit import logic_key_evidence
+    verdict = logic_key_evidence(
+        "Mouse X", {"obj_is_input_axis": True, "role": "display"},
+        obj_strings=["Mouse X"])
+    assert verdict and verdict[0] == "revert"
+    assert verdict[1] == "input_axis_binding"
+
+
+def test_fmod_event_path_reverts():
+    """FMOD event:/ 路径 → 写回确定性回退（旧库残留的「事件：/音乐/…」
+    坏译文回退，RuntimeManager 按名查找防断链）。"""
+    from hanhua.core.unity.logic_audit import logic_key_evidence
+    verdict = logic_key_evidence(
+        "event:/Music/GlobalMusic", {"role": "display"},
+        obj_strings=["event:/Music/GlobalMusic"])
+    assert verdict and verdict[0] == "revert"
+    assert verdict[1] == "fmod_event_path"
+    # 大写变体同样拦截
+    upper = logic_key_evidence(
+        "EVENT:/Music/Menu/StartSelection", {"role": "display"}, None)
+    assert upper and upper[0] == "revert"
+
+
+def test_typetree_unityevent_and_fmod_revert():
+    """typetree 分支：obj_is_unityevent / obj_is_input_axis / event:/ 兜底
+    与 rawstr 分支同规则。"""
+    from hanhua.core.unity.logic_audit import typetree_logic_key_evidence
+    assert typetree_logic_key_evidence(
+        {"obj_is_unityevent": True}, "Play")[0] == "revert"
+    assert typetree_logic_key_evidence(
+        {"obj_is_input_axis": True}, "Mouse X")[0] == "revert"
+    assert typetree_logic_key_evidence(
+        {}, "event:/Bank/Music")[0] == "revert"

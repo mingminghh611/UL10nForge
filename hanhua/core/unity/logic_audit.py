@@ -132,6 +132,21 @@ def logic_key_evidence(stripped: str, meta: dict,
         return "revert", "unityevent_binding"
     if obj_strings and object_is_unityevent(obj_strings):
         return "revert", "unityevent_binding"
+    # 2b. 提取器写入的对象级事件绑定/输入轴信号（give-me-strength 实证
+    #     2026-08-29）：meta 显式标记 obj_is_unityevent（UnityEvent 回调
+    #     m_Target 类型引用 count≥2 证明对象含事件绑定）/obj_is_input_axis
+    #     （InputManager/Cinemachine 轴配置）——旧库残留/识别层漏判时
+    #     写回侧兜底回退，保留原文防断链（宁漏勿坏）。
+    if meta.get("obj_is_unityevent"):
+        return "revert", "unityevent_binding"
+    if meta.get("obj_is_input_axis"):
+        return "revert", "input_axis_binding"
+    # 2c. FMOD Studio 事件路径（event:/Bank/Event）：RuntimeManager 运行时
+    #     按路径字符串查找音频事件，翻译断路径 → 音效/音乐静默。识别层
+    #     已在 engine_strings 确定性拦截；此处是写回侧兜底（旧库已翻译的
+    #     event:/ 残留条目回退，防止坏译文写回）。
+    if re.match(r"^event:/", stripped, re.I):
+        return "revert", "fmod_event_path"
     # 3. 代码对象（structural 跳过身份）里的逻辑比较词——代码按字符串
     #    比较分发（按钮文字/物品名比较）。structural 身份证明该对象是
     #    键清单（同对象内其他串被结构规则跳过）。obj_is_key_list 是提取
@@ -200,6 +215,14 @@ def typetree_logic_key_evidence(
                for sig in _UNITYEVENT_SIGNALS)
            for name in path_names):
         return "revert", "unityevent_binding"
+    # 对象级事件绑定/输入轴信号（与 logic_key_evidence 2b 同规则）。
+    if meta.get("obj_is_unityevent"):
+        return "revert", "unityevent_binding"
+    if meta.get("obj_is_input_axis"):
+        return "revert", "input_axis_binding"
+    # FMOD 事件路径（与 logic_key_evidence 2c 同规则）。
+    if re.match(r"^event:/", original, re.I):
+        return "revert", "fmod_event_path"
     pattern = logic_pattern_of(original)
     # 类型描述符值（m_TargetAssemblyTypeName 等）——save_typetree 依赖，
     # 翻译即 Referenced type not found。

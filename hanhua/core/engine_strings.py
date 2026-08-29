@@ -157,6 +157,13 @@ _ENGINE_PATTERNS = [
     # '隐藏/后期处理/FXAA' → PostProcessing OnRenderImage 每帧抛异常
     # → 启动卡死）。仅 Hidden/ 前缀（引擎惯例最确定，防过宽）。
     re.compile(r"^Hidden/", re.I),
+    # FMOD Studio 事件路径（event:/Bank/Event、event:/Music/GlobalMusic）：
+    # RuntimeManager 运行时按路径字符串查找并加载音频事件，翻译后事件
+    # 路径断裂 → 音效/音乐全部静默（give-me-strength 实证 184 条被译成
+    # 「事件：/音乐/全球音乐」——FMOD 查找失败静默无声，哑破坏）。
+    # event:/ 前缀是 FMOD 序列化字符串的确定性形态（显示文本几乎不会以
+    # 此开头），全局无条件跳过。
+    re.compile(r"^event:/", re.I),
 ]
 
 _DISPLAY_WORD = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿА-Яа-я]{2,}")
