@@ -5,6 +5,16 @@ from hanhua.core.translator import (create_client, extract_json_array,
                                     normalize_base_url)
 
 
+def _make_transport(handler):
+    """构造可重用的 MockTransport handler→（factory, client）：
+    factory 每次返回同一 client；client 不进入 with 块，供多次请求复用。
+    """
+    def handler_wrapper(request: httpx.Request) -> httpx.Response:
+        return handler(request)
+    client = httpx.Client(transport=httpx.MockTransport(handler_wrapper))
+    return (lambda: client), client
+
+
 def test_normalize_url():
     assert normalize_base_url("https://api.openai.com/v1", "openai") == "https://api.openai.com/v1/chat/completions"
     assert normalize_base_url("https://x.com/v1/chat/completions", "openai") == "https://x.com/v1/chat/completions"
@@ -12,20 +22,14 @@ def test_normalize_url():
     assert normalize_base_url("https://y.com/v1/messages", "anthropic") == "https://y.com/v1/messages"
 
 
-def _mock_openai(responses):
-    def factory():
-        def handler(request: httpx.Request) -> httpx.Response:
-            body = {"choices": [{"message": {"content": responses.pop(0)}}],
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
-            return httpx.Response(200, json=body)
-        return httpx.Client(transport=httpx.MockTransport(handler))
-    return factory
-
-
 def test_openai_client_chat():
+    factory, _client = _make_transport(lambda request: httpx.Response(200, json={
+        "choices": [{"message": {"content": '[{"id":"e1","translation":"你好"}]'}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }))
     client = create_client(
         ApiConfig(provider="openai", base_url="https://t/v1", api_key="k", model="m"),
-        transport_factory=_mock_openai(['[{"id":"e1","translation":"你好"}]']))
+        transport_factory=factory)
     content, usage = client.chat("sys", [{"role": "user", "content": "u"}])
     assert content == '[{"id":"e1","translation":"你好"}]'
     assert usage.prompt == 10 and usage.completion == 5

@@ -138,13 +138,22 @@ class BaseClient:
 
     def _post(self, url: str, headers: dict, payload: dict) -> tuple[httpx.Response, Usage]:
         last_err: Exception | None = None
+        # 持久连接（2026-08-29 修复）：httpx.Client 的 __exit__ 会把实例置为
+        # CLOSED，因此「with client:」第二次进入即抛 "Cannot reopen a client
+        # instance"——实测 Give Me Strength 122 条 request_error 全因此。
+        # 持久路径直接 .post()（连接池内部复用，线程安全）；注入 factory 的
+        # 调用方（测试/mock 每请求新 client）保留原 with 语义。
+        owned = self._owned_client
         for attempt in range(MAX_RETRIES):
             try:
-                with self._factory() as client:
-                    resp = client.post(url, headers=headers, json=payload)
-                    # 持久连接：读响应体后 with 块退出只是归还不关连接；
-                    # resp.json() 需在块内完成（连接归还后流不可读）
-                    body = resp.json()
+                if owned is not None:
+                    resp = owned.post(url, headers=headers, json=payload)
+                else:
+                    with self._factory() as client:
+                        resp = client.post(url, headers=headers, json=payload)
+                # 响应体必须在连接归还前读完；非流式请求 content 已缓冲，
+                # 后续 resp.json() 从缓存重解析，安全
+                body = resp.json()
                 if resp.status_code in RETRY_STATUS:
                     raise _RetryableStatusError(
                         f"HTTP {resp.status_code}: {resp.text[:200]}")
@@ -243,16 +252,21 @@ class LocalOpenAIClient(OpenAIClient):
             return self._probed_ctx if self._probed_ctx > 0 else None
         try:
             base = self.url.rsplit("/chat/completions", 1)[0].rstrip("/")
-            with self._factory() as client:
-                resp = client.get(base + "/props", timeout=10, headers={
+            owned = self._owned_client
+            if owned is not None:
+                resp = owned.get(base + "/props", timeout=10, headers={
                     "Authorization": f"Bearer {self.config.api_key}"})
-                if resp.status_code != 200:
-                    raise RuntimeError(f"props status {resp.status_code}")
-                ctx = (resp.json().get("default_generation_settings")
-                       or {}).get("n_ctx")
-                if isinstance(ctx, int) and ctx > 0:
-                    self._probed_ctx = ctx
-                    return ctx
+            else:
+                with self._factory() as client:
+                    resp = client.get(base + "/props", timeout=10, headers={
+                        "Authorization": f"Bearer {self.config.api_key}"})
+            if resp.status_code != 200:
+                raise RuntimeError(f"props status {resp.status_code}")
+            ctx = (resp.json().get("default_generation_settings")
+                   or {}).get("n_ctx")
+            if isinstance(ctx, int) and ctx > 0:
+                self._probed_ctx = ctx
+                return ctx
         except Exception:  # noqa: BLE001 探测失败不阻断（回退配置值）
             pass
         self._probed_ctx = -1   # 失败标记，不再重试
