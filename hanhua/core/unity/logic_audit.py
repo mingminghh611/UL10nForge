@@ -87,6 +87,19 @@ LOGIC_COMPARE_WORDS = frozenset({
     "defeat", "play", "reset", "apply", "close", "begin",
 })
 
+def _config_class_of(script_class) -> bool:
+    """script_class 是否为 class_registry 登记的配置类（写回侧兜底判定）。
+
+    与识别层 disposition() 单一来源：config 类对象内的字符串是运行时
+    按名查找的键（bank 名/动作名/资产名），翻译必断引用。旧库残留的
+    已翻译条目据此整体回退。
+    """
+    if not script_class:
+        return False
+    from hanhua.core.unity.class_registry import disposition
+    return disposition(str(script_class)) == "config"
+
+
 def object_is_unityevent(obj_strings: list[str]) -> bool:
     """对象级 UnityEvent 判定：对象字符串池含事件绑定字段信号。
 
@@ -147,6 +160,14 @@ def logic_key_evidence(stripped: str, meta: dict,
     #     event:/ 残留条目回退，防止坏译文写回）。
     if re.match(r"^event:/", stripped, re.I):
         return "revert", "fmod_event_path"
+    # 2d. FMOD/输入/时间线等配置对象（识别层 class_registry 判定
+    #     script_class_config 跳过）——写回侧兜底：旧库（修复前提取）
+    #     残留的已翻译条目，写回时按 script_class 判定整体回退，保留
+    #     原文（宁漏勿坏）。判定与 class_registry.disposition 单一
+    #     来源（命名空间前缀覆盖 FMODUnity.*，专有词覆盖裸名——
+    #     裸名 Settings/Platform 不命中，防误杀游戏自有同名类）。
+    if _config_class_of(meta.get("script_class")):
+        return "revert", "fmod_config_object"
     # 3. 代码对象（structural 跳过身份）里的逻辑比较词——代码按字符串
     #    比较分发（按钮文字/物品名比较）。structural 身份证明该对象是
     #    键清单（同对象内其他串被结构规则跳过）。obj_is_key_list 是提取
@@ -223,6 +244,9 @@ def typetree_logic_key_evidence(
     # FMOD 事件路径（与 logic_key_evidence 2c 同规则）。
     if re.match(r"^event:/", original, re.I):
         return "revert", "fmod_event_path"
+    # 配置类对象（与 logic_key_evidence 2d 同规则）。
+    if _config_class_of(meta.get("script_class")):
+        return "revert", "fmod_config_object"
     pattern = logic_pattern_of(original)
     # 类型描述符值（m_TargetAssemblyTypeName 等）——save_typetree 依赖，
     # 翻译即 Referenced type not found。

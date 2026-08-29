@@ -67,6 +67,72 @@ class TestRegistry:
                 "TextMeshPro"} <= DISPLAY_CLASSES
 
 
+class TestFmodFamily:
+    """give-me-strength 实证（2026-08-29）：FMODUnity.Settings 的 bank 名
+    （Master/Music…）与 Platform* 的 parentIdentifier（'default'）被翻译，
+    RuntimeManager 加载银行失败 → 全游戏静音。类注册表按命名空间前缀
+    整体判定 FMOD 家族；通用词类名（Settings/Platform）不裸名登记，
+    防游戏自有同名类（设置界面 Settings）误杀。"""
+
+    def test_fmod_namespace_prefix_is_config(self):
+        assert disposition("FMODUnity.Settings") == "config"
+        assert disposition("FMODUnity.PlatformWindows") == "config"
+        assert disposition("FMODUnity.PlatformAndroid") == "config"
+        assert disposition("FMODUnityResonance.FmodResonanceAudio") == "config"
+
+    def test_fmod_proprietary_words_are_config(self):
+        assert disposition("StudioBankLoader") == "config"
+        assert disposition("StudioEventEmitter") == "config"
+        assert disposition("FMODEventTrack") == "config"
+
+    def test_generic_class_names_not_config(self):
+        # 游戏自有同名类不得被误杀（裸名不登记，只认 FMOD 命名空间）
+        assert disposition("Settings") is None
+        assert disposition("Platform") is None
+        assert disposition("EventHandler") is None
+        assert disposition("RuntimeManager") is None
+
+    def test_tmpro_namespace_prefix_stripped(self):
+        assert disposition("TMPro.TMP_StyleSheet") == "config"
+        assert disposition("TMPro.TMP_FontAsset") == "config"
+        assert disposition("TMPro.TextMeshProUGUI") == "display"
+        # 未登记类带 TMPro 前缀仍不判定
+        assert disposition("TMPro.TMP_Settings") is None
+
+
+class TestWritebackFmodFallback:
+    """写回侧兜底：旧库（修复前提取）残留的 FMOD/TMP 配置类已翻译条目，
+    写回时按 meta.script_class 整体回退保留原文（logic_audit 2d 段）。"""
+
+    def test_fmod_config_object_reverts(self):
+        from hanhua.core.unity.logic_audit import (
+            logic_key_evidence, typetree_logic_key_evidence)
+        r = logic_key_evidence(
+            "Master", {"script_class": "FMODUnity.Settings"})
+        assert r == ("revert", "fmod_config_object")
+        r = logic_key_evidence(
+            "默认", {"script_class": "FMODUnity.PlatformWindows"})
+        assert r == ("revert", "fmod_config_object")
+        r = typetree_logic_key_evidence(
+            {"script_class": "StudioBankLoader", "field_path": []}, "Master")
+        assert r == ("revert", "fmod_config_object")
+
+    def test_display_and_unknown_classes_not_reverted(self):
+        from hanhua.core.unity.logic_audit import (
+            logic_key_evidence, typetree_logic_key_evidence)
+        # 显示组件类不受影响
+        r = logic_key_evidence("Hello", {"script_class": "TextMeshProUGUI"})
+        assert r is None
+        # 游戏自有 Settings 类不误杀（走到普通 report 规则是既有行为）
+        r = typetree_logic_key_evidence(
+            {"script_class": "PlayerController", "field_path": ["m_text"]},
+            "Hello")
+        assert r is None
+        # 无 script_class 不判定
+        r = logic_key_evidence("Hello", {})
+        assert r is None
+
+
 class TestConfigClassSkip:
     def _extract(self, tmp_path, objects, monkeypatch):
         import UnityPy

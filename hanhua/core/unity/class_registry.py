@@ -29,18 +29,27 @@ class ClassEntry:
 
 
 # config 出处分组：
-#  tmp_asset  = TMP 字体/精灵资产（headache 实证：资产名是 <font>/
-#               <sprite> 按名引用键，翻译断引用→字体/表情丢失）
+#  tmp_asset  = TMP 字体/精灵/样式资产（headache 实证：资产名是 <font>/
+#               <sprite> 按名引用键，翻译断引用→字体/表情丢失；
+#               give-me-strength 实证 2026-08-29：TMP_StyleSheet 的
+#               Quote/Link/Title 是 <style="..."> 标签查找键）
 #  input      = InputSystem 配置（morfosigame/deadbeat 实证：动作名
 #               按原名查找，翻译破坏按键交互）
 #  timeline   = Timeline 演出配置（morfosigame 实证：轨道/剪辑名
 #               翻译破坏反序列化）
+#  fmod       = FMOD 音频集成配置（give-me-strength 实证 2026-08-29：
+#               Settings.m_Banks 的 bank 名（Master/Music…）是 .bank
+#               文件加载键、Platform*.parentIdentifier（'default'）是
+#               平台继承查找键——翻译后 RuntimeManager 加载银行失败，
+#               全游戏静音。StudioEventEmitter 的 event 路径已由
+#               engine_strings event:/ 规则拦截，其余字段同类整体跳过）
 # display 出处分组：
 #  ui_text    = TMP/UI 文本组件（指南 §3.2 显示组件）
 _CLASS_ROWS: tuple[ClassEntry, ...] = (
     # ── config ──
     ClassEntry("TMP_FontAsset", "config", "tmp_asset"),
     ClassEntry("TMP_SpriteAsset", "config", "tmp_asset"),
+    ClassEntry("TMP_StyleSheet", "config", "tmp_asset"),
     ClassEntry("InputActionAsset", "config", "input"),
     ClassEntry("InputActionMap", "config", "input"),
     ClassEntry("InputActionReference", "config", "input"),
@@ -48,6 +57,18 @@ _CLASS_ROWS: tuple[ClassEntry, ...] = (
     ClassEntry("InputControlScheme", "config", "input"),
     ClassEntry("TimelineAsset", "config", "timeline"),
     ClassEntry("PlayableDirector", "config", "timeline"),
+    # FMODUnity 家族：只登记无歧义类名（Studio*/FMODEvent* 前缀是 FMOD
+    # 专有词）。通用词类名（Settings/Platform/EventHandler/RuntimeManager
+    # 等）不裸名登记——游戏自有同名类（设置界面 Settings）会被误杀；
+    # 它们经命名空间限定名（FMODUnity.Settings，_script_class_of /
+    # _script_class_from_head 产出）由下方前缀匹配整体判定。
+    ClassEntry("StudioBankLoader", "config", "fmod"),
+    ClassEntry("StudioEventEmitter", "config", "fmod"),
+    ClassEntry("StudioListener", "config", "fmod"),
+    ClassEntry("StudioParameterTrigger", "config", "fmod"),
+    ClassEntry("StudioGlobalParameterTrigger", "config", "fmod"),
+    ClassEntry("FMODEventTrack", "config", "fmod"),
+    ClassEntry("FMODEventPlayable", "config", "fmod"),
     # ── display ──
     ClassEntry("TextMeshProUGUI", "display", "ui_text"),
     ClassEntry("TMP_InputField", "display", "ui_text"),
@@ -59,12 +80,37 @@ CONFIG_CLASSES: frozenset[str] = frozenset(
 DISPLAY_CLASSES: frozenset[str] = frozenset(
     e.name for e in _CLASS_ROWS if e.disposition == "display")
 
+# FMOD 命名空间前缀（script_class 为命名空间限定名时整体判定：
+# FMODUnity.Settings / FMODUnity.PlatformWindows /
+# FMODUnityResonance.FmodResonanceAudio）。Platform 前缀家族随 FMOD
+# SDK 版本增减（PlatformWindows/PlatformAndroid/…），命名空间前缀
+# 匹配覆盖全部，无需逐一登记。
+_FMOD_NAMESPACE_PREFIXES = ("FMODUnity.", "FMODUnityResonance.")
+
+# TMPro 命名空间前缀：TMPro.TMP_StyleSheet 等命名空间限定名。裸名
+# TMP_* 已逐一登记，带 TMPro 前缀时剥掉再查（TMP_ 开头是 TMP 专有词，
+# 无游戏同名类误杀风险）。
+_TMP_NAMESPACE_PREFIX = "TMPro."
+
 
 @lru_cache(maxsize=None)
 def disposition(script_class: str) -> str | None:
-    """脚本类名 → 'config' / 'display' / None（未登记，走启发式链）。"""
+    """脚本类名 → 'config' / 'display' / None（未登记，走启发式链）。
+
+    script_class 可为裸类名（StudioEventEmitter）或命名空间限定名
+    （FMODUnity.Settings）——FMOD 家族按命名空间前缀整体判定（含
+    Platform 前缀家族），通用词类名（Settings/Platform）只有带 FMOD
+    命名空间才命中，防游戏自有同名类误杀。
+    """
+    if not script_class:
+        return None
+    if script_class.startswith(_TMP_NAMESPACE_PREFIX):
+        script_class = script_class[len(_TMP_NAMESPACE_PREFIX):]
     if script_class in CONFIG_CLASSES:
         return "config"
     if script_class in DISPLAY_CLASSES:
         return "display"
+    if script_class.startswith(_FMOD_NAMESPACE_PREFIXES):
+        # FMODUnity/FMODUnityResonance 命名空间内全部是音频集成配置类
+        return "config"
     return None

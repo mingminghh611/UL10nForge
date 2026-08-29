@@ -1377,6 +1377,25 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                 # 排除表），避免尾部兜底误记 rejected。
                 from hanhua.core.unity.extractor import _mono_object_name_span
                 _mname = _mono_object_name_span(bytes(raw))
+                # 写回侧配置类兜底（give-me-strength 音频消失实证
+                # 2026-08-29）：旧库（识别 L9 修复前提取）条目无
+                # script_class meta——写回时按头部固定布局现解析
+                # m_Script PPtr（与 extractor._script_class_from_head
+                # 同一函数），class_registry config 类对象的条目整体
+                # 回退保留原文（宁漏勿坏）。解析失败不改变既有判定。
+                if tname in ("MonoBehaviour", "ScriptableObject"):
+                    from hanhua.core.unity.extractor import (
+                        _script_class_from_head,
+                    )
+                    try:
+                        _writeback_script_class = _script_class_from_head(obj)
+                    except Exception:  # noqa: BLE001
+                        _writeback_script_class = ""
+                else:
+                    _writeback_script_class = ""
+                for e, meta in raw_items:
+                    if _writeback_script_class:
+                        meta.setdefault("script_class", _writeback_script_class)
                 string_translations: dict[str, str] = {}
                 for e, meta in raw_items:
                     expansion = audit_raw_expansion(

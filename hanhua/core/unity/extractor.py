@@ -1102,6 +1102,75 @@ def _mono_class_sig(obj) -> str:
         return ""
 
 
+def _script_class_from_head(obj) -> str:
+    """头部解析兜底的脚本类名（命名空间限定）。
+
+    give-me-strength 音频消失实证（2026-08-29）：FMODUnity.Settings
+    （m_Banks 的 bank 名被译 → 全游戏静音）的 typetree 读取失败
+    （EOFError），且其 m_Script PPtr（FileID=1）跨文件指向
+    globalgamemanagers.assets 的 MonoScript——_script_class_of 的
+    两个前提（typetree 成功 + FileID=0）都不成立，类名证据拿不到
+    → class_registry 判不了 → 走启发式链误判显示文本。
+
+    parse_monobehaviour_head 只读头部固定布局（m_GameObject/m_Enabled/
+    m_Script），不触碰 typetree 越界路径——typetree 失败对象也能读。
+    单独加载资源文件时外部引用未挂载，deref 抛 FileNotFoundError；
+    按需补载 externals（同目录 .assets 文件）再 deref（实测 380/380
+    成功）。返回命名空间限定名（FMODUnity.Settings），class_registry
+    按命名空间前缀判定 FMOD 家族。
+
+    解析失败返回 ""（不改变既有判定，串池信号兜底）。
+    """
+    try:
+        mb = obj.parse_monobehaviour_head()
+        script = mb.m_Script.deref_parse_as_object()
+    except Exception:  # noqa: BLE001
+        assets_file = getattr(obj, "assets_file", None)
+        if assets_file is None:
+            return ""
+        environment = getattr(assets_file, "environment", None)
+        if environment is None:
+            return ""
+        # 资源文件所在目录：reader.stream.name 是加载时的绝对路径
+        # （env.path 是 cwd 不是加载目录，不可用）
+        from pathlib import Path as _P
+        try:
+            stream = getattr(
+                getattr(assets_file, "reader", None), "stream", None)
+            base_dir = _P(str(getattr(stream, "name", ""))).parent
+            if not str(base_dir) or base_dir == _P("."):
+                return ""
+        except Exception:  # noqa: BLE001
+            return ""
+        externals = getattr(assets_file, "externals", None) or []
+        paths = []
+        for ext in externals:
+            name = str(getattr(ext, "path", "") or "").replace(
+                chr(92), "/").split("/")[-1]
+            if not name:
+                continue
+            candidate = base_dir / name
+            if candidate.is_file():
+                paths.append(str(candidate))
+        if not paths:
+            return ""
+        try:
+            environment.load(paths)
+        except Exception:  # noqa: BLE001
+            return ""
+        # 补载后重试 deref（外部 MonoScript 已挂载）
+        try:
+            mb = obj.parse_monobehaviour_head()
+            script = mb.m_Script.deref_parse_as_object()
+        except Exception:  # noqa: BLE001
+            return ""
+    ns = str(getattr(script, "m_Namespace", "") or "")
+    cls = str(getattr(script, "m_ClassName", "") or "")
+    if not cls:
+        return ""
+    return f"{ns}.{cls}" if ns else cls
+
+
 def _quick_typetree_check(obj, gen=None) -> bool:
     """纯 Python read_value 快速预检，返回 True=成功（可继续 boost），False=失败（跳过 boost）。
 
@@ -2740,10 +2809,19 @@ def extract_asset_file(path: str | Path, file_id: str | None = None,
                         typetree_failed += 1
                         skipped["typetree_failed"] = (
                             skipped.get("typetree_failed", 0) + 1)
+                if not script_class:
+                    # 识别 L6 兜底（give-me-strength 音频消失实证
+                    # 2026-08-29）：typetree 失败/FileID≠0 外部引用对象
+                    # 拿不到类名——头部固定布局解析 m_Script PPtr（含
+                    # externals 按需补载），FMODUnity.Settings 这类
+                    # 配置类对象才能进 class_registry 判定
+                    script_class = _script_class_from_head(obj)
+                    if script_class:
+                        script_classes.add(script_class)
                 if isinstance(tree, dict):
                     # 识别 L6：确定性脚本类名（m_Script PPtr → MonoScript）
                     # 优先于串池信号，对象级判定直接使用
-                    script_class = _script_class_of(tree, obj)
+                    script_class = _script_class_of(tree, obj) or script_class
                     if script_class:
                         script_classes.add(script_class)
                     if _is_string_table_tree(tree):
