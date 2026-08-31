@@ -150,6 +150,39 @@ def test_save_load_clear(store):
     assert gc.load_game_context(store) == {}
 
 
+def test_save_syncs_profile_context_fields(store):
+    """save_game_context 同步 GameProfile.context_* 字段——翻译/审校 prompt
+    注入的同一份数据（2026-08-31 语境生效回归：此前只落 KV，profile 恒空
+    → build_game_context_block 注入零内容，识别「没有实际作用」）。"""
+    ctx = {"game_name": "魔法学院", "genre": "RPG", "setting": "奇幻魔法世界",
+           "summary": "冒险者学院里的日常与战斗", "characters": ["Lily：学姐"],
+           "terms": ["Mana：魔法值"], "style": "轻松喜剧", "translation_notes": []}
+    gc.save_game_context(store, ctx)
+    profile = store.get_profile()
+    assert profile.context_game_name == "魔法学院"
+    assert profile.context_genre == "RPG"
+    assert profile.context_setting == "奇幻魔法世界"
+    assert profile.context_summary == "冒险者学院里的日常与战斗"
+    assert profile.context_characters == ["Lily：学姐"]
+    assert profile.context_terms == ["Mana：魔法值"]
+    assert profile.context_style == "轻松喜剧"
+    # 注入块实际携带内容（而非空串）——零效果根因回归
+    from hanhua.core.prompts import build_game_context_block
+    block = build_game_context_block(profile)
+    assert "魔法学院" in block and "RPG" in block
+
+
+def test_save_skips_meaningless_to_profile(store):
+    """「未知」/空数组不写进 profile——空值污染档案语义且零注入价值。"""
+    ctx = {"game_name": "未知", "genre": "", "setting": "未知",
+           "characters": [], "terms": ["Mana：魔法值"], "translation_notes": []}
+    gc.save_game_context(store, ctx)
+    profile = store.get_profile()
+    assert profile.context_game_name == ""
+    assert profile.context_genre == ""
+    assert profile.context_terms == ["Mana：魔法值"]
+
+
 def test_context_needs_update_threshold(store):
     """§23：新增可翻译文本 ≥ 已有 25% → 需要更新。"""
     ctx = {"genre": "RPG"}

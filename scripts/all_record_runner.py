@@ -539,12 +539,20 @@ def _run_semantic_review(project, entries, out_dir: Path, game_name: str,
     if not reviewer.usable:
         print("  [审核] 跳过：本地审核服务不可用（模型缺失或启动失败）")
         return {}, summary
+    # 设计文档 §16：Game Context 注入审校——runner 与 GUI 同一份游戏
+    # 语境（背景/风格/角色/术语/注意事项）进审校 prompt，语境判定
+    # 有据可依（GUI 翻译流程 profile= 已带 context_* 字段，runner
+    # 此处同样透传）。审核提示注入失败不阻断主流程。
+    try:
+        _profile = project.profile
+    except Exception:  # noqa: BLE001 - 语境注入失败不阻断审核主流程
+        _profile = None
     core = review_entries(
         entries, glossary, game_name=game_name,
         on_note=lambda s: print(f"  [审核] {s}"),
         translator=translator, memory=project.store, store=project.store,
         app_dir=app_dir or PROJECT_ROOT, model_name=model_name, lang=lang,
-        max_send_rate=max_send_rate)
+        max_send_rate=max_send_rate, profile=_profile)
     if not core["used"]:
         print("  [审核] 无可审核条目（0 条已翻译）")
         return {}, summary
