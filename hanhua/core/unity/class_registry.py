@@ -92,6 +92,23 @@ _FMOD_NAMESPACE_PREFIXES = ("FMODUnity.", "FMODUnityResonance.")
 # 无游戏同名类误杀风险）。
 _TMP_NAMESPACE_PREFIX = "TMPro."
 
+# Rewired/InControl 输入插件命名空间前缀（脚本类为命名空间限定名时
+# 整体判定为 config）：设备配置类家族随插件版本增减（InputManager/
+# Data.Mapping.HardwareJoystickMap/Data.Mapping.HardwareJoystickTemplateMap/
+# UI.ControlMapper.LanguageData/ComponentControls.TouchButton…），命名
+# 空间前缀匹配覆盖全部，无需逐一登记。
+#
+# 判定理由（ffs-legacy 实证 2026-08-31，sharedassets0.assets 6470 条
+# pending 中 5054 条来自 Rewired.*）：HardwareJoystickMap/TemplateMap 的
+# 设备名（'CH Eclipse Yoke'/'Saitek Pro Flight Yoke'）是运行时按字符串
+# 匹配硬件的键；元素标签（'Left Stick X'/'Throttle 1 Up'）是映射 UI 的
+# 轴/按钮名；InputManager 的动作名/映射名/类别名是 Rewired 按名查找键——
+# 翻译必然破坏输入匹配与重绑定。ControlMapper.LanguageData 的 56 条
+# （'Yes'/'Choose Controller'/'Press any button…'）是 Rewired 自带重映射
+# UI 的显示串，同一批串跨游戏相同——宁漏勿坏：整屏 UI 保持英文是可见
+# 缺失，翻译后匹配错乱是功能断裂（识别的风险不对称原则）。
+_REWIRED_NAMESPACE_PREFIXES = ("Rewired.", "InControl.")
+
 
 @lru_cache(maxsize=None)
 def disposition(script_class: str) -> str | None:
@@ -112,5 +129,8 @@ def disposition(script_class: str) -> str | None:
         return "display"
     if script_class.startswith(_FMOD_NAMESPACE_PREFIXES):
         # FMODUnity/FMODUnityResonance 命名空间内全部是音频集成配置类
+        return "config"
+    if script_class.startswith(_REWIRED_NAMESPACE_PREFIXES):
+        # Rewired/InControl 命名空间内全部是输入插件配置类
         return "config"
     return None

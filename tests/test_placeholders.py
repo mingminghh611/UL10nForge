@@ -781,6 +781,41 @@ def test_input_device_names_are_structural():
         '(hold X + Home).')
     assert is_hard_structural(
         'Micro ipega controller. Must be in Gamepad mode (hold X + Home).')
+    # 2026-08-31（ffs-legacy sharedassets0.assets 实证）：Rewired
+    # HardwareJoystickMap 设备名——品牌词/设备专词 + 语境词/说明行。
+    # 运行时按字符串匹配硬件名，翻译破坏输入匹配。
+    assert is_hard_structural('Saitek Pro Flight Yoke')
+    assert is_hard_structural('CH Eclipse Yoke')
+    assert is_hard_structural('CH Pro Throttle')
+    assert is_hard_structural('CH Throttle Quadrant')
+    assert is_hard_structural('Mad Catz Micro C.T.R.L.R')
+    assert is_hard_structural('BUFFALO BGC-FC801 USB Gamepad')
+    assert is_hard_structural('SteelSeries Nimbus+ (OSX)')
+    assert is_hard_structural('Stadia Controller rev. A')
+    assert is_hard_structural('Insten PS2 adapter')
+    assert is_hard_structural('Wireless Controller')
+    assert is_hard_structural('Amazon Fire TV Remote')
+    assert is_hard_structural('Apple Siri Remote')
+    assert is_hard_structural('Atari Jaguar Controller')
+    assert is_hard_structural('NES30 Joystick')
+    assert is_hard_structural('8Bitdo NES30 Pro')
+    assert is_hard_structural('8Bitdo SN30 Pro')
+    assert is_hard_structural('Logitech Driving Force GT')
+    assert is_hard_structural('Logitech G25')
+    assert is_hard_structural('Logitech Extreme 3D Pro')
+    assert is_hard_structural('Fanatec Porsche 911 Wheel')
+    assert is_hard_structural('Horipad Ultimate')
+    assert is_hard_structural('GameCube Controller')
+    assert is_hard_structural('GameStick Controller')
+    assert is_hard_structural('Nexus Player Gamepad')
+    assert is_hard_structural('Nexus Player Remote')
+    assert is_hard_structural('Elecom Gamepad')
+    assert is_hard_structural('GGE909 Recoil')
+    assert is_hard_structural('Unknown Controller')
+    # 品牌词 + 设备语境词（ffs-legacy 实证，Rewired 内置设备库）
+    assert is_hard_structural('SHIELD Remote')
+    assert is_hard_structural('Stadia Controller rev. A')
+    assert is_hard_structural('Elecom JC-U3312')
     # 反例：真实游戏文本/普通词不误伤
     assert not is_hard_structural('hihat cymbal')
     assert not is_hard_structural(
@@ -789,6 +824,72 @@ def test_input_device_names_are_structural():
         'the warp room.')
     assert not is_hard_structural('The controller is connected')
     assert not is_hard_structural('Press the gamepad button to start')
+    assert not is_hard_structural('The remote is broken')
+    assert not is_hard_structural('You found a wheel')
+    assert not is_hard_structural('The car brake is broken')
+    assert not is_hard_structural('shield of valor')
+
+
+def test_hw_element_labels_are_structural():
+    """Rewired 映射硬件元素标签（ffs-legacy 实证 2026-08-31）→ 结构跳过。
+    轴/按钮/扳机/方向盘标签（'Left Stick X'/'Throttle 1 Up'/'Axis 0'/
+    'Gas Pedal'）是运行时按名查找的映射键，翻译破坏输入匹配。孤立
+    'Brake'/'Menu'/'Select' 命中（硬件映射对象内）；真实句（'apply the
+    brake'）不命中（全串 ^…$ 匹配）。"""
+    assert is_hard_structural('Left Stick X')
+    assert is_hard_structural('D-Pad Left')
+    assert is_hard_structural('Axis 0')
+    assert is_hard_structural('Throttle 1 Up')
+    assert is_hard_structural('Gas Pedal')
+    assert is_hard_structural('Brake')
+    assert is_hard_structural('Accelerator')
+    assert is_hard_structural('Lever 1 Down')
+    assert is_hard_structural('Hat 3 Up')
+    assert is_hard_structural('Stick X')
+    assert is_hard_structural('Right Stick Button')
+    assert is_hard_structural('Action Bottom Row 1')
+    assert is_hard_structural('Base Button 7')
+    assert is_hard_structural('Blue (X)')
+    assert is_hard_structural('Rotate Yoke')
+    assert is_hard_structural('Wheel Right')
+    assert is_hard_structural('Touchpad Click')
+    assert is_hard_structural('Grip Button')
+    assert is_hard_structural('Joypad Up')
+    assert is_hard_structural('Back Tilt')
+    assert is_hard_structural('Analog Stick')
+    assert is_hard_structural('Menu Button')
+    assert is_hard_structural('Select Button')
+    assert is_hard_structural('Start Button')
+    assert is_hard_structural('Home Button')
+    assert is_hard_structural('Guide Button')
+    assert is_hard_structural('Throttle Base Button 1')
+    assert is_hard_structural('Grip Hat Down')
+    assert is_hard_structural('POV Hat Down-Left')
+    assert is_hard_structural('Shifter Down')
+    assert is_hard_structural('Hat 1 Up-Right')
+    # 反例：真实游戏文本/动词短语不误伤
+    assert not is_hard_structural('Press up to jump')
+    assert not is_hard_structural('Go left')
+    assert not is_hard_structural('apply the brake')
+    assert not is_hard_structural('the accelerator')
+    assert not is_hard_structural('Turn the wheel left')
+    assert not is_hard_structural('Left stick to move')
+    assert not is_hard_structural('Brake the door')
+    assert not is_hard_structural('A button on the wall')
+    assert not is_hard_structural('Touch to begin')
+    assert not is_hard_structural('The guide said')
+    assert not is_hard_structural('Menu is open')
+    # 'Menu'/'Start' 是 DISPLAY_WORDS 白名单显示词（F41：显式显示词证据
+    # 优先于结构形态猜测）——裸词返回非结构（该翻）；Rewired 对象内的
+    # 裸 Menu/Start 由 class_registry disposition 对象级整体跳过。
+    assert not is_hard_structural('Menu')
+    assert not is_hard_structural('Start')
+    # 全小写裸硬件词（'brake'/'shield'/'wheel'）是普通英语词，不是
+    # Rewired 映射标签（标签为 TitleCase）——游戏文本里常见
+    assert not is_hard_structural('brake')
+    assert not is_hard_structural('shield')
+    assert not is_hard_structural('wheel')
+    assert not is_hard_structural('Start the game')
 
 
 def test_input_api_names_are_structural():

@@ -322,7 +322,91 @@ _INPUT_DEVICE_BRANDS = (
     "spaceexplorer", "shield portable",
 )
 _INPUT_DEVICE_WORDS = ("gamepad", "game pad", "joy-con", "controller",
-                       "bluetooth", "wireless")
+                       "bluetooth", "wireless", "joystick", "remote")
+# 通用设备名语境词（Rewired HardwareJoystickMap 设备说明行/'Unknown
+# Controller' 等）——单独出现不足以判定（'Remote'/'Wheel' 也用于真实
+# 游戏文本），须叠加设备专词/品牌词（见 _is_input_device_name 规则 5）。
+# ffs-legacy 2026-08-31 实证：SharedResources 'Amazon Fire TV Remote'/
+# 'Apple Siri Remote'/'Atari Jaguar Controller'/'Unknown Controller' 全
+# 被放行进池。词表只收 Rewired 设备专词（moga/nexus/tv 太泛不入表）。
+_INPUT_DEVICE_GENERIC_WORDS = (
+    "moga", "fire tv", "siri", "jaguar", "nes", "snes", "n64",
+    "gamecube", "genesis", "sega", "atari", "wii u", "xbox 360",
+    "guitar", "drum", "turbo", "paddle", "rudder", "accelerator",
+    "gamestick",
+)
+# 设备通用专词（'Unknown Controller' 首词）——单独出现（'Controller'）
+# 太泛不入表（真实游戏文本含 Controller），须叠加语境词或专词
+_INPUT_DEVICE_PLATFORM_WORDS = (
+    "moga", "nimbus", "stadia", "nexus", "shield", "siri", "fire tv",
+)
+# 硬件元素标签词表（Rewired 映射默认按钮/轴/扳机标签，见 _is_input_
+# device_name 规则 6）：元素类型词（stick/axis/trigger/d-pad/wheel/
+# yoke/throttle/pedal/lever/hat/rocker/switch/slider/dial/knob/paddle/
+# bumper/shoulder/button）+ 方向词（up/down/left/right/in/out）+ 轴
+# 端词（x/y）+ 带编号/带方向的模式标签（Left Stick X/Throttle 1 Up/
+# D-Pad Left）。命中即设备映射元素名，翻译破坏输入映射（引擎按原名
+# 查找轴/按钮）。真实游戏文本（'Press up to jump'/'go left'）无编号/
+# 无方向后缀/是动词短语，不命中。
+_HW_ELEMENT_LABEL = re.compile(
+    r"^(?:"
+    r"Stick (?:X|Y|Up|Down|Left|Right)"
+    r"|(?:Left|Right) Stick (?:X|Y|Up|Down|Left|Right|Button)"
+    r"|Analog (?:Stick|Sticks|Pad)"
+    r"|(?:Touchpad|Analog|Joypad|Acceleration|Position) (?:X|Y|Z)"
+    r"|D-Pad(?: (?:Up|Down|Left|Right|(?:Up|Down)-(?:Left|Right)))?"
+    r"|Axis \d+"
+    r"|Button \d+(?: (?:Up|Down|Left|Right))?"
+    r"|(?:L|R)(?:1|2|3|4|B|T)"
+    r"|(?:Left|Right) (?:Trigger|Bumper|Shoulder|Paddle|Tilt)"
+    r"|(?:L|R) (?:Trig|Bumper|Shoulder|Paddle|Tilt)"
+    r"|(?:Back|Front|Left|Right|Top|Bottom|Center|Side) Tilt"
+    r"|(?:Throttle|Lever|Pedal|Rudder|Hat|Switch|Rocker|Slider|Dial|"
+    r"Knob|Wheel|Yoke|Tilt)(?: \d+)?(?: (?:Up|Down|Left|Right|In|Out))?"
+    r"|(?:Grip|Hat|Stick|Switch|Touchpad|Wheel|Throttle|Lever|Pedal|Rudder|"
+    r"Rocker|Slider|Dial|Knob|Tilt|Yoke|Pad|Thumb|Mini-Stick|Acceleration|"
+    r"Joy|Joypad|Rotary|Shifter|POV|H[1-4])(?: \d+)?(?: (?:Up|Down|Left|Right|"
+    r"In|Out|Press|Button|Click|Touch|X|Y|L|R|Dn|Center|"
+    r"(?:Up|Down|Left|Right)-(?:Left|Right)))?"
+    r"|POV(?: (?:Up|Down|Left|Right))? HAT"
+    r"(?: (?:Up|Down|Left|Right|Press|(?:Up|Down)-(?:Left|Right)))?"
+    r"|(?:Grip|Thumb|Stick|Base|Front|Back|Left|Right|Center|Side|Pinky|"
+    r"Index|Middle|Top|Bottom|Action|Aux|Rest|Palm|Ring) (?:Hat|Stick|Switch|"
+    r"Index|Middle|Top|Bottom|Action|Aux|Rest|Palm|Ring) (?:Hat|Stick|Switch|"
+    r"Slider|Button|Wheel|Lever|Pad|Pedal|Rocker|Knob|Dial|Throttle|Trigger|"
+    r"Bumper|Touch|Rest|Position|Thumb)(?: \d+)?(?: (?:Up|Down|Left|Right|"
+    r"Press|Click|Fwd|Back|In|Out|"
+    r"(?:Up|Down|Left|Right)-(?:Left|Right)))?"
+    r"|(?:Grip|Thumb|Stick|Base|Front|Back|Left|Right|Center|Side|Pinky|"
+    r"Index|Middle|Top|Bottom) (?:Hat|Stick|Switch|Slider|Button|Wheel|Lever|"
+    r"Pad|Pedal|Rocker|Knob|Dial|Throttle|Trigger|Bumper) "
+    r"(?:Up|Down|Left|Right|Press|Click|Fwd|Back|In|Out)"
+    r"|(?:Gas|Brake|Clutch|Accelerator) Pedal"
+    r"|(?:Blue|Green|Red|Yellow|White|Black|Grey|Gray|Orange|Pink|Base|"
+    r"Top|Bottom|Front|Back|Center|Action|Aux|Home|Guide) Button \d+"
+    r"|(?:Action|Button|Trigger|Throttle|Pedal|Rudder|Hat|Switch|Rocker|"
+    r"Slider|Dial|Knob|Wheel|Yoke|Lever|Stick|Shifter|Rotary) "
+    r"(?:Top|Bottom|Base|Middle|Center|Front|Back|Left|Right|Side|Index|"
+    r"Middle|Pinky|Thumb) (?:Button|Hat|Stick|Switch|Slider|Wheel|Lever|"
+    r"Trigger|Pedal|Rocker|Dial|Knob|Paddle|Tilt|Rotary)(?: \d+)?"
+    r"(?: (?:Up|Down|Left|Right|In|Out|Press|Click))?"
+    r"|(?:Action|Button|Trigger|Throttle|Pedal|Rudder|Hat|Switch|Rocker|"
+    r"Slider|Dial|Knob|Wheel|Yoke|Lever|Stick|Shifter|Rotary) "
+    r"(?:Top|Bottom) Row \d+"
+    r"|(?:Blue|Green|Red|Yellow|White|Black|Grey|Gray|Orange|Pink) "
+    r"\((?:X|Y|A|B|Square|Circle|Triangle|Cross|L1|R1|L2|R2|LT|RT|LB|RB|"
+    r"Select|Start|Home|Menu|Guide)\)"
+    r"|Rotate Yoke(?: (?:Right|Left))?"
+    r"|(?:Antenna|Assistant|Capture|Guide|Home|Menu|Select|Start|Touch)"
+    r"(?: Button| Pad| Pad Press)"
+    r"|(?:Antenna|Assistant|Capture)"
+    r"|Accelerator"
+    r"|(?:Brake|Clutch|Gas|Lever|Pedal|Rudder|Stick|Throttle|Yoke)"
+    r"|(?:Pad|Wheel) (?:Up|Down|Left|Right|Press)"
+    r"|(?:Wheel|Pad|Stick|Trigger|Pedal|Lever|Yoke|Throttle|Rudder|Hat|"
+    r"Rocker|Switch|Slider|Dial|Knob) Button"
+    r"(?: (?:[1-9]\d*|L[1-3]|R[1-3]|Up|Down|Left|Right))?"
+    r")$", re.I)
 # 设备名中的普通功能词（说明句 "Must be in Gamepad mode (hold X + Home)"
 # 有句子结构，但已含品牌词+gamepad 关键词被上一分支覆盖；此处是纯
 # 品牌词+型号的专名形态判定）
@@ -334,9 +418,10 @@ _INPUT_DEVICE_FUNCTION_WORDS = frozenset({
 
 
 def _is_input_device_name(text: str) -> bool:
-    """输入插件设备名/设备说明 → 结构跳过（InControl DeviceInfo 家族）。
+    """输入插件设备名/设备说明/硬件元素标签 → 结构跳过（Rewired/
+    InControl 家族：DeviceInfo、HardwareJoystickMap、TemplateMap）。
 
-    四种形态（任一命中）：
+    六种形态（任一命中）：
     1. 冒号品牌 ID：idroid:con（InControl 设备 ID brand:model 形态）
     2. 品牌词 + 设备语境词（gamepad/controller/bluetooth/wireless）：
        'ipega media gamepad controller'、'Micro ipega controller…'
@@ -344,6 +429,14 @@ def _is_input_device_name(text: str) -> bool:
        （'idroid:con Snakebyte (M1)'）或纯品牌专名（'idroid Snakebyte'）
     4. 括号型号标识 + 设备语境词（'Nvidia Shield … Controller (2015 model)'、
        'Joy-Con (R)'——joy-con 既是品牌也是语境词）
+    5. 设备通用专词 + 语境词（'Amazon Fire TV Remote'——Rewired 设备名
+       说明，ffs-legacy 实证 2026-08-31）：fire tv/siri/jaguar/nes/…
+       + remote/controller/gamepad；或 Unknown + Controller（通用默认
+       设备配置）
+    6. 硬件元素标签（'Left Stick X'/'Throttle 1 Up'/'D-Pad Left'/'Axis 0'/
+       'Brake'/'Gas Pedal'——Rewired 映射默认按钮/轴标签）：无品牌词、
+       无设备语境词，是硬件元素专名形态（编号/方向/轴端词 + 硬件词），
+       命中即跳过（翻译破坏输入映射的按名查找）
     """
     low = text.casefold()
     if re.fullmatch(r"[a-z]{2,20}:[a-z]{2,20}", low):
@@ -361,8 +454,66 @@ def _is_input_device_name(text: str) -> bool:
         if words and all(
                 w not in _INPUT_DEVICE_FUNCTION_WORDS for w in words):
             return True
-    return False
-# 版本占位/模板串（v?.??：版本号占位符——InControl 固件版本正则截断
+    # 规则 5：设备通用专词/说明行。'Unknown Controller' 无品牌词——
+    # 通用默认设备配置（Rewired 兜底映射）。'Controller' 单独出现太泛
+    # （真实文本含 Controller），须叠加专词/语境词/品牌词才命中。
+    has_generic = any(k in low for k in _INPUT_DEVICE_GENERIC_WORDS)
+    has_platform = any(k in low for k in _INPUT_DEVICE_PLATFORM_WORDS)
+    if has_generic and (has_context or has_platform):
+        return True
+    if low.startswith("unknown ") and has_context:
+        return True
+    # 双语境词互证（'Wireless Controller'——wireless+controller 都是
+    # 设备语境词，无品牌词）：Rewired 通用设备名。整串判定防真实句
+    # 误伤（'The wireless controller needs batteries' 含 the/needs）。
+    if (len([k for k in _INPUT_DEVICE_WORDS if k in low]) >= 2
+            and re.fullmatch(r"[a-z]+(?: [a-z-]+)+", low)
+            and not any(w in low for w in ("the ", " a ", " and ", " is ",
+                                           " to ", " of ", " in ", " for "))):
+        return True
+    # 品牌词与语境词带下划线/横线分隔（'G3_ Android/DI mode'——Rewired
+    # 设备说明行模式标记）。'Stadia Controller'/'Wireless Controller' 是
+    # 带语境词的通用设备名；'Saitek Pro Flight Yoke'/'Mad Catz Micro
+    # C.T.R.L.R' 是品牌词 + 型号专名。全部整串判定，防真实句误伤。
+    if has_context and (
+            has_brand or has_platform or has_generic
+            or re.search(r"[_-]?\b(?:saitek|ch |ch products|mad catz|"
+                         r"buffalo|steelseries|stadia|insten|logitech|"
+                         r"fanatec|hori|elecom|moga|nexus|fire tv|siri|"
+                         r"atari|jaguar|gamecube|nes30|snes30|f30|fc30|"
+                         r"n30|sn30|8bitdo|xiaoji|gamesir)\b", low)):
+        return True
+    # 无语境词/语境词为空的设备专名行（'Saitek Pro Flight Yoke'/
+    # 'CH Eclipse Yoke'/'8Bitdo NES30 Pro'/'Logitech G25'）：品牌词 +
+    # 型号/功能词专名。整串判定（^…$）防真实句误伤（'The car brake
+    # is broken' 含 the/is 不命中）。要求 ≥2 个词——裸品牌单词
+    # （'shield'/'sony'/'atari'）是常见英语词/公司名，单出现不足以
+    # 判定设备（游戏文本 'equip a shield' 会误伤）。
+    if len(low.split()) >= 2 and re.fullmatch(
+            r"(?:(?:saitek|ch products|ch|mad catz|buffalo|steelseries|"
+            r"stadia|insten|logitech|fanatec|hori|horipad|elecom|8bitdo|"
+            r"xiaoji|gamesir|moga|nexus|fire tv|siri|atari|nintendo|sony|"
+            r"microsoft|amazon|apple|google|nvidia)\b"
+            r"[\s\S]*)"
+            r"|[\s\S]*(?:saitek|mad catz|8bitdo|logitech|fanatec|hori|"
+            r"horipad|elecom|gamesir|gge[0-9]+)\b[\s\S]*", low, re.I):
+        return True
+    # 规则 6：硬件元素标签。只对整串判定（'Brake' 全串命中；句中
+    # 'apply the brake' 不命中——正则 ^…$ 全串匹配）。孤立元素标签
+    # （无品牌/语境词）命中即设备映射键。全大写串（SELECT 按钮文本）
+    # 与全小写裸词（'brake'/'shield'/'start' 普通英语词，游戏文本
+    # 常见）是显示形态，不是硬件标签——Rewired 映射标签为 TitleCase/
+    # mixed（'Left Stick X'/'Brake'）。TitleCase 裸硬件词（'Brake'）
+    # 仍是映射键（ffs-legacy obj 实证：孤立 'Brake'/'Clutch' 是 Rewired
+    # 元素标签）。普通功能词（'Menu'/'Select'/'Start'——DISPLAY_WORDS
+    # 成员或常见按钮文本）不在标签词表内，返回非结构（该翻）：
+    # test_raw_string_entries_inputsystem_actions_skipped_in_map_object
+    # 契约锚点——它们由 is_input_system_object 对象级信号整体跳过。
+    if text.isupper() or text.islower():
+        return False
+    if _HW_ELEMENT_LABEL.fullmatch(text.strip()):
+        return True
+    return False# 版本占位/模板串（v?.??：版本号占位符——InControl 固件版本正则截断
 # 或版本格式模板，crash-back-in-time level0 实证；? 是占位信号，真实
 # 版本号 v2.5 无 ? 不命中）
 _INPUT_VERSION_TEMPLATE = re.compile(r"^[vV]?[0-9?]+\.[0-9?]+\?+$|^[vV]?\?[0-9?]*\.[0-9?]+$")
