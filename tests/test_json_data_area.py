@@ -168,3 +168,91 @@ def test_standalone_json_skipped_never_written_back():
     assert "GameColors" in out.split("Texts")[0], "数据区原文不得被改写"
     assert "X" not in out.split("Texts")[0], "数据区译文不得写回"
     assert "X" in out.split("Texts")[1], "真文本区正常写回"
+
+
+# ── Spine 骨骼动画 JSON（soul-delivery/zero-deaths/monsters-of-new-spark
+# 实证 2026-09-01）──────────────────────────────────────────────
+# 顶层键 skeleton/bones/slots/ik/skins/animations 是 Spine 运行库数据：
+# 值全是骨骼名/插槽名/附件名/皮肤名/动画名查表引用，翻译写坏骨骼动画
+# 加载。文件级判定（skeleton 键 + 全键 ⊆ _SPINE_TOP_KEYS）整文件跳过。
+
+_SPINE_SAMPLE = json.dumps({
+    "skeleton": {"hash": "abc", "spine": "3.8.99", "x": 0, "y": 0,
+                 "width": 1024, "height": 1024},
+    "bones": [{"name": "root"}, {"name": "bone", "parent": "root"},
+              {"name": "Foot RL", "parent": "root"}],
+    "slots": [{"name": "Tail", "bone": "root", "attachment": "Tail"},
+              {"name": "Body", "bone": "root", "attachment": "Body"}],
+    "ik": [{"name": "Foot RL", "order": 1, "bones": ["bone"],
+            "target": "Foot RL"}],
+    "skins": {"default": {"Tail": {"Tail": {"name": "Tail"}}}},
+    "events": [{"name": "footstep", "time": 0}],
+    "animations": {"idle": {"bones": {}}},
+}, ensure_ascii=False)
+
+_SPINE_VARIANT_NO_IK = json.dumps({
+    "skeleton": {"hash": "abc"},
+    "bones": [{"name": "root"}],
+    "slots": [{"name": "Head", "bone": "root"}],
+    "skins": {"default": {}},
+    "animations": {"walk": {}},
+}, ensure_ascii=False)
+
+_SPINE_VARIANT_TRANSFORM = json.dumps({
+    "skeleton": {"hash": "abc"},
+    "bones": [{"name": "root"}],
+    "slots": [{"name": "Head", "bone": "root"}],
+    "ik": [{"name": "Hand", "order": 2, "bones": ["bone4"],
+            "target": "Hand"}],
+    "transform": [{"name": "Hand", "order": 2, "bones": ["bone4"],
+                   "target": "Hand", "rotation": -180}],
+    "skins": {"default": {}},
+    "animations": {"idle": {}},
+}, ensure_ascii=False)
+
+
+def test_spine_document_empty():
+    """Spine 动画 JSON 整文件不产生条目（文件级判定在条目级之前）。"""
+    entries = json_format.extract_json_text(_SPINE_SAMPLE, "1000.json")
+    assert entries == [], "Spine 动画 JSON 不得进池"
+
+    e2 = json_format.extract_json_text(_SPINE_VARIANT_NO_IK, "Felix.json")
+    assert e2 == [], "低版本 Spine（无 ik/events）同样跳过"
+
+    e3 = json_format.extract_json_text(_SPINE_VARIANT_TRANSFORM, "2000.json")
+    assert e3 == [], "含 transform 约束的 Spine 同样跳过"
+
+
+def test_spine_detect_variants():
+    """_is_spine_document 覆盖全键子集变体（缺键/多键）。"""
+    import json as _j
+    for text in (_SPINE_SAMPLE, _SPINE_VARIANT_NO_IK, _SPINE_VARIANT_TRANSFORM):
+        data = _j.loads(text)
+        assert json_format._is_spine_document(data) is True
+
+
+def test_spine_not_false_positive():
+    """非 Spine 文件（字典/设置/显示文本）不得被 Spine 判定误杀。"""
+    import json as _j
+    real = _j.loads(json.dumps({
+        "Texts": {"NEW_GAME": {"Text": "New Game"}},
+        "Settings": {"MusicGroups": ["MENU"]},
+    }))
+    assert json_format._is_spine_document(real) is False
+    # 顶层只有部分 Spine 键、缺 skeleton → 非 Spine（防半截 JSON 误伤）
+    partial = _j.loads(json.dumps({"bones": [{"name": "root"}]}))
+    assert json_format._is_spine_document(partial) is False
+    # 空 dict / 非 dict 根
+    assert json_format._is_spine_document({}) is False
+    assert json_format._is_spine_document([]) is False
+
+
+def test_extractor_spine_skipped_counter():
+    """extractor._textasset_entries 对 Spine JSON 整文件跳过并留档。"""
+    from hanhua.core.unity import extractor as ex
+    skipped: dict = {}
+    entries = ex._textasset_entries(
+        "asset#data.unity3d#923", 923,
+        _SPINE_SAMPLE.encode("utf-8"), "data.unity3d", skipped)
+    assert entries == []
+    assert skipped.get("textasset_json_spine", 0) == 1

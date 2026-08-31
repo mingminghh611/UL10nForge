@@ -2233,12 +2233,16 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
 
     if stripped.startswith("{") or stripped.startswith("["):
         try:
-            _json.loads(stripped)
+            data = _json.loads(stripped)
         except Exception:  # noqa: BLE001
             data = None
-        else:
-            data = True
         if data is not None:
+            if _is_spine_document(data):
+                # Spine 骨骼动画 JSON（soul-delivery/zero-deaths/
+                # monsters-of-new-spark 实证）：skeleton/bones/slots/ik/
+                # skins/animations 全键查表引用，整文件跳过并留档。
+                _skip("textasset_json_spine")
+                return []
             return _stamp(json_format.extract_json_text(stripped, file_id), "json")
     if stripped.startswith("<") and ">" in stripped:
         from hanhua.core.formats.xml_format import extract_xml_text
@@ -2846,6 +2850,37 @@ _JSON_ALL_CAPS = _re.compile(r"^[A-Z][A-Z0-9_\-]{0,19}$")
 # 'UI'/'main'）：引用叶子的值本身就是内部标识符（姿态/目标对象/图层），
 # 词形任意（2H 混合大小写、main 小写）——值匹配引用叶子 → 跳过
 _JSON_REF_LEAF = _re.compile(r"^[A-Za-z0-9_\-]{1,24}$")
+# 关卡地图编辑器 JSON（project-arrhythmia 实证 2026-09-01）顶层键全集——
+# 与 hanhua/core/formats/json_format.py 的 _MAP_EDITOR_TOP_KEYS 共用定义
+# （防分叉）。对象是游戏内地图编辑器（玩家/关卡设计者摆放实体），字符串值
+# = UUID（实体 id/p_id 互引）、base64 缩略图、对象类型名、动画曲线名、节点
+# 结构名，翻译无显示语义（玩家在游戏里看到的是关卡贴字，那是 objects/*/text
+# 富文本值——单独按 objects/text 路径语义由写回侧按值保留，不在此列）。
+_MAP_EDITOR_TOP_KEYS = frozenset((
+    "editor", "editor_prefab_spawn", "parallax_settings", "checkpoints",
+    "objects", "prefab_objects", "prefabs", "themes", "markers", "events",
+    "triggers",  # project-arrhythmia obj4/179/190 实证：触发器表同属编辑器数据
+))
+# Spine 骨骼动画 JSON 顶层键全集——与 json_format.py 的 _SPINE_TOP_KEYS
+# 共用定义（防分叉）。skeleton 键是 Spine 文件专属标识，全语料普查只出现
+# 在 Spine 文件；全键子集判定见 _is_spine_document。
+_SPINE_TOP_KEYS = frozenset((
+    "skeleton", "bones", "slots", "ik", "skins", "animations",
+    "transform", "events",
+))
+
+
+def _is_spine_document(data: Any) -> bool:
+    """JSON 根是否 Spine 骨骼动画文件（返回 True → 整文件跳过）。
+
+    skeleton/bones/slots/ik/skins/animations 全是运行库查表引用（骨骼名/
+    插槽名/附件名/皮肤名/动画名），翻译写坏骨骼动画加载。判定与
+    json_format.py 共用（防分叉）：根含 'skeleton' 键且全部顶层键 ⊆
+    _SPINE_TOP_KEYS（变体覆盖缺 ik/events/含 transform，全语料 0 误报）。
+    """
+    return bool(isinstance(data, dict) and data
+                and "skeleton" in data
+                and all(key in _SPINE_TOP_KEYS for key in data))
 
 
 def _is_json_data_area(inner: str, value: str) -> bool:
@@ -2866,6 +2901,11 @@ def _is_json_data_area(inner: str, value: str) -> bool:
         return False
     if segs[0] in ("Texts", "Languages"):
         return False
+    if segs[0] in _MAP_EDITOR_TOP_KEYS:
+        # 关卡地图编辑器 JSON 顶层键（project-arrhythmia 实证 2026-09-01）：
+        # objects/prefabs/checkpoints/themes/markers/events...——实体摆放/
+        # 曲线/节点结构名（UUID/base64 缩略图/OutSine/Face Root），无显示语义
+        return True
     if _JSON_HEX_COLOR.fullmatch(value):
         return True
     if _JSON_FORMULA.fullmatch(value):

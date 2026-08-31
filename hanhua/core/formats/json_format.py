@@ -295,6 +295,12 @@ def extract_json(path: str | Path, file_id: str | None = None) -> list[TextEntry
 
 def extract_json_text(text: str, file_id: str | None = None) -> list[TextEntry]:
     document = _load_document(text)
+    if _is_spine_document(document.data):
+        # Spine 骨骼动画 JSON（soul-delivery/zero-deaths/monsters-of-new-spark
+        # 实证 2026-09-01）：骨骼名/插槽/附件/皮肤/动画名全是运行库查表引用，
+        # 翻译即写坏骨骼动画。文件级判定（skeleton 键 + 全键子集）在条目级
+        # 结构过滤之前——整文件不产生条目（写回侧同样不写，闭环）。
+        return []
     out = [
         TextEntry(
             file_id=file_id or "json",
@@ -314,8 +320,9 @@ def extract_json_text(text: str, file_id: str | None = None) -> list[TextEntry]:
         elif _is_json_data_area(entry.key_path, entry.original):
             # JSON 数据区结构过滤（8 More Lives 实证 2026-08-31）：hex 颜色/
             # 数值公式/资源引用枚举/数组下标枚举都是游戏内部引用标识符，
-            # 翻译成中文破坏功能。判定与 asset 内嵌 TextAsset 共用同一规则
-            # （unity/extractor 调用方对同路径写回，行不写=不破坏）。
+            # 翻译成中文破坏功能；关卡地图编辑器顶层键（project-arrhythmia
+            # 实证 2026-09-01）整键区跳过。判定与 asset 内嵌 TextAsset 共用
+            # 同一规则（unity/extractor 调用方对同路径写回，行不写=不破坏）。
             entry.status = STATUS_SKIPPED
     return out
 
@@ -357,6 +364,48 @@ _JSON_ALL_CAPS = _re.compile(r"^[A-Z][A-Z0-9_\-]{0,19}$")
 # 'UI'/'main'）：引用叶子的值本身就是内部标识符（姿态/目标对象/图层），
 # 词形任意（2H 混合大小写、main 小写）——值匹配引用叶子 → 跳过
 _JSON_REF_LEAF = _re.compile(r"^[A-Za-z0-9_\-]{1,24}$")
+# 关卡地图编辑器 JSON（project-arrhythmia 实证 2026-09-01）顶层键全集：
+# objects/prefab_objects/prefabs/checkpoints/themes/markers/events/editor/
+# parallax_settings/editor_prefab_spawn。对象是游戏内地图编辑器（玩家/关卡
+# 设计者摆放实体），字符串值 = UUID（实体 id/p_id 互引）、base64 缩略图、
+# 对象类型名（Checkpoint/Bullet Base）、动画曲线名（InOutSine）、纹理/节点
+# 结构名（Face Root/Eye Center/X Para）、富文本关卡贴字（<rotate=90><b>SO
+# COLD——地图设计者做的关卡说明贴字，玩家在游戏里看到）。判定：
+#   - 顶层键全 ∈ MAP_KEYS → 编辑器数据文件（转译整文件无意义，写回位置
+#     由内部结构对齐，翻译值只作字典——无显示语义）
+#   - 其余 JSON 文件不受影响（顶层键部分命中不触发；触发需全部键 ∈ 集合）
+_MAP_EDITOR_TOP_KEYS = frozenset((
+    "editor", "editor_prefab_spawn", "parallax_settings", "checkpoints",
+    "objects", "prefab_objects", "prefabs", "themes", "markers", "events",
+    "triggers",  # project-arrhythmia obj4/179/190 实证：触发器表同属编辑器数据
+))
+# Spine 骨骼动画 JSON（soul-delivery/zero-deaths/monsters-of-new-spark 实证
+# 2026-09-01）：skeleton/bones/slots/ik/skins/animations 是 Spine 运行库
+# 数据，值全是骨骼名/插槽名/附件名/皮肤名/动画名引用——翻译写坏，骨骼
+# 动画直接加载失败（skin 名、attachment 名、动画名查表全断）。全语料 131
+# 游戏顶层键普查：这些键**只**出现在 Spine 文件（含 skeleton 的 98 处
+# 100% 全键 ⊆ 本集），无任何显示文本 JSON 使用——结构信号 100% 确定。
+# 文件级判定（extract_json_text）：顶层含 'skeleton' 且所有键 ⊆ 本集 →
+# 整文件是 Spine 动画数据，全部条目跳过。
+_SPINE_TOP_KEYS = frozenset((
+    "skeleton", "bones", "slots", "ik", "skins", "animations",
+    "transform",  # obj952 实证：IK 约束 transform 数组（Spine transform 约束）
+    "events",     # Spine 事件表（与地图编辑器 events 同名但此处是动画事件）
+))
+
+
+def _is_spine_document(data: Any) -> bool:
+    """JSON 根是否 Spine 骨骼动画文件（返回 True → 整文件跳过）。
+
+    判定：根为 dict、含 'skeleton' 键、且全部顶层键 ⊆ _SPINE_TOP_KEYS。
+    变体覆盖（全语料实证）：低版本 Spine 缺 ik/events（Ghosts.json 5 键）、
+    含 transform 约束（obj952 2000.json）、事件表（events 键）。skeleton
+    键是 Spine 文件专属标识（131 游戏普查 0 误报），全键子集判定防半截
+    JSON 或嵌在真游戏文件里的子结构误伤。
+    """
+    return bool(isinstance(data, dict) and data
+                and "skeleton" in data
+                and all(key in _SPINE_TOP_KEYS for key in data))
 
 
 def _is_json_data_area(inner: str, value: str) -> bool:
@@ -381,6 +430,12 @@ def _is_json_data_area(inner: str, value: str) -> bool:
         return False
     if segs[0] in ("Texts", "Languages"):
         return False
+    if segs[0] in _MAP_EDITOR_TOP_KEYS:
+        # 地图编辑器数据：路径走 objects/prefabs/... 顶层 → 转译无显示语义。
+        # 判定只需首段 ∈ 集合（不用 all-keys——首段命中的就是编辑器字典，
+        # 内部 UUID 互引/节点结构名/曲线名全是机器引用）。显示文本永不落入
+        # 该首段（对话框/字幕在 Texts 等独立顶层）。
+        return True
     if _JSON_HEX_COLOR.fullmatch(value):
         return True
     if _JSON_FORMULA.fullmatch(value):
