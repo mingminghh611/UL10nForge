@@ -1,11 +1,11 @@
 @echo off
 chcp 65001 >nul
-title UL10nForge 0.30.0
+title UL10nForge 0.37.0
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 rem ============================================================
-rem  UL10nForge 0.30.0 - one-click launcher
+rem  UL10nForge 0.37.0 - one-click launcher
 rem  - 内置 Python(runtime\python):解压即用,零环境依赖
 rem  - Double-click to start (no console window)
 rem  - Debug mode: run "%~nx0 debug" to keep console open

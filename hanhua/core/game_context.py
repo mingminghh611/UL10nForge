@@ -38,6 +38,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from .models import ApiConfig
 from .translator import create_client
 
@@ -64,6 +66,19 @@ _CONTEXT_FIELDS = (
     "game_name", "genre", "setting", "summary",
     "characters", "terms", "style", "translation_notes",
 )
+
+# Game Context 键 → GameProfile.context_* 字段（save_game_context 同步
+# 进档案，翻译/审校 prompt 注入同一份数据——§15/§16）
+_CONTEXT_FIELD_MAP: dict[str, str] = {
+    "context_game_name": "game_name",
+    "context_genre": "genre",
+    "context_setting": "setting",
+    "context_summary": "summary",
+    "context_characters": "characters",
+    "context_terms": "terms",
+    "context_style": "style",
+    "context_translation_notes": "translation_notes",
+}
 
 _KNOWN_GENRES = frozenset("""
 RPG 动作 冒险 策略 模拟 视觉小说 恐怖 解谜 射击 竞速 格斗 体育 音乐
@@ -136,6 +151,16 @@ def sample_entries(rows: list[dict], budget: dict[str, int] | None = None,
             continue
         text = str(entry.original or "").strip()
         if not text:
+            continue
+        # 跳过跳过态（skipped/blocked）：提取器判定为引擎控件/结构/键名
+        # 的条目（按钮状态 Normal/Highlighted、输入轴 Horizontal/Submit、
+        # 序列化字段名）是程序已判明的非翻译文本——抽样喂给识别模型只会
+        # 污染判断（把按钮状态当剧情词）。pending/failed/translated 才是
+        # 用户可见文本候选。2026-08-31 用户实证「介绍全未知」：Cell
+        # Machine 的 20 条样本里 10 条是这类被跳过项，genre/setting 被
+        # 带偏成 未知。translated 条目保留（记忆直填的结果仍是游戏文本）。
+        status = str(entry.status or "").lower()
+        if status in ("skipped", "blocked"):
             continue
         cat = _category_of(entry.meta, text)
         if cat not in buckets:
@@ -251,6 +276,21 @@ def _clean_str_list(value: Any, limit: int) -> list[str]:
     return out
 
 
+def _meaningless(value: Any) -> bool:
+    """语境字段是否无实际内容（模型无法确定的表现）。
+
+    「未知」字符串、空串、空数组都算无内容——不注入翻译 prompt、
+    不同步进档案（防「全未知介绍」黑屏与档案语义污染）。
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip() or value.strip() == "未知"
+    if isinstance(value, list):
+        return not value
+    return False
+
+
 def parse_game_context(raw: str) -> dict:
     """识别模型输出 → 规范 Game Context dict（保守容错）。
 
@@ -332,15 +372,48 @@ class GameContextRecognizer:
         BaseClient.chat 签名 (system, messages)——max_tokens/temperature/
         timeout 从 ApiConfig 读取（与翻译/审核链路同一约定），此处构造
         带识别参数（识别输出为 JSON schema ≤2k tokens）的配置副本。
+
+        2026-08-31：本地路径（mode=local）改为直连 llama-server 的
+        /v1/chat/completions——原 create_client 把 system 放 messages[0]
+        且默认带 response_format（部分 llama-server 组合下 JSON 被包进
+        ```json 代码块/报错），4B 审核模型识别输出因此丢失（黑屏空介绍
+        的另一直接根因）。直连走与 ReviewModelService.chat 相同的形式
+        （system 独立、无 response_format、cleanup 兜底），与 4B 审核
+        链路行为完全一致，稳定返回可解析 JSON。
         """
         user = build_recognition_user_prompt(samples, source_lang)
+        if self.config.mode == "local":
+            payload = {
+                "model": self.config.model or "local",
+                "messages": [
+                    {"role": "system", "content": _RECOGNITION_SYSTEM},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            }
+            try:
+                resp = httpx.post(
+                    self.config.base_url.rstrip("/") + "/chat/completions",
+                    headers={"Authorization": f"Bearer {self.config.api_key}"},
+                    json=payload,
+                    timeout=self.timeout, trust_env=False, verify=False)
+                resp.raise_for_status()
+                content = resp.json()["choices"][0]["message"]["content"]
+            except (httpx.HTTPError, KeyError, TypeError, ValueError,
+                    IndexError) as exc:
+                raise RuntimeError(f"游戏语境识别请求失败：{exc}") from exc
+            return str(content or "")
         client = create_client(replace(
             self.config,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             timeout=self.timeout))
-        return str(client.chat(
-            _RECOGNITION_SYSTEM, [{"role": "user", "content": user}]) or "")
+        result = client.chat(
+            _RECOGNITION_SYSTEM, [{"role": "user", "content": user}])
+        if isinstance(result, tuple):
+            return str(result[0] or "")
+        return str(result or "")
 
 
 # ── 持久化（ProjectStore KV，§23） ──────────────────────────
@@ -374,6 +447,29 @@ def save_game_context(store, ctx: dict) -> None:
     try:
         store.set_profile_value(GAME_CONTEXT_KEY, clean)
     except Exception:  # noqa: BLE001 持久化失败降级（不阻断识别流程）
+        pass
+    # 2026-08-31 语境生效（此前 context_* 字段从未被赋值——识别结果只
+    # 落在 KV，翻译/审校的 build_game_context_block 恒读空 profile →
+    # 语境零效果）。同一份数据同步进 game_profile：get_profile() 读出的
+    # profile 携带 context_* 字段，翻译 system prompt 与审校 hint 才能
+    # 真正注入游戏语境。「未知」/空数组是模型无法确定的表现，不产生
+    # 注入价值且会污染档案语义——只同步有实际内容的字段。profile 无
+    # 字段/存储失败都静默降级，不阻断识别。
+    try:
+        profile = store.get_profile()
+        changed = False
+        for key, ck in _CONTEXT_FIELD_MAP.items():
+            value = ctx.get(ck)
+            if _meaningless(value):
+                value = ""
+            current = getattr(profile, key, None)
+            if isinstance(current, list) != isinstance(value, list) \
+                    or current != value:
+                setattr(profile, key, value)
+                changed = True
+        if changed:
+            store.set_profile(profile)
+    except Exception:  # noqa: BLE001 档案同步失败不阻断识别
         pass
 
 

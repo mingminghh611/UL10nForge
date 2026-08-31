@@ -1024,11 +1024,25 @@ class HomePage(QWidget):
             raise RuntimeError("没有可识别的文本样本（项目为空）")
         config = api
         if api.mode == "local":
-            runtime = local_model.ensure_running(api)
+            # 2026-08-31 语境识别改用 4B 审核模型：1.8B 翻译模型输出
+            # JSON schema 能力弱，识别结果常为空/纯「未知」（黑屏空介绍
+            # 与「没有实际作用」的直接根因）。走与审核相同的
+            # ReviewModelService（review_runtime.json 独立签名/端口 8081、
+            # --reasoning off 稳定输出 JSON，与翻译 1.8B 互不干扰）；4B
+            # 缺失（只装了翻译模型）时同链路报「审核模型缺失」——识别
+            # 失败走 error 降级，不阻断翻译。
+            from hanhua.core.review_server import ReviewModelService
+            service = ReviewModelService(resource_dir)
+            try:
+                info = service.ensure_running()
+            except Exception as exc:  # noqa: BLE001 识别服务不可用 → 明确报错
+                raise RuntimeError(
+                    f"游戏语境识别需要 4B 审核模型（本地模式）：{exc}") from exc
             from hanhua.core.models import ApiConfig
             from dataclasses import replace
-            config = replace(api, base_url=runtime.endpoint,
-                             api_key=runtime.api_key, model=runtime.model)
+            config = replace(api, base_url=info["base_url"],
+                             api_key=info["api_key"],
+                             model="game-context")
         # 原文语言：从游戏档案读取（store 是 ProjectStore，只有 get_profile()）
         profile = store.get_profile()
         source_lang = getattr(profile, "source_lang", "") or "auto"

@@ -43,6 +43,18 @@ class GameContextDialog(QDialog):
         body_lay.setSpacing(10)
 
         rows = self._build_rows()
+        if not rows:
+            # 2026-08-31 空上下文兜底：识别失败/结果全「未知」时对话框
+            # 呈现提示文案，不再是一片黑色空窗（用户实证「查看游戏介绍
+            # 是黑色」的根因之一）。
+            empty = QLabel(
+                "游戏语境尚未建立或识别结果为空。\n"
+                "请点击「开始识别」分析游戏背景；\n"
+                "识别完成后此处会显示游戏介绍。")
+            empty.setWordWrap(True)
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setStyleSheet("color:#8a8a8a;")
+            body_lay.addWidget(empty)
         for label, value in rows:
             if not value:
                 continue

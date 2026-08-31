@@ -2603,6 +2603,13 @@ def _should_downgrade_pending(entry: TextEntry) -> bool:
         return False
     fmt = entry.meta.get("textasset_format")
     inner = str(entry.meta.get("inner_path", ""))
+    if fmt == "json":
+        # JSON 数据区结构过滤（8 More Lives 实证 2778 条 hex 颜色/数值公式/
+        # 资源引用枚举/数组下标枚举漏网进池）——结构与显示叶子保护见
+        # _is_json_data_area。csv/xml 特判在上（此前的值形态/键风格/硬结构
+        # 规则对 ALL-CAPS 枚举与公式是放行的——_WORD_CASE 把 'ARCTIC'
+        # 当显示文本，这就是数据区全部漏网的原因）。
+        return _is_json_data_area(inner, str(entry.original or ""))
     if fmt == "csv" and entry.meta.get("source_col") is not None:
         # CSV 多语言词典：source_col 是表头声明的语言列（ENG 等），列语义
         # 即"该语言的显示文本"——确定性证据。软猜测（引擎串/键风格/硬结构
@@ -2652,6 +2659,86 @@ def _should_downgrade_pending(entry: TextEntry) -> bool:
             and is_credit_like(entry.original)):
         return False
     return True
+
+
+# ── JSON TextAsset 数据区过滤（8 More Lives 实证 2026-08-31） ────────────
+# 游戏数据文件（平衡表/全局设置/技能/装备字典）里，叶子字段大量是
+# 机器可读值——hex 颜色、数值公式、资源引用（音效/图标/逻辑枚举）、
+# 数组下标+枚举标签。这些值经 json 分支提取后全部 pending 进池，翻译
+# 成中文必然破坏：颜色查表、属性公式（STR*0.2）、音效/动画/逻辑名
+# （STRIKE/FIST/UNDEAD）都是游戏内部引用标识符。同时 ARCTIC/STRIKE/
+# MELEE 等词在数据区（GlobalBiomsDistribution/0/0）与真文本区
+# （Texts/ARCTIC/Text='Arctic'）同时出现——只能按 inner_path 结构拦截
+# （structure-based），绝不能按值拦截（value-based 会误杀显示区）。
+
+# 资源/渲染引用叶子：值若为 hex 颜色或全大写枚举 → 内部引用标识符。
+# 含该游戏语料的实际字段（VisualLogic/VisualEffect/SoundEffect/Icon/
+# Hex/Name/VisualStance/MovementTag/CombatAI/Layer/Source/Hidden…）。
+_JSON_REF_LEAVES = frozenset((
+    "Hex", "Color", "Icon", "VisualLogic", "VisualEffect", "SoundEffect",
+    "SFX", "Sound", "Music", "Sprite", "Material", "Prefab", "Texture",
+    "Animation", "Controller", "Shader", "Image", "Model", "Mesh",
+    "Effect", "Particle", "Font", "Background", "Visual", "Name",
+    "VisualStance", "VisualOverride", "VisualGroupOverride", "CombatAI",
+    "SoundId", "MovementTag", "Source", "Layer", "Hidden", "HitName",
+    "Set_To_Gameobject",  # 音频配置 JSON（dcdb50a1 实证）：目标游戏对象名
+))
+# 确定性显示文本叶子：其值（无论形态）是给玩家看的文本（Texts/*/Text、
+# Names/*/Text 人名、Description/Tooltip/Title 等），数据区规则一律放行。
+_JSON_DISPLAY_LEAVES = frozenset((
+    "Text", "Description", "Tooltip", "Title", "Label", "Hint", "Tip",
+    "SubText", "ButtonLabel", "Dialogue", "Line",
+))
+# hex 颜色 #RRGGBB
+_JSON_HEX_COLOR = _re.compile(r"^#[0-9A-Fa-f]{6}$")
+# 属性公式 STR*0.2 / DEX*0.15
+_JSON_FORMULA = _re.compile(r"^[A-Za-z]{2,10}\*[\d.]+$")
+# 全大写枚举值（≤20 字符，可含下划线/连字符）：数据区枚举标签
+_JSON_ALL_CAPS = _re.compile(r"^[A-Z][A-Z0-9_\-]{0,19}$")
+# 资源引用叶子 + 非 hex 非全大写值（VisualStance='2H'、Set_To_Gameobject=
+# 'UI'/'main'）：引用叶子的值本身就是内部标识符（姿态/目标对象/图层），
+# 词形任意（2H 混合大小写、main 小写）——值匹配引用叶子 → 跳过
+_JSON_REF_LEAF = _re.compile(r"^[A-Za-z0-9_\-]{1,24}$")
+
+
+def _is_json_data_area(inner: str, value: str) -> bool:
+    """JSON TextAsset inner_path 是否数据区条目（返回 True → 跳过）。
+
+    保护优先：Texts/Languages 顶层与确定性显示叶子（Text/Description…）
+    永不跳过——人名显示（Names/*/Text）、语言名、UI 词典都在这。
+    数据区判定（结构信号，非值信号）：
+      1. hex 颜色值（#7d1923）
+      2. 数值公式（STR*0.2）
+      3. 资源引用叶子 + hex/全大写值（VisualLogic='STRIKE'/Hex='#…'）
+      4. 数组下标叶子 + 全大写值（GlobalBiomsDistribution/0/0='ARCTIC'）
+      5. 嵌套(≥2 段) + 全大写值（BiomeFallbacks/LAKE='RIVER'——叶子是
+         枚举键而非显示字段，值是音乐组/回退/招募人群枚举）
+    """
+    segs = inner.split("/")
+    if not segs:
+        return False
+    if segs[0] in ("Texts", "Languages"):
+        return False
+    if _JSON_HEX_COLOR.fullmatch(value):
+        return True
+    if _JSON_FORMULA.fullmatch(value):
+        return True
+    leaf = segs[-1]
+    if leaf in _JSON_DISPLAY_LEAVES:
+        return False
+    if leaf in _JSON_REF_LEAVES:
+        # 引用叶子 + 无空格标识符值 → 内部引用（含 2H/main 等非全大写）。
+        # 有空格的值（'heavy plate armor'）是描述性文本，不在此列
+        if _JSON_REF_LEAF.fullmatch(value):
+            return True
+        if _JSON_HEX_COLOR.fullmatch(value) or _JSON_ALL_CAPS.fullmatch(value):
+            return True
+        return False
+    if leaf.isdigit() and _JSON_ALL_CAPS.fullmatch(value):
+        return True
+    if len(segs) >= 2 and _JSON_ALL_CAPS.fullmatch(value):
+        return True
+    return False
 
 
 def extract_asset_file(path: str | Path, file_id: str | None = None,
