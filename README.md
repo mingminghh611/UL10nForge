@@ -62,18 +62,11 @@
 
 ## 3. 安装和使用说明
 
-### 3.1 下载（两种方式任选）
+### 3.1 下载
 
-**方式一：网盘下载（国内推荐，速度快）**
+**GitHub Releases 分卷下载**
 
-> 网盘链接:https://pan.quark.cn/s/234febb890a9?pwd=NAwP
-> 下载后解压得到完整应用目录
-
-**方式二：GitHub Releases 分卷下载**
-
-1. 在 [Releases 页面](https://github.com/mingminghh611/UL10nForge/releases) 下载 **4 个分卷**（`.7z.001` ~ `.7z.004`，GitHub 单文件 2GB 限制）到同一目录
-2. 用 7-Zip（https://www.7-zip.org）解压 `.7z.001`——自动合并全部分卷，得到完整应用目录
-3. 建议对照页面上的 SHA256 校验文件完整
+在 [Releases 页面](https://github.com/fkjy-123/UL10nForge/releases/tag/new-edition)) 
 
 ### 3.2 安装步骤
 
