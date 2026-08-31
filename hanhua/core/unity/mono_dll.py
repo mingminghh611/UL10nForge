@@ -177,6 +177,74 @@ def _is_exclamation_ui_word(s: str) -> bool:
     return True
 
 
+# 物理按键名（alisa-demo 实证）：输入绑定配置里用作「按键名标签」的字
+# 面量（InputBinding key / PlayerPrefs 绑定键 / 显示在重绑 UI 的按钮名）。
+# 它们会被验证为 UI 文本（流入重绑 UI 的 set_text），但**翻译后绑定失效**
+# ——按键名是引擎解析值，必须保留原文（与引擎串同一硬结构语义，但
+# 数据流证明已让它绕过 is_engine_string 门）。纯字面量集合，不误伤
+# 真实对话（'Esc' 在对话里是语气词时不在表内/不匹配模式）。
+_INPUT_KEY_NAME_LABELS = frozenset({
+    # 手柄 JS_ButtonN（Unity 遗留输入）
+    *(f"JS_Button{i}" for i in range(20)),
+    # 轴名称（Unity 遗留输入 Axis 名；含 '1st Axis ±'/'2ndAxis±' 两种形态）
+    "1stAxis", "2ndAxis", "3rdAxis", "4thAxis", "5thAxis", "6thAxis",
+    "7thAxis", "8thAxis", "9thAxis", "10thAxis", "11thAxis", "12thAxis",
+    *(f"{n} Axis" for n in ("1st", "2nd", "3rd", "4th", "5th", "6th",
+                            "7th", "8th", "9th", "10th", "11th", "12th")),
+    "X Axis", "Y Axis", "Mouse X", "Mouse Y", "Horizontal", "Vertical",
+    # 键盘键名（KeyCode 名）
+    "Arrow Up", "Arrow Down", "Arrow Left", "Arrow Right",
+    "Up Arrow", "Down Arrow", "Left Arrow", "Right Arrow",
+    "Tab", "Space", "Escape", "Esc", "Return", "Enter", "Backspace",
+    "Delete", "Insert", "Home", "End", "Page Up", "Page Down", "Pause",
+    "CapsLock", "NumLock", "ScrollLock", "PrintScreen", "Left Shift",
+    "Right Shift", "Left Ctrl", "Right Ctrl", "Left Alt", "Right Alt",
+    "LeftControl", "RightControl", "LeftShift", "RightShift",
+    "LeftAlt", "RightAlt", "LeftWindows", "RightWindows", "Menu",
+    "Numpad0", "Numpad1", "Numpad2", "Numpad3", "Numpad4", "Numpad5",
+    "Numpad6", "Numpad7", "Numpad8", "Numpad9",
+    "Keypad Enter", "Keypad Divide", "Keypad Times",
+    "Keypad Minus", "Keypad Plus", "Keypad Period", "Keypad 0",
+    "Keypad 1", "Keypad 2", "Keypad 3", "Keypad 4", "Keypad 5",
+    "Keypad 6", "Keypad 7", "Keypad 8", "Keypad 9", "LB", "RB", "LT",
+    "RT", "Left Bumper", "Right Bumper", "Left Trigger",
+    "Right Trigger", "Left Stick", "Right Stick", "Left Stick Button",
+    "Right Stick Button", "D-Pad Up", "D-Pad Down", "D-Pad Left",
+    "D-Pad Right", "D-Pad", "A Button", "B Button", "X Button",
+    "Y Button", "Square", "Triangle", "Circle", "Cross",
+})
+# casefold 版本（成员判定统一用大小写折叠；避免漏掉 'Escape'→'escape' 等）
+_INPUT_KEY_NAME_LABELS_CASEFOLD = frozenset(
+    x.casefold() for x in _INPUT_KEY_NAME_LABELS)
+
+
+def _is_input_key_name_label(s: str) -> bool:
+    """字面量按键名标签（精确匹配 + 轴/方向键复合形态）。"""
+    core = s.strip()
+    if core.casefold() in _INPUT_KEY_NAME_LABELS_CASEFOLD:
+        return True
+    low = core.casefold()
+    if re.fullmatch(r"js_button[0-9]{1,2}", low):
+        return True
+    if re.fullmatch(r"(?:1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th|11th|12th)"
+                    r"(?:axis)?[ \t]*[+\-]?", low):
+        return True
+    if re.fullmatch(r"(?:1st|2nd|3rd|4th|5th|6th|7th|8th|9th|10th|11th|12th)"
+                    r"[ \t]+axis[ \t]*[+\-]?", low):
+        return True
+    if re.fullmatch(r"(?:left|right)[ \t]+(?:shift|ctrl|control|alt)", low):
+        return True
+    if re.fullmatch(r"arrow[ \t]+(?:up|down|left|right)", low):
+        return True
+    if re.fullmatch(r"(?:up|down|left|right)[ \t]+arrow", low):
+        return True
+    if re.fullmatch(r"(?:keypad|numpad)[ \t]*[0-9]|(?:keypad|numpad)[ \t]+enter|"
+                    r"(?:keypad|numpad)[ \t]+(?:divide|times|minus|plus|period)",
+                    low):
+        return True
+    return False
+
+
 def _safe_resolve_discovery_path(game_root: Path, candidate: Path) -> Path | None:
     """Resolve a discovered path after rejecting any reparse point in its chain."""
     try:
@@ -304,6 +372,12 @@ _LOG_SINKS = frozenset({
     ("UnityEngine.Debug", "LogError"),
     ("UnityEngine.Debug", "LogWarning"),
     ("UnityEngine.Debug", "LogException"),
+    # alisa-demo 实证：MonoBehaviour.print = 旧版 Debug.Log（开发控制台）。
+    # ~120 条调试消息（'Video has ended.'/'Scene Loaded'/'Stage 8 starts'/
+    # 'I did it correctly'）此前未识别为日志 → F33 句子启发式放行
+    # （多余识别根因）。print 是静态方法，MemberRef 为
+    # UnityEngine.MonoBehaviour::print。
+    ("UnityEngine.MonoBehaviour", "print"),
 })
 # IMGUI OnGUI 显示调用（XUnity 框架清单 + 语料挖掘实证：GUI.Label 9 游戏
 # 205 次调用/GUI.Button 9 游戏 220 次——OnGUI 每帧渲染，字符串参数即
@@ -363,6 +437,17 @@ _STRUCTURAL_SINKS = frozenset({
     ("UnityEngine.GameObject", "SendMessage"),
     ("UnityEngine.GameObject", "BroadcastMessage"),
     ("UnityEngine.LayerMask", "NameToLayer"),
+    # alisa-demo 实证：AnimatorStateInfo.IsName(string) = 运行时按动画状态
+    # 名查找（Animator 状态机哈希），~15 条（'Dead Talk'/'Jump In'/
+    # 'Run Away'/'Bath Enter'）此前未识别 → F33 句子启发式放行。字符串
+    # 参数恒为栈顶（struct 接收者在其下方），走栈顶组。
+    ("UnityEngine.AnimatorStateInfo", "IsName"),
+    # alisa-demo 实证：LayerMask.GetMask(params string[]) = 按图层名
+    # 查找（'Block'/'Default'/'EnemyLayer'/'Ignore Raycast'），翻译破坏
+    # 物理碰撞层。params 数组重载 arity=None → 走保守清栈路径（不产生
+    # 证明），但 GetMask 的字符串参数是**确定性结构键**，作为独立
+    # 栈顶 sink 跳过。
+    ("UnityEngine.LayerMask", "GetMask"),
 })
 # 首参组：(type, method) → 参数总数（名字在 stack[-arity] 位置）
 _STRUCTURAL_NAME_SINKS = {
@@ -376,6 +461,18 @@ _STRUCTURAL_NAME_SINKS = {
     ("UnityEngine.Animator", "SetFloat"): 2,
     ("UnityEngine.Animator", "SetInteger"): 2,
     ("UnityEngine.MonoBehaviour", "InvokeRepeating"): 3,
+    # alisa-demo 实证：PlayerPrefs.GetString(key) 按持久化键名查找（输入
+    # 绑定/设置键），翻译破坏按键配置。GetString(实例方法，键在 stack[-2])。
+    # GetInt/GetFloat/HasKey/DeleteKey/SetInt/SetFloat 同 arity 形态；
+    # SetString 首参=键 与 GetString 对称，同 arity 覆盖。
+    ("UnityEngine.PlayerPrefs", "GetString"): 1,
+    ("UnityEngine.PlayerPrefs", "GetInt"): 1,
+    ("UnityEngine.PlayerPrefs", "GetFloat"): 1,
+    ("UnityEngine.PlayerPrefs", "HasKey"): 1,
+    ("UnityEngine.PlayerPrefs", "DeleteKey"): 1,
+    ("UnityEngine.PlayerPrefs", "SetString"): 2,
+    ("UnityEngine.PlayerPrefs", "SetInt"): 2,
+    ("UnityEngine.PlayerPrefs", "SetFloat"): 2,
 }
 _IL_OPERAND_1 = frozenset({
     *range(0x0E, 0x14), 0x1F, *range(0x2B, 0x38), 0xDE,
@@ -800,10 +897,6 @@ def _verified_ui_user_string_tokens(pe, *, cross_sinks: frozenset = frozenset(),
     if not ui_setters and not structural_sinks and not structural_name_sinks:
         # 无任何可判定 sink（UI/结构都无）时结构证明也无需运行
         return set()
-    if not ui_setters and structural_out is None:
-        # 仅结构 sink 且调用方不收集结构证明：逐方法分析无 UI 收益
-        return set()
-        return set()
 
     # 每个方法签名的 string 参数位置（None = 无法解析，不参与传递验证）
     string_params: dict[int, list[bool] | None] = {}
@@ -855,12 +948,45 @@ def _verified_ui_user_string_tokens(pe, *, cross_sinks: frozenset = frozenset(),
                     # ldarga.s / ldloca.s → 引用地址，普通值
                     stack.append("other")
                 elif opcode in (0x7B, 0x7C, 0x7E, 0x74, 0x75, 0x8C, 0x79,
-                                0xA2):
-                    # ldfld / ldflda / castclass / isinst / box / unbox.*
-                    # → 消费接收者，产出普通值
+                                0xA3):
+                    # ldfld / ldflda / castclass / isinst / box / unbox.* /
+                    # ldobj → 消费接收者，产出普通值
                     if stack:
                         stack.pop()
                     stack.append("other")
+                elif opcode == 0x8D:  # newarr
+                    # newarr → 数组元素来源暂存 ("arr", tokens)。调用点
+                    # 是结构 sink（如 LayerMask.GetMask(params string[])）
+                    # 时，数组的所有字面量元素都是结构键（params 数组的
+                    # 元素就是被查找的名字本身）。
+                    if stack:
+                        stack.pop()  # 数组长度
+                    stack.append(("arr", frozenset()))
+                elif opcode == 0xA2:  # stelem.ref
+                    # 栈序：arr, index, value → 元素并入 arr 容器。
+                    # 通用数组合并：新数组元素来源并入已有 ("arr", tokens)。
+                    # 多个元素通过 dup 共享同一 arr 引用（栈上相邻），
+                    # 逐个 stelem 合并后保留。
+                    if len(stack) >= 3:
+                        value = stack[-1]
+                        array, index_elem = stack[-3], stack[-2]
+                        del stack[-3:]
+                        if isinstance(array, tuple) \
+                                and array[0] == "arr":
+                            tokens, args = _string_source(value)
+                            stack.append(
+                                ("arr", frozenset(array[1] | tokens))
+                                if tokens else array)
+                        elif isinstance(index_elem, tuple) \
+                                and index_elem[0] == "arr":
+                            tokens, args = _string_source(value)
+                            stack.append(
+                                ("arr", frozenset(index_elem[1] | tokens))
+                                if tokens else index_elem)
+                        else:
+                            stack.append("other")
+                    else:
+                        stack.clear()
                 elif opcode == 0x73:  # newobj
                     if operand in sb_ctors:
                         # StringBuilder 实例：流式 append 链的 token 容器；
@@ -884,7 +1010,13 @@ def _verified_ui_user_string_tokens(pe, *, cross_sinks: frozenset = frozenset(),
                         # 按钮失灵教训的证明版）
                         if structural_out is not None and stack:
                             tokens, _args = _string_source(stack[-1])
+                            # params string[] 结构 sink（GetMask）：元素
+                            # 在 ("arr", tokens) 容器里（数组元素 = 被
+                            # 查找的名字），一并证明
                             structural_out |= tokens
+                            if isinstance(stack[-1], tuple) \
+                                    and stack[-1][0] == "arr":
+                                structural_out |= stack[-1][1]
                         stack.clear()
                     elif operand in structural_name_sinks:
                         # 首参结构 sink（SetFloat(name, value) 形态）：
@@ -900,8 +1032,25 @@ def _verified_ui_user_string_tokens(pe, *, cross_sinks: frozenset = frozenset(),
                         # 防句子形态启发式放行开发日志串）
                         if log_consumed_out is not None and stack:
                             tokens, _args = _string_source(stack[-1])
+                            # StringBuilder 实例被 log 消费（如
+                            # print(sb.ToString()) 或 print("a"+x) 拼接后
+                            # 打印）——拼接结果整体是日志文本，所有成分
+                            # 都是 mono_diagnostic
+                            if isinstance(stack[-1], tuple) \
+                                    and stack[-1][0] == "sb":
+                                log_consumed_out |= stack[-1][1]
                             log_consumed_out |= tokens
                         stack.clear()
+                    elif operand in sb_tostrings:
+                        # sb.ToString() → 拼接结果片段（流入 setter 时
+                        # 全部 token 验证）
+                        if (stack and isinstance(stack[-1], tuple)
+                                and stack[-1][0] == "sb"):
+                            tokens, args = stack[-1][1], stack[-1][2]
+                            stack[-1] = (("frag", tokens, args)
+                                         if tokens or args else "other")
+                        else:
+                            stack.clear()
                     elif operand in ui_setters or (
                             cross_sinks and member_identity.get(operand)
                             in cross_sinks):
@@ -1127,10 +1276,26 @@ def extract_dll_user_strings(path: str | Path, file_id: str | None = None,
                 continue
             # 无 provenance 的 Bold/WASD/Move 等标识符按枚举名/绑定名保守排除。
             is_ui_text = token_offset in verified_ui_tokens
+            # 字面量按键名标签（alisa-demo 实证）：InputBinding 键名/PlayerPrefs
+            # 绑定键/重绑 UI 的按键名。虽被数据流证明为 UI 文本（mono_ui_setter），
+            # 翻译后按键绑定失效——硬跳过，优先级高于显示判定。真实对话
+            # （'Press Start to begin' 的 Start 是多词句）不受影响。
+            input_key_label = is_ui_text and _is_input_key_name_label(s)
             # 结构证明（镜像用法）：字面量流入 GameObject.Find/SetTrigger
             # 等按名查找 API = 确定性结构键——优先于一切显示判定
             # （对象名同时被 Find 和 set_text 使用的按钮实证：宁漏勿坏）
             is_structural_proven = token_offset in structural_tokens
+            if input_key_label:
+                # 按键名标签虽被证明为 UI 文本，但翻译后按键绑定失效——
+                # 硬跳过（宁漏勿坏）。留档计数。
+                skipped["input_key_label"] = skipped.get("input_key_label", 0) + 1
+                sample = _skipped_sample_entry(
+                    fid, f"skip/us#{offset}", s, kind="us",
+                    reason="input_key_label",
+                    count=skipped["input_key_label"])
+                if sample:
+                    entries.append(sample)
+                continue
             interaction_prompt = is_strong_interaction_prompt(s)
             # 代码拼接的 UI 文本证据：含空格 + 全大写强调词（UI 标签/教程句）。
             # driftapocalypse 真实样本：'BEST SCORE: '、'Hold LEFT or RIGHT to

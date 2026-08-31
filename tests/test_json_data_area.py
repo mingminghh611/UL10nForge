@@ -10,11 +10,14 @@ pending 池，翻译成中文会破坏游戏内部引用（颜色查表/STR*0.2 
 本测试锁定 _is_json_data_area 的结构判定 + _should_downgrade_pending
 的 json 特判接入，防止回归。
 """
-from hanhua.core.models import TextEntry
+import json
+
+from hanhua.core.models import TextEntry, STATUS_PENDING, STATUS_SKIPPED
 from hanhua.core.unity.extractor import (
     _is_json_data_area,
     _should_downgrade_pending,
 )
+from hanhua.core.formats import json_format
 
 DATA_AREA = [
     # (inner_path, value, 说明)
@@ -104,3 +107,64 @@ def test_downgrade_keeps_json_real_text():
         entry = _pending(inner, value)
         assert _should_downgrade_pending(entry) is False, \
             f"{desc}: {inner} = {value!r}"
+
+
+# ── 独立 .json 文本文件路径（parse_file → json_format.extract_json_text）──
+# Task #9 验证发现的缺口：资产内嵌 TextAsset 走 unity/extractor 的
+# _should_downgrade_pending（line 3005），但游戏 Data/ 下的独立 .json
+# 字幕/词典/设置文件走 extractor.parse_file → json_format.extract_json_text，
+# 该路径此前不调用数据区闸门——hex 颜色/数值公式/枚举引用仍以 pending 进池，
+# 翻译后写回破坏游戏内部引用。此组锁定独立文件路径的数据区过滤，防回归。
+
+_STANDALONE = json_format.extract_json_text(json.dumps({
+    "GameColors": {"SHIELD_RED": {"Hex": "#7d1923"}},
+    "Settings": {"MusicGroups": ["MENU", "COMBAT"]},
+    "GlobalBiomsDistribution": [[["ARCTIC"]], [["TAYGA"]]],
+    "AttackAbilitiesDatas": {"CLAW_FIST_STRIKE": {
+        "VisualLogic": "STRIKE", "SoundEffect": "STRIKE", "Icon": "FIST"}},
+    "Weapons": {"GODENDAG": {"VisualStance": "2H"}},
+    "Items": {"1": {"Set_To_Gameobject": "main"}},
+    "Texts": {"NEW_GAME": {"Text": "New Game"},
+              "AP_DESCR": {"Text": "{APS} used for any Actions"}},
+    "Languages": {"EN": {"Text": "English"}},
+    "Names": {"ALEXANDER": {"Text": "Alexander"}},
+}, ensure_ascii=False), "ui.json")
+
+
+def test_standalone_json_skips_data_area():
+    """独立 .json 文件数据区叶子 → skipped（不 pending 进池）。"""
+    by_path = {e.key_path: e for e in _STANDALONE}
+    for inner, _, desc in DATA_AREA:
+        e = by_path.get(inner)
+        if e is None:
+            continue
+        assert e.status == STATUS_SKIPPED, \
+            f"{desc}: {inner} = {e.original!r} 应 skipped"
+
+
+def test_standalone_json_keeps_real_text():
+    """独立 .json 文件真文本（Texts/Languages/Names 显示叶子）→ pending。"""
+    by_path = {e.key_path: e for e in _STANDALONE}
+    for inner, _, desc in REAL_TEXT:
+        e = by_path.get(inner)
+        if e is None:
+            continue
+        assert e.status == STATUS_PENDING, \
+            f"{desc}: {inner} = {e.original!r} 应 pending"
+
+
+def test_standalone_json_skipped_never_written_back():
+    """skipped 数据区条目即使异常带了译文，apply_json 也拒绝写回（宁漏勿坏）。"""
+    by_path = {e.key_path: e for e in _STANDALONE}
+    src = json.dumps({
+        "GameColors": {"SHIELD_RED": {"Hex": "#7d1923"}},
+        "Texts": {"NEW_GAME": {"Text": "New Game"}},
+    }, ensure_ascii=False)
+    entries = json_format.extract_json_text(src, "ui.json")
+    for e in entries:
+        e.translation = "X"
+    out = json_format.apply_json(entries, src)
+    assert "#7d1923" in out, "数据区 hex 必须原样保留"
+    assert "GameColors" in out.split("Texts")[0], "数据区原文不得被改写"
+    assert "X" not in out.split("Texts")[0], "数据区译文不得写回"
+    assert "X" in out.split("Texts")[1], "真文本区正常写回"

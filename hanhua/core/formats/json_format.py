@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re as _re
 from dataclasses import dataclass
 from json import JSONDecodeError
 from pathlib import Path
@@ -310,7 +311,96 @@ def extract_json_text(text: str, file_id: str | None = None) -> list[TextEntry]:
             # （.NET 程序集全名）、m_InternalId（URL）、m_Address（Assets 路径）、
             # m_InternalIds/N（数组父段是键字段，叶子是数字索引）都是真实漏网案例
             entry.status = STATUS_SKIPPED
+        elif _is_json_data_area(entry.key_path, entry.original):
+            # JSON 数据区结构过滤（8 More Lives 实证 2026-08-31）：hex 颜色/
+            # 数值公式/资源引用枚举/数组下标枚举都是游戏内部引用标识符，
+            # 翻译成中文破坏功能。判定与 asset 内嵌 TextAsset 共用同一规则
+            # （unity/extractor 调用方对同路径写回，行不写=不破坏）。
+            entry.status = STATUS_SKIPPED
     return out
+
+
+# ── JSON 数据区过滤（8 More Lives 实证 2026-08-31）──────────────────────
+# 游戏数据文件（平衡表/全局设置/技能/装备字典）里叶子字段大量是机器可读值
+# ——hex 颜色、数值公式、资源引用（音效/图标/逻辑枚举）、数组下标+枚举标签。
+# 这些值翻译成中文必然破坏：颜色查表、属性公式（STR*0.2）、音效/动画/逻辑名
+# （STRIKE/FIST/UNDEAD）都是游戏内部引用标识符。ARCTIC/STRIKE/MELEE 等词在
+# 数据区（GlobalBiomsDistribution/0/0）与真文本区（Texts/ARCTIC/Text='Arctic'）
+# 同时出现——只能按 inner_path 结构拦截（structure-based），绝不按值拦截
+# （value-based 会误杀显示区）。规则与 unity/extractor 共用一份，防分叉。
+
+# 资源/渲染引用叶子：值若为 hex 颜色或全大写枚举 → 内部引用标识符。
+# 含该游戏语料的实际字段（VisualLogic/VisualEffect/SoundEffect/Icon/
+# Hex/Name/VisualStance/MovementTag/CombatAI/Layer/Source/Hidden…）。
+_JSON_REF_LEAVES = frozenset((
+    "Hex", "Color", "Icon", "VisualLogic", "VisualEffect", "SoundEffect",
+    "SFX", "Sound", "Music", "Sprite", "Material", "Prefab", "Texture",
+    "Animation", "Controller", "Shader", "Image", "Model", "Mesh",
+    "Effect", "Particle", "Font", "Background", "Visual", "Name",
+    "VisualStance", "VisualOverride", "VisualGroupOverride", "CombatAI",
+    "SoundId", "MovementTag", "Source", "Layer", "Hidden", "HitName",
+    "Set_To_Gameobject",  # 音频配置 JSON（dcdb50a1 实证）：目标游戏对象名
+))
+# 确定性显示文本叶子：其值（无论形态）是给玩家看的文本（Texts/*/Text、
+# Names/*/Text 人名、Description/Tooltip/Title 等），数据区规则一律放行。
+_JSON_DISPLAY_LEAVES = frozenset((
+    "Text", "Description", "Tooltip", "Title", "Label", "Hint", "Tip",
+    "SubText", "ButtonLabel", "Dialogue", "Line",
+))
+# hex 颜色 #RRGGBB
+_JSON_HEX_COLOR = _re.compile(r"^#[0-9A-Fa-f]{6}$")
+# 属性公式 STR*0.2 / DEX*0.15
+_JSON_FORMULA = _re.compile(r"^[A-Za-z]{2,10}\*[\d.]+$")
+# 全大写枚举值（≤20 字符，可含下划线/连字符）：数据区枚举标签
+_JSON_ALL_CAPS = _re.compile(r"^[A-Z][A-Z0-9_\-]{0,19}$")
+# 资源引用叶子 + 非 hex 非全大写值（VisualStance='2H'、Set_To_Gameobject=
+# 'UI'/'main'）：引用叶子的值本身就是内部标识符（姿态/目标对象/图层），
+# 词形任意（2H 混合大小写、main 小写）——值匹配引用叶子 → 跳过
+_JSON_REF_LEAF = _re.compile(r"^[A-Za-z0-9_\-]{1,24}$")
+
+
+def _is_json_data_area(inner: str, value: str) -> bool:
+    """JSON 条目 inner_path 是否数据区条目（返回 True → 跳过）。
+
+    与 asset 内嵌 TextAsset 共用同一规则（unity/extractor 的
+    _is_json_data_area），保证独立 .json 文件与 Unity 资源里的 JSON
+    TextAsset 过滤口径一致，规则不分叉。
+
+    保护优先：Texts/Languages 顶层与确定性显示叶子（Text/Description…）
+    永不跳过——人名显示（Names/*/Text）、语言名、UI 词典都在这。
+    数据区判定（结构信号，非值信号）：
+      1. hex 颜色值（#7d1923）
+      2. 数值公式（STR*0.2）
+      3. 资源引用叶子 + hex/全大写值（VisualLogic='STRIKE'/Hex='#…'）
+      4. 数组下标叶子 + 全大写值（GlobalBiomsDistribution/0/0='ARCTIC'）
+      5. 嵌套(≥2 段) + 全大写值（BiomeFallbacks/LAKE='RIVER'——叶子是
+         枚举键而非显示字段，值是音乐组/回退/招募人群枚举）
+    """
+    segs = inner.split("/")
+    if not segs:
+        return False
+    if segs[0] in ("Texts", "Languages"):
+        return False
+    if _JSON_HEX_COLOR.fullmatch(value):
+        return True
+    if _JSON_FORMULA.fullmatch(value):
+        return True
+    leaf = segs[-1]
+    if leaf in _JSON_DISPLAY_LEAVES:
+        return False
+    if leaf in _JSON_REF_LEAVES:
+        # 引用叶子 + 无空格标识符值 → 内部引用（含 2H/main 等非全大写）。
+        # 有空格的值（'heavy plate armor'）是描述性文本，不在此列
+        if _JSON_REF_LEAF.fullmatch(value):
+            return True
+        if _JSON_HEX_COLOR.fullmatch(value) or _JSON_ALL_CAPS.fullmatch(value):
+            return True
+        return False
+    if leaf.isdigit() and _JSON_ALL_CAPS.fullmatch(value):
+        return True
+    if len(segs) >= 2 and _JSON_ALL_CAPS.fullmatch(value):
+        return True
+    return False
 
 
 def detect_indent(text: str) -> int | str | None:
@@ -330,6 +420,11 @@ def apply_json(
     translations: dict[TypedPath, str] = {}
     for entry in entries:
         if not entry.translation:
+            continue
+        if entry.status == STATUS_SKIPPED:
+            # 提取期数据区/键字段条目已跳过（结构判定），异常路径若带了
+            # 译文也拒绝写回——宁漏勿坏（GameColors/Hex='#…' 等内部引用
+            # 一旦写坏游戏查表/公式直接失效）
             continue
         path = _resolve_path(document.data, entry.key_path)
         leaf = path[-1] if path else None

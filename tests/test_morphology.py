@@ -9,7 +9,10 @@ from hanhua.core.tooling.morphology import REGISTRY, classify_morphology
 # 形态 → 锚点覆盖（fixture 测试 / 真实样本验证，含修复版本号）
 _COVERAGE = {
     "mono_csharp":
-        "tests/test_mono_ui_wrapper.py（C# 传递验证链 fixture，历史锚点）",
+        "tests/test_mono_ui_wrapper.py（C# 传递验证链 fixture，历史锚点）"
+        "+ tests/test_mono_debug_sinks.py（0.36.10 调试/结构/按键 sink："
+        "MonoBehaviour.print / AnimatorStateInfo.IsName / LayerMask.GetMask "
+        "params / 输入按键名标签 / PlayerPrefs 键）",
     "mono_unityscript":
         "tests/test_mono_ui_wrapper.py 双名 fixture + lilys-day-off 真实样本"
         "（0.14.0 含空格 825 条恢复 / 0.14.1 语气词 29 条恢复）",
