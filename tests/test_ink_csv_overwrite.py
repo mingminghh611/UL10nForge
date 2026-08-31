@@ -91,6 +91,63 @@ class TestInkExtraction:
                              "test.assets", {}, "Chapter1_EN")
         assert [e.original for e in es] == ["^Hi"]
 
+    def test_bare_flow_tokens_filtered(self):
+        # ink 编译产物裸流程 token（无 ^ 前缀）：字节码操作/变量指令/自定义
+        # handler 名。project-arrhythmia 实证——被当对话行译成「出去」等。
+        data = json.dumps({
+            "inkVersion": 19,
+            "root": [[["done"], None],
+                    {"Block": ["^Real line.",
+                               "ev", "out", "/ev", "GetVar", "pop", "nop",
+                               "_id", "spawnActor", "setEmotion", "du",
+                               "StartShop", "MoveToPlace"]}],
+        }, ensure_ascii=False)
+        es = ex._ink_entries("t", 1, data.encode("utf-8-sig"),
+                             "test.assets", {}, "Chapter1_EN")
+        assert [e.original for e in es] == ["^Real line."]
+
+    def test_bare_unknown_single_token_kept(self):
+        # 未知单 token 裸串（不在流程全集）→ fail-open 保留（宁漏勿坏）
+        data = json.dumps({
+            "inkVersion": 19,
+            "root": [[["done"], None],
+                    {"Block": ["^Real line.", "MysteryToken"]}],
+        }, ensure_ascii=False)
+        es = ex._ink_entries("t", 1, data.encode("utf-8-sig"),
+                             "test.assets", {}, "Chapter1_EN")
+        assert [e.original for e in es] == ["^Real line.", "MysteryToken"]
+
+    def test_dot_and_dollar_refs_skipped(self):
+        # 点连无空格 = divert/choice 目标引用；$ 前缀 = 寄存器引用。非对话。
+        data = json.dumps({
+            "inkVersion": 19,
+            "root": [[["done"], None],
+                    {"Block": ["^Real line.", ".^.c-0", "Start.0.g-0.2.$r1",
+                               "$r", "$r1"]}],
+        }, ensure_ascii=False)
+        es = ex._ink_entries("t", 1, data.encode("utf-8-sig"),
+                             "test.assets", {}, "Chapter1_EN")
+        assert [e.original for e in es] == ["^Real line."]
+
+    def test_str_tag_block_identifiers_filtered(self):
+        # str.../str 块内 ^ = 运行时标识符（^hal 动画/^angry 情绪）
+        # #.../# 块内 ^ = 标签元数据/命令模板（^actor:PM_25.01/^Spawn ->）
+        data = json.dumps({
+            "inkVersion": 19,
+            "root": [[["done"], None],
+                    {"Block": ["ev", "str", "^hal", "/str", "/ev",
+                               "#", "^actor:PM_25.01", "/#",
+                               "^Real line.",
+                               "ev", "str", "^rt.tonn.02.A$ What are you doing here?", "/str", "/ev"]}],
+        }, ensure_ascii=False)
+        es = ex._ink_entries("t", 1, data.encode("utf-8-sig"),
+                             "test.assets", {}, "Chapter1_EN")
+        # 块内标识符全部跳过；顶层对话与 choice 文本（$ 引用后显示文本）保留
+        assert [e.original for e in es] == [
+            "^Real line.",
+            "^rt.tonn.02.A$ What are you doing here?",
+        ]
+
 
 class TestCsvOverwriteSource:
     CSV = ("ID,IND,ENG,FRE,CHN\n"

@@ -2331,6 +2331,58 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
 _INK_CONTROL_WORDS = frozenset({"done", "end", "out"})
 _CYRILLIC_MIN = 0x0400
 
+# ink 编译产物裸流程 token（无 "^" 前缀、list 内独立字符串值，翻译破坏对话
+# 流程——project-arrhythmia 实证 2026-09-01：10 个 ink 对象每个被 291 条裸
+# 流程串泄漏成「待翻译」）。全集 68 token 由 .scratch/ink_tokens_gen.py 对
+# D:\游戏 全语料 6296 条裸串自动聚类生成，非手写。分类：
+#   ev/du/pop/nop/str//str 等 = 字节码操作；done/end/out = 流程结束/出口；
+#   GetVar/ChangeVar + _id/_locX/_delay 等 = 变量读写指令与临时变量名；
+#   spawnActor/setEmotion/setStance/setEyes/setMaterial/setGlitch/setChoiceTitle
+#   /blurUI/swapToUI/jumpToUI/triggerUI/triggerVar/unpauseTimeline/loadScene/
+#   wait/ChantSpell/MoveToPlace/StartShop/... = 自定义 handler 名（root[2]
+#   键与 flow token 完全一致——handler 调用以裸字符串作为字节码操作数）。
+# 任何缺失的流程词若以裸形态出现会走下方 fail-open（未知单 token 保留），
+# 不会静默吞掉真对话。
+_INK_BARE_FLOW_TOKENS = frozenset({
+    # 字节码栈操作（编译产物）
+    "ev", "/ev", "str", "/str", "du", "pop", "nop", "out",
+    # 流程控制（Rendezvous 实证）
+    "done", "end",
+    # 变量读写指令
+    "GetVar", "GetVarArray", "ChangeVar", "ChangeVarArray",
+    # 临时/局部变量名（handler 参数占位）
+    "_id", "_locX", "_locY", "_delay", "_lifetime", "_amount", "_open",
+    "_emotion", "_stance", "_overlay", "_material", "_title", "_value",
+    # 游戏自定义 handler 调用名（与 root[2] 键一致）
+    "spawnActor", "hideActor", "showActor", "setStance", "delayStance",
+    "setEyes", "unsetEyes", "setEmotion", "addOverlay", "delOverlay",
+    "tmpOverlay", "setMaterial", "setGlitch", "swapToUI", "jumpToUI",
+    "triggerUI", "triggerVar", "unpauseTimeline", "setChoiceTitle",
+    "blurUI", "unblurUI", "loadScene", "wait",
+    "ChantSpell", "MoveToPlace", "StartShop", "ShopStatus", "OpenTeleportMenu",
+    "FunctionCaller", "EventInvoke", "GoToDiscord", "GoToSteam", "SetFeedback",
+    "UnlockFixingCatapult", "FetchItemFromKimoInventory", "FaceToKimo",
+    "GetOtherVarBool", "IsFinCompleted", "IsMeetWispy", "IsMeetWispyAndTalya",
+    "IsNewSpellAvailable", "CheckArchive", "CheckCharm", "CheckCollectedArchive",
+    "CheckCurrentArchive", "CheckTrophy", "GiveFin", "ObtainPureWater",
+    "current_archive", "multiplayer",
+})
+
+# ink 运行时标识符块（str.../str 与 #.../#，list 内配对）：块内 "^" 值不是
+# 对话。project-arrhythmia 实证 2026-09-01——str 块内是 runtime 标识符：
+#   ^hal/^Busy/^Panels/^focused/^angry/^Neutral/^atan/^go-to-lucentia
+#   /^later/^Demo_WIP/^energy-shell/^life-shell = 动画/姿态/情绪/面板/覆盖层
+#   查找键（spawnActor/setStance/setEmotion/addOverlay 的实参，音视频状态机
+#   按名查表）；str 块内 choice 文本（^rt.tonn.02.A$ What are you doing here?）
+#   带 $ 前缀引用，$ 是 divert 目标标记（$ 前后都保留，翻译只动 $ 后显示
+#   文本，参见 Choice Entry 引用 `.^.c-0`——玩家选它跳转的注册目标）。
+# tag 块（#.../#）内是标签元数据（^actor:PM_25.01/^auto:2）与 handler 定义
+# 的运行时命令模板（^Spawn ->/^Hide ->/^To -> UI/^Blur -> None——游戏
+# 解析命令字符串执行时间线跳转/UI 切换，翻译必坏）。str/tag 块配对检测用
+# _ink_str_tag_spans（兄弟上下文，非路径）。
+_INK_BLOCK_WORDS = frozenset({"str", "#"})
+_INK_BLOCK_CLOSERS = frozenset({"/str", "/#"})
+
 
 def _ink_line_localized(line: str) -> bool:
     """对话行是否已本地化（CJK/西里尔主导）——语言版文件整跳过。"""
@@ -2343,6 +2395,39 @@ def _ink_line_localized(line: str) -> bool:
     if letters == 0:
         return False
     return (cn + jp + ru) / letters > 0.35
+
+
+def _ink_str_tag_spans(seq: list) -> dict[int, str]:
+    """list 内 str.../str 与 #.../# 配对的兄弟下标（ink 编译器把标识符块
+    与对话行展平成同一 list，块界由配对的 'str'/'#' 与 '/str'/'/#' 标记）。
+    返回 {元素下标: 'str'|'#'}。支持同 op 嵌套。project-arrhythmia 实证：
+    root[0] 主流程 246 元素里 'str','^hal','/str' 三连；root[2] handler 定义
+    （spawnActor/setChoiceTitle/swapToUI…）把命令模板包在 #.../# 里。"""
+    members: dict[int, str] = {}
+    n = len(seq)
+    for i, el in enumerate(seq):
+        if not isinstance(el, str):
+            continue
+        op = el.strip()
+        if op not in _INK_BLOCK_WORDS:
+            continue
+        closer = "/str" if op == "str" else "/#"
+        depth = 0
+        for j in range(i + 1, n):
+            e2 = seq[j]
+            if not isinstance(e2, str):
+                continue
+            s2 = e2.strip()
+            if s2 == op:
+                depth += 1
+            elif s2 == closer:
+                if depth == 0:
+                    for k in range(i + 1, j):
+                        if isinstance(seq[k], str):
+                            members[k] = op
+                    break
+                depth -= 1
+    return members
 
 
 def _ink_entries(file_id: str, obj_path_id: int, raw: bytes,
@@ -2410,14 +2495,17 @@ def _ink_entries(file_id: str, obj_path_id: int, raw: bytes,
                     continue
                 walk(v, path + (k,), cur_block)
         elif isinstance(node, list):
+            # 兄弟上下文：str/tag 块内 ^ 值 = 运行时标识符/命令模板（非对话）
+            block_members = _ink_str_tag_spans(node)
             for i, v in enumerate(node):
-                walk(v, path + (i,), cur_block)
+                walk(v, path + (i,),
+                     block_members.get(i, cur_block))
         elif isinstance(node, str):
             v = node.strip()
             if not v:
                 return
-            if v in _INK_CONTROL_WORDS:
-                _skip("ink_control_word")
+            if v in _INK_CONTROL_WORDS or v in _INK_BARE_FLOW_TOKENS:
+                _skip("ink_flow_token")
                 return
             # divert 目标（"->" 键的值）与标签元数据（#f/#n/#c 键的值）
             for seg in path:
@@ -2429,6 +2517,62 @@ def _ink_entries(file_id: str, obj_path_id: int, raw: bytes,
             if not any(c.isalpha() for c in v):
                 _skip("ink_non_text")
                 return
+            if v.startswith("^"):
+                body = v[1:]
+                if not body:
+                    _skip("ink_empty_caret")
+                    return
+                if cur_block == "#":
+                    # tag 块（#.../#）内 ^ = 标签元数据/命令模板（^actor:
+                    # PM_25.01/^auto:2/^Spawn ->/^To -> UI/^Blur -> None——游戏
+                    # 解析命令字符串执行时间线跳转/UI 切换，翻译必坏）
+                    _skip("ink_block_identifier")
+                    return
+                if cur_block == "str" and " " not in body and "$" not in body:
+                    # str 块（str.../str）内单 token 无 $ = 运行时标识符
+                    # （^hal/^angry/^Panels/^go-to-lucentia/^atan——spawnActor/
+                    # setEmotion/addOverlay 实参，音视频状态机按名查表）。
+                    # str 块内带空格或 $ 的是 choice 显示文本（^Choice 1/
+                    # ^rt.tonn.02.A$ What are you doing here?）→ 保留。
+                    _skip("ink_block_identifier")
+                    return
+                # 顶层 ^ 值：对话行/credits 名。单 token（^hal 无空格）在
+                # 块外保留——faerie obj20 'Credits Roll' 的 ^clay/^Programming
+                # /^RavenBane 都是顶层单 token 真显示文本，且含 $ 引用的
+                # choice 文本（^rt.tonn.02.A$ What are you doing here?）$ 后
+                # 显示文本保留（$ 是 divert 目标标记，只在 $ 前截断引用段）。
+                dialogue_lines.append(v)
+                out.append(TextEntry(
+                    file_id=file_id, key_path=_encode_path(path),
+                    original=v,
+                    meta={**base_meta, "ink_text": v,
+                          "inner_path": _encode_path(path),
+                          "ink_block": cur_block, "ink_seq": seq}))
+                seq += 1
+                return
+            # 裸字符串（非 ^ 前缀）
+            if "$" in v:
+                # $ 前缀 = 寄存器引用（$r/$r1），带 → divert 目标；译断跳转
+                _skip("ink_register_ref")
+                return
+            if "." in v and " " not in v:
+                # 点连无空格 = divert/choice 目标引用（.^.c-0、Start.0.g-0.2.
+                # $r1），不是对话文本
+                _skip("ink_dot_ref")
+                return
+            if " " in v:
+                # 未知裸多词：无法归类为流程 token，fail-open 保留（宁漏勿坏）
+                dialogue_lines.append(v)
+                out.append(TextEntry(
+                    file_id=file_id, key_path=_encode_path(path),
+                    original=v,
+                    meta={**base_meta, "ink_text": v,
+                          "inner_path": _encode_path(path),
+                          "ink_block": cur_block, "ink_seq": seq}))
+                seq += 1
+                return
+            # 未知单 token 裸串：不在流程全集 → fail-open 保留（宁漏勿坏；
+            # 未知流程词若为真对话会被保留，可观测不吞）
             dialogue_lines.append(v)
             out.append(TextEntry(
                 file_id=file_id, key_path=_encode_path(path),
@@ -2461,8 +2605,11 @@ def _ink_entries(file_id: str, obj_path_id: int, raw: bytes,
                 # 对话块）；只有字符串叶子交给 walk 提取
                 walk_with_block(v, path + (k,), nb)
         elif isinstance(node, list):
+            # 兄弟上下文与 walk 一致（str/tag 块内 ^ = 运行时标识符）
+            block_members = _ink_str_tag_spans(node)
             for i, v in enumerate(node):
-                walk_with_block(v, path + (i,), cur_block)
+                walk_with_block(v, path + (i,),
+                                block_members.get(i, cur_block))
         elif isinstance(node, str):
             walk(node, path, cur_block)
 
