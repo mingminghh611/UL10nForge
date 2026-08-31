@@ -2717,6 +2717,15 @@ def _looks_like_script_source(raw: bytes) -> bool:
     判定：非空行中命中脚本特征行的占比 ≥30% 且非空行 ≥8。
     实证锚点：a-catfiends-impending-relapse resources.assets#69
     （inspect.lua 库 264 行）命中 45%；真实对话文本 0%。
+
+    JSON 文件例外（project-arrhythmia/dear-edmund/isolated-inhale 实证
+    2026-09-01）：可解析 JSON 的缩进行（裸 { } [ ] 与 "key": value 结构行）
+    命中 _SCRIPT_LINE_PATTERNS 的裸括号行/赋值模式，占比虚高触发整文件
+    误杀——chat/thanks/post_level（PAChat 启动脚本）与 CharacterName_En
+    （对话问答）、Socials（链接数组）都是真显示文本，被 0 条提取吞掉。
+    JSON 结构行在 JSON 分支（stripped.startswith("{")）已处理，这里剔除
+    它们再算占比；Lua/JS/C# 真脚本无 JSON 结构行（实证 inspect.lua 等
+    命中率不受影响，见 test_textasset_script_source_file_produces_no_entries）。
     """
     if not raw:
         return False
@@ -2724,9 +2733,27 @@ def _looks_like_script_source(raw: bytes) -> bool:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         return False
+    stripped_head = text.lstrip().lstrip("﻿")
+    # JSON 文件：整文件可解析 → 剔除 JSON 结构行（裸括号/键值对）后再判定
+    is_json = bool(stripped_head[:1] in ("{", "["))
+    if is_json:
+        try:
+            import json as _json
+            _json.loads(stripped_head)
+        except Exception:  # noqa: BLE001
+            is_json = False
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if len(lines) < _SCRIPT_MIN_CODE_LINES:
         return False
+    if is_json:
+        # JSON 缩进噪音（project-arrhythmia PAChat/CharacterName_En/Socials
+        # 实证 2026-09-01）：裸括号行与 "key": value 结构行是 JSON 排版，不是
+        # 代码。真实 Lua/JS/C# 脚本的键值行形态是赋值（x = ...）不带引号。
+        lines = [ln for ln in lines
+                 if not _re.fullmatch(r"[{}\[\]]", ln)
+                 and not _re.match(r'^"[^"]+"\s*:', ln)]
+        if not lines:
+            return False
     hits = sum(1 for ln in lines
                if any(p.search(ln) for p in _SCRIPT_LINE_PATTERNS))
     return hits / len(lines) >= _SCRIPT_MIN_CODE_RATIO

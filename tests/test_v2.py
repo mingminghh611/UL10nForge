@@ -923,7 +923,59 @@ def test_textasset_script_source_file_produces_no_entries():
     assert _textasset_entries("f1", 100, inspect_lua) == []
 
 
-def test_textasset_short_code_chunk_kept_for_manual_review():
+def test_textasset_json_not_killed_by_script_source():
+    """可解析 JSON 不被 _looks_like_script_source 误杀（0.36.11 修复实证：
+    project-arrhythmia PAChat/thanks/chat、dear-edmund CharacterName_En、
+    isolated-inhale Socials 全被旧判定吞成 0 条——缩进的裸括号行/键值行
+    命中脚本特征占比虚高）。JSON 结构行剔除后再算占比，真显示文本进池。"""
+    # PAChat 脚本（thanks 变体：JSON 缩进 + 真文本）
+    pachat = (
+        '{\n'
+        '  "settings": {\n'
+        '    "initial_branch": "thanks",\n'
+        '    "text_color": "#212121"\n'
+        '  },\n'
+        '  "branches": [\n'
+        '    {\n'
+        '      "name": "thanks",\n'
+        '      "settings": {"clear_screen": "false"},\n'
+        '      "elements": [\n'
+        '        {"type": "text", "data": [" " ]},\n'
+        '        {"type": "text", "data": [\n'
+        '          "Thanks for playing the story mode."]},\n'
+        '        {"type": "text", "data": [\n'
+        '          "While still in development the story mode will be added to over time."]},\n'
+        '        {"type": "text", "data": [\n'
+        '          "So please stay tuned!"]}\n'
+        '      ]\n'
+        '    }\n'
+        '  ]\n'
+        '}\n'
+    ).encode()
+    from hanhua.core.unity.extractor import _looks_like_script_source
+    assert _looks_like_script_source(pachat) is False
+    entries = _textasset_entries("f1", 100, pachat)
+    origins = [e.original for e in entries if e.status == "pending"]
+    assert "Thanks for playing the story mode." in origins
+    # dear-edmund CharacterName_En 形态（问答对话 JSON）
+    qa = (
+        '{\n'
+        '  "characterName": "Dave",\n'
+        '  "questions": [\n'
+        '    {\n'
+        '      "id": 1,\n'
+        '      "text": "Will you help me?",\n'
+        '      "responses": [\n'
+        '        {"text": "Yes, I will give you money."}\n'
+        '      ]\n'
+        '    }\n'
+        '  ]\n'
+        '}\n'
+    ).encode()
+    assert _looks_like_script_source(qa) is False
+    entries2 = _textasset_entries("f1", 101, qa)
+    origins2 = [e.original for e in entries2 if e.status == "pending"]
+    assert "Will you help me?" in origins2
     # 短代码片段（<8 行）不做整文件判定，但行级代码兜底仍过滤确定性
     # 代码行（local 声明），真实文本行保留（0.25.0 修复 3 语义）
     raw = b"local x = 1\nlocal y = 2\nHello there\n"
