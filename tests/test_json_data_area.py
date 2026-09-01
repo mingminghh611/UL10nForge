@@ -53,6 +53,16 @@ DATA_AREA = [
     ("Items/16/Set_To_Gameobject", "UI", "音频目标对象名(全大写)"),
     ("Items/1/Set_To_Gameobject", "main", "音频目标对象名(小写)"),
     ("Items/9/Set_To_Gameobject", "positional", "音频目标对象名(小写)"),
+    # UI 设置定义 JSON（project-arrhythmia ui-setting-def 实证 2026-09-01）：
+    # values/function_call 是机器引用（枚举/对象名/函数调用指令），翻译写坏
+    # 设置读写；name/ui_desc 是真显示文本保留（在 REAL_TEXT 里锁）。
+    ("ArcadeHealthMod/0/values", "menu", "ui-setting values(小写枚举)"),
+    ("ArcadeHealthMod/0/values", "nostalgia", "ui-setting values(小写枚举)"),
+    ("ArcadeHealthMod/0/values", "down", "ui-setting values(小写枚举)"),
+    ("ArcadeHealthMod/0/function_call", "vote::false", "ui-setting function_call(函数指令)"),
+    ("ArcadeHealthMod/0/function_call", "vote::true", "ui-setting function_call(函数指令)"),
+    ("Modifiers/0/values/1", "fil", "ui-setting values(数组下标)"),
+    ("Modifiers/0/values/2", "left", "ui-setting values(数组下标)"),
 ]
 
 REAL_TEXT = [
@@ -62,6 +72,16 @@ REAL_TEXT = [
     ("Languages/EN/Text", "English", "语言名"),
     ("Languages/ZH_CH/Text", "简体中文", "语言名(中文)"),
     ("Languages/ZH_TW_C/FileName", "zh-TW-C", "语言文件名字段"),
+    # ui-setting-def 显示文本（project-arrhythmia 实证）：name 是设置项显示
+    # 名（'Default'/'Practice'/'1 Hit'/'Hated it'），ui_desc 是设置说明句。
+    # 它们与上面的 values/function_call 同处一个顶层块，绝不能误杀。
+    ("ArcadeHealthMod/0/name", "Default", "ui-setting name 显示名"),
+    ("ArcadeHealthMod/0/ui_desc", "All effects", "ui-setting ui_desc 说明"),
+    ("ArcadeHealthMod/0/ui_desc", "Camera will jiggle during gameplay",
+     "ui-setting ui_desc 完整说明句"),
+    ("ArcadeHealthMod/0/ui_desc", "Only needed effects, shake and vignette",
+     "ui-setting ui_desc 带逗号说明句"),
+    ("Languages/EN/FileName", "English", "语言文件名字段"),
     ("STR", "Сила", "顶层键俄语 UI"),
     ("NEW_GAME", "Новая игра", "顶层键俄语 UI"),
     ("MORALE_STATE_0", "Готовность", "顶层键俄语 UI"),
@@ -124,6 +144,10 @@ _STANDALONE = json_format.extract_json_text(json.dumps({
         "VisualLogic": "STRIKE", "SoundEffect": "STRIKE", "Icon": "FIST"}},
     "Weapons": {"GODENDAG": {"VisualStance": "2H"}},
     "Items": {"1": {"Set_To_Gameobject": "main"}},
+    "ArcadeHealthMod": [{"name": "Default", "values": ["menu", "nostalgia"],
+                         "function_call": ["vote::false"], "ui_desc": "All effects"}],
+    "Modifiers": [{"name": "Off", "values": ["fil", "left"],
+                   "function_call": ["vote::true"], "ui_desc": "Only needed effects"}],
     "Texts": {"NEW_GAME": {"Text": "New Game"},
               "AP_DESCR": {"Text": "{APS} used for any Actions"}},
     "Languages": {"EN": {"Text": "English"}},
@@ -256,3 +280,79 @@ def test_extractor_spine_skipped_counter():
         _SPINE_SAMPLE.encode("utf-8"), "data.unity3d", skipped)
     assert entries == []
     assert skipped.get("textasset_json_spine", 0) == 1
+
+
+# ── PAChat 终端脚本 JSON（project-arrhythmia 实证 2026-09-01）─────────────
+# {settings, branches} 顶层是游戏内 PAChat 终端脚本（启动/登录/教程/对话/
+# 结算全在这）。文本值绝大多数是机器引用：分支名（initial_branch/name=
+# 入口跳转标识）、element settings 数组配置（loop:N/alignment:*/width:0.5/
+# bg-color:text-color/font-style:bold）、data 命令 token（wait::2/branch::
+# login/replaceline::6::…/setbg::E0E0E0/loadscene:Main Menu）。真显示文本
+# 只占少部分且与命令 token 在同一个 data 数组里逐条混杂——条目级过滤
+# 只能拦命令前缀，全文件机器引用主导 → 文件级跳过整文件（宁漏勿坏，
+# 防译坏分支跳转/命令解析）。
+
+_PACHAT_SAMPLE = json.dumps({
+    "settings": {"initial_branch": "login"},
+    "branches": [
+        {"name": "copyright", "settings": {"clear_screen": "true"},
+         "elements": [{"type": "text", "data": ["Copyright (C) 2052 Vitamin Games LLC."]},
+                      {"type": "event", "data": ["wait::2", "branch::login"]}]},
+        {"name": "login", "settings": {"clear_screen": "true"},
+         "elements": [{"type": "event", "data": ["setbg::E0E0E0", "settext::212121"]},
+                      {"type": "text", "settings": ["loop:3"], "data": [" "]},
+                      {"type": "text", "settings": ["alignment:center"],
+                       "data": ["PA Mainframe Interface"]},
+                      {"type": "text",
+                       "data": ["| Login:                   |", "wait::0.5"]}]},
+    ],
+}, ensure_ascii=False)
+
+# 全键子集防误伤：含 branches 但顶层不止 settings/branches（如嵌在真游戏
+# 文件里的子结构）→ 非 PAChat
+_PACHAT_PARTIAL = json.dumps({
+    "settings": {"initial_branch": "login"},
+    "branches": [],
+    "extra": {"a": 1},
+}, ensure_ascii=False)
+
+
+def test_pachat_document_empty():
+    """PAChat 终端脚本 JSON 整文件不产生条目（文件级判定在条目级之前）。"""
+    entries = json_format.extract_json_text(_PACHAT_SAMPLE, "level_1.json")
+    assert entries == [], "PAChat 脚本不得进池（分支名/命令 token 是机器引用）"
+
+
+def test_pachat_detect():
+    """_is_pachat_document 覆盖全键子集变体（缺/多键）。"""
+    import json as _j
+    assert json_format._is_pachat_document(_j.loads(_PACHAT_SAMPLE)) is True
+    assert json_format._is_pachat_document(_j.loads(_PACHAT_PARTIAL)) is False
+    assert json_format._is_pachat_document({}) is False
+    assert json_format._is_pachat_document([]) is False
+    assert json_format._is_pachat_document(
+        _j.loads(json.dumps({"branches": []}))) is True
+
+
+def test_extractor_pachat_skipped_counter():
+    """extractor._textasset_entries 对 PAChat JSON 整文件跳过并留档。"""
+    from hanhua.core.unity import extractor as ex
+    skipped: dict = {}
+    entries = ex._textasset_entries(
+        "asset#resources.assets#1", 1,
+        _PACHAT_SAMPLE.encode("utf-8"), "resources.assets", skipped)
+    assert entries == []
+    assert skipped.get("textasset_json_pachat", 0) == 1
+
+
+def test_pachat_not_false_positive():
+    """非 PAChat 文件（字典/显示文本 JSON）不得被 PAChat 判定误杀。"""
+    import json as _j
+    real = _j.loads(json.dumps({
+        "Texts": {"NEW_GAME": {"Text": "New Game"}},
+        "Settings": {"MusicGroups": ["MENU"]},
+    }))
+    assert json_format._is_pachat_document(real) is False
+    # Spine 是 {skeleton,...} 顶层，不冲突
+    assert json_format._is_pachat_document(
+        _j.loads(_SPINE_SAMPLE)) is False

@@ -2243,6 +2243,13 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
                 # skins/animations 全键查表引用，整文件跳过并留档。
                 _skip("textasset_json_spine")
                 return []
+            if _is_pachat_document(data):
+                # PAChat 终端脚本 JSON（project-arrhythmia 实证 2026-09-01）：
+                # {settings, branches} 顶层，分支名/命令 token/settings 配置
+                # 是机器引用，真显示文本逐条混杂只占少部分 → 整文件跳过
+                # （宁漏勿坏，防译坏分支跳转/命令解析）。判定与 Spine 同款。
+                _skip("textasset_json_pachat")
+                return []
             return _stamp(json_format.extract_json_text(stripped, file_id), "json")
     if stripped.startswith("<") and ">" in stripped:
         from hanhua.core.formats.xml_format import extract_xml_text
@@ -2895,6 +2902,11 @@ _SPINE_TOP_KEYS = frozenset((
     "skeleton", "bones", "slots", "ik", "skins", "animations",
     "transform", "events",
 ))
+# PAChat 终端脚本 JSON 顶层键全集——与 json_format.py 的 _PACHAT_TOP_KEYS
+# 共用定义（防分叉）。{settings, branches} 是游戏内 PAChat 终端脚本
+# （project-arrhythmia 实证 2026-09-01）：分支名/命令 token/settings 配置
+# 是机器引用，真显示文本只占少部分且逐条混杂 → 整文件跳过（宁漏勿坏）。
+_PACHAT_TOP_KEYS = frozenset(("settings", "branches"))
 
 
 def _is_spine_document(data: Any) -> bool:
@@ -2908,6 +2920,28 @@ def _is_spine_document(data: Any) -> bool:
     return bool(isinstance(data, dict) and data
                 and "skeleton" in data
                 and all(key in _SPINE_TOP_KEYS for key in data))
+
+
+def _is_pachat_document(data: Any) -> bool:
+    """JSON 根是否 PAChat 终端脚本文件（返回 True → 整文件跳过）。
+
+    project-arrhythmia 实证 2026-09-01：{settings, branches} 顶层是游戏内
+    PAChat 终端脚本（系统启动/登录/教程/对话/结算全在这），元素含 type:
+    text/event/buttons 与 data 数组。文本值绝大多数是机器引用：分支名
+    （initial_branch/name=入口跳转标识）、settings 数组配置（loop:N/
+    alignment:*/width:0.5/bg-color:text-color/font-style:bold——终端的样式
+    控件配置）、data 命令 token（wait::2/branch::login/replaceline::6::…/
+    setbg::E0E0E0/loadscene:Main Menu——命令名必须字节级保留）。真显示文本
+    （'All rights reserved.'/'| Login: |'/'0%  [...]'/'Subject : Jane'）只
+    占少部分，且与命令 token 在同一个 data 数组里逐条混杂——条目级过滤
+    只能拦命令前缀（_PACHAT_CMD），全文件机器引用主导 → 文件级跳过整文件
+    不产生条目（宁漏勿坏：漏译一段启动滚动文本 vs 译坏分支名/命令解析，
+    后者是功能级破坏）。判定：根为 dict、含 branches、全键 ⊆ 本集。
+    跨游戏泛化：任何用 {settings, branches} 的终端脚本同款拦截。
+    """
+    return bool(isinstance(data, dict) and data
+                and "branches" in data
+                and all(key in _PACHAT_TOP_KEYS for key in data))
 
 
 def _is_json_data_area(inner: str, value: str) -> bool:
@@ -2948,6 +2982,19 @@ def _is_json_data_area(inner: str, value: str) -> bool:
         if _JSON_HEX_COLOR.fullmatch(value) or _JSON_ALL_CAPS.fullmatch(value):
             return True
         return False
+    if "values" in segs or "function_call" in segs:
+        # UI 设置定义 JSON（project-arrhythmia ui-setting-def 实证
+        # 2026-09-01）：顶层块（ArcadeHealthMod/ArcadeSpeedMod/MenuMusic…）
+        # 的 list 元素是 {name, values, function_call, ui_desc}。values/
+        # function_call 是机器引用（'menu'/'nostalgia'/'down'/'global'/
+        # 'your'/'friends'/'fil'/'left'/'right' = 枚举/对象名/语言代码，
+        # 'vote::false'/'vote::true' = 函数调用指令），翻译写坏设置读写。
+        # 值可走 values 数组的子路径（Modifiers/0/values/1='fil'）——
+        # 用段级判定（'values'/'function_call' 出现在路径任一位置）+ 无空格值
+        # → 内部引用（含小写词形）。ui_desc/name 是真显示文本保留。
+        # 结构信号：路径含机器引用容器 + 无空格值 → 内部引用。
+        if " " not in value:
+            return True
     if leaf.isdigit() and _JSON_ALL_CAPS.fullmatch(value):
         return True
     if len(segs) >= 2 and _JSON_ALL_CAPS.fullmatch(value):

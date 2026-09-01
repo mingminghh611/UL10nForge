@@ -954,9 +954,10 @@ def test_textasset_json_not_killed_by_script_source():
     ).encode()
     from hanhua.core.unity.extractor import _looks_like_script_source
     assert _looks_like_script_source(pachat) is False
+    # PAChat 终端脚本整文件跳过（0.36.12 修复实证：分支名/命令 token 是
+    # 机器引用，真文本与命令逐条混杂只占少部分——宁漏勿坏防译坏分支跳转）
     entries = _textasset_entries("f1", 100, pachat)
-    origins = [e.original for e in entries if e.status == "pending"]
-    assert "Thanks for playing the story mode." in origins
+    assert entries == []
     # dear-edmund CharacterName_En 形态（问答对话 JSON）
     qa = (
         '{\n'
