@@ -52,6 +52,31 @@ _PROTECTED_SINGLE_WORDS = frozenset(
     {str(s).casefold() for s, _ in BUILTIN_UI_REFERENCES}
     | {str(s).casefold() for s, _, _ in _GAME_CONTEXT_WORDS})
 
+# 纯专名词表（组合词对跨游戏安全注入白名单，2026-09-01）：
+# 花札/卡牌/角色等专名译名固定无歧义，可作全局参考——即使其他游戏
+# 出现同原文（如某卡牌游戏的 'AoTan'），译成「青短」也是合理固定名。
+# 与「术语污染教训 C6」区分：C6 是动作/方向/设备词（Left→左摇杆）的
+# 语境依赖污染，这里是**固有专名**（Deck 是通用名词 ≠ AoTan 是专名）。
+# 动作/操作短语（'Deck Play'/'Call Koi Koi'）不在表中 → 被
+# _context_preserve_ok 拦截不注入。
+_PURE_PROPER_NOUN = frozenset({
+    # 花札卡面专名（KoiKoi）
+    "Matsu no Tsuru", "Ume no Uguisu", "Sakura no Maku", "Fuji no Fujoki",
+    "Ayame no Hashi", "Botan no Chou", "Hagi no Inoshishi",
+    "Susuki no Tsuki", "Susuki no Gan", "Kiku no Sake", "Momiji no Shika",
+    "Yanagi no Michikaze", "Yanagi no Tsubame", "Kiri no Houou",
+    "AoTan", "AkaTan", "Ame Shikou",
+})
+
+# 通用 UI 组合短语白名单（组合词对跨游戏安全注入）：主菜单/结算/操作
+# 提示等任何游戏含义一致、语境独立的高频短语。与 _PURE_PROPER_NOUN
+# 的专名固定译名并列——这些短语也满足「跨游戏复用不误伤」。
+_COMMON_UI_PHRASES = frozenset({
+    "press start", "play with me", "new game", "continue",
+    "you win", "you lose", "press any key", "main menu",
+    "options", "credits", "restart", "high score", "game over",
+})
+
 # ── 阈值（记忆生命周期） ─────────────────────────────────────────────
 ACTIVE_MIN_EVIDENCE = 2    # pending → active 的证据门槛（参与注入）
 DIRECT_APPLY_MIN_EVIDENCE = 3  # 直接应用的最低证据（多游戏验证级别）
@@ -360,6 +385,40 @@ class AgentMemory:
 
     # ── 运用：注入 prompt 参考（混合模式的参考档） ───────────────────
 
+    @staticmethod
+    def _context_preserve_ok(source: str, target: str) -> bool:
+        """组合词对（含空格）是否可作全局参考注入。
+
+        KoiKoi 实证（2026-09-01）：组合词对也会被跨游戏复用误伤——
+        'Deck Play'（花札「牌堆出牌」）被提成 (Deck, 牌组) 后，其他游戏
+        'Deck'（卡牌构筑 deck）被强制成「牌组」，语境不通。组合词对只在
+        满足以下条件之一时注入：
+          - target 含权威中文（'Koi Koi'→'Koi Koi' 保留型直接回显可注）；
+          - source 全大写（'YOU WIN!'→'你赢了' 是通用 UI 全大写提示，
+            语境独立）；
+          - source 是**纯专名**（卡牌/武器/角色名——'AoTan'→'青短'），
+            由 _PURE_PROPER_NOUN 词表界定，译名固定无歧义。
+        其余组合词对（动作/操作短语如 'Deck Play'/'Call Koi Koi'）跳过
+        注入，避免跨游戏语境污染（术语污染教训 C6 组合词对的语境依赖）。
+        """
+        src_s = str(source or "").strip()
+        tgt_s = str(target or "").strip()
+        if " " not in src_s:
+            return True                 # 单 token 走 _PROTECTED_SINGLE_WORDS
+        if not tgt_s or tgt_s.casefold() == src_s.casefold():
+            return True                 # 保留型（itch→itch / Koi Koi→Koi Koi）
+        if src_s.isupper():
+            return True                 # 全大写通用提示（YOU WIN!）
+        if src_s in _PURE_PROPER_NOUN:
+            return True                 # 纯专名（AoTan→青短，译名固定）
+        # 通用 UI 组合短语白名单（跨游戏高频、语境独立）：
+        # Press Start/Play with me/New Game/You Win/You Lose 等主菜单
+        # 与结算提示，任何游戏含义一致，注入安全（语境污染 vs 有用参考
+        # 权衡——这类短语全大写提示在 metadata 也常见，翻译受益明显）。
+        if src_s.casefold() in _COMMON_UI_PHRASES:
+            return True
+        return False
+
     def reference_pairs(self, limit: int = 0) -> list[tuple[str, str]]:
         """active 记忆的 (原文, 译文) 参考对，注入翻译 prompt。
 
@@ -369,8 +428,12 @@ class AgentMemory:
         2026-08-14（play→播放 事故）：与内置人工规则（BUILTIN_UI_
         REFERENCES / _GAME_CONTEXT_WORDS）冲突的单字词记忆不注入——
         内置规则随 prompt 恒在，冲突记忆只会覆盖正确规则（参考译例
-        对模型比规则更显眼）。非冲突单字词（Reroll→重掷）与组合词
-        对照常注入。
+        对模型比规则更显眼）。
+
+        2026-09-01（KoiKoi 组合词对污染）：组合词对也加语境保护——
+        非保留型/非全大写/非纯专名的动作短语（'Deck Play'→牌堆出牌
+        被提炼成 Deck→牌组 污染跨游戏）不注入；纯专名（'AoTan'→
+        '青短'）译名固定可全局注入。
         """
         rows = self.conn.execute(
             "SELECT key, value, hits FROM memories"
@@ -379,7 +442,8 @@ class AgentMemory:
         pairs = [(r["key"], r["value"]) for r in rows
                  if (len(str(r["key"]).split()) > TERM_MAX_WORDS
                      or str(r["key"]).casefold()
-                     not in _PROTECTED_SINGLE_WORDS)]
+                     not in _PROTECTED_SINGLE_WORDS)
+                 and self._context_preserve_ok(r["key"], r["value"])]
         if limit > 0:
             pairs = pairs[:limit]
         return pairs

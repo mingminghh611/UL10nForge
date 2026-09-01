@@ -818,7 +818,13 @@ class BatchTranslator:
             # 成虚批几十条且长时间无进度。改为按成员完成数（真实条数）
             # + 时间节流触发：批粒度与设置 batch_size 对齐，卡顿感消失）
             done_since_emit = 0
-            last_emit_ts = 0.0
+            # last_emit_ts 初始化为当前单调时钟（而非 0.0）：首条完成时
+            # now - 0.0 恒 > 1.5s（wall-clock 绝对时间），若初始 0.0 会让
+            # 首条触发一次「假 emit」（done=1），随后批内逐条（<1.5s）
+            # 都不触发，直到末条 completed==len 才再 emit → 活动流只见
+            # 「首条 + 全批」两条虚批（#27 实证：batch_size=16 显示每批
+            # 2 条——真实条数 2 就是 2，但首条假 emit 让 delta 分裂）。
+            last_emit_ts = time.monotonic()
 
             def consume_native_result(
                     result: tuple[TextEntry, str, bool]) -> None:
@@ -861,12 +867,27 @@ class BatchTranslator:
                 completed_representatives += 1
                 done_since_emit += len(group)
                 now = time.monotonic()
-                if (done_since_emit >= self.batch_size
-                        or now - last_emit_ts >= 1.5
+                # 进度上报 = 真实唯一文本累计 + 1.5s 时间节流兜底。此前按
+                # 批次号节流（completed_representatives % batch_size==0）：
+                # 同文分组使完成代表数 < 实际条数，batch_size=16 时批内
+                # 逐条完成也常到不了 16 → 活动流显示「每批 2 条」虚批。
+                # 1.5s 兜底也确保 batch_size=1 时逐条仍实时刷新（#27
+                # 实证：设置 16 条/批实际每批 2 条——真实条数就是 2，
+                # 显示如实；用户预期的「16 条一批」在本地逐条模式下
+                # 不存在，逐条请求就是每条一次模型调用）。
+                if (now - last_emit_ts >= 1.5
+                        or done_since_emit >= self.batch_size
                         or completed_representatives
                         == len(representatives)):
                     done_since_emit = 0
                     last_emit_ts = now
+                    flush()
+                    emit_stats()
+                elif completed_representatives == len(representatives):
+                    # 兜底：全部完成但上面任一条件未触发（本轮无成功
+                    # 翻译——done 全失败时逐条 status 已置 failed，
+                    # stats.done 不增，1.5s 内无 emit）→ 主动 emit 一次
+                    # 让 UI 看到最终 failed 状态。
                     flush()
                     emit_stats()
 

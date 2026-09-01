@@ -2753,16 +2753,23 @@ def test_il2cpp_extract_filters_engine_noise_and_classifies():
                if not e.key_path.startswith("skip/")}
     # #14 之后含字母的 {0} 模板不再跳过：显示形态才 medium，普通模板
     # （"{0} bytes processed by {1}"）→ display/low 留档可见（过滤不是删除）
-    assert set(by_orig) == {"Press E to interact", "A buffer must be provided",
+    # B4 吸收层（2026-09-01）：'A buffer must be provided' 是引擎异常
+    # 消息（句号结尾 + 引擎前缀词），被吸收为 skipped（reason=engine_
+    # log_message）——不再产生 pending 污染自动翻译池。
+    assert set(by_orig) == {"Press E to interact",
                             "{0} bytes processed by {1}"}
     prompt = by_orig["Press E to interact"]
     assert (prompt.status, prompt.meta["confidence"], prompt.meta["role"]) == (
         "pending", "medium", "display")
-    sentence = by_orig["A buffer must be provided"]
-    assert (sentence.status, sentence.meta["confidence"]) == ("pending", "low")
     fmt = by_orig["{0} bytes processed by {1}"]
     assert (fmt.status, fmt.meta["confidence"], fmt.meta["reason"]) == (
         "pending", "low", "il2cpp_format_template")
+    # B4：'A buffer must be provided' 被吸收为 skipped（不产生 pending）
+    buffered = [e for e in parsed.entries
+                if e.original == "A buffer must be provided"]
+    assert buffered and buffered[0].status == "skipped", buffered
+    assert buffered[0].meta.get("reason") == "engine_log_message"
+    assert buffered[0].key_path.startswith("skip/")
 
 
 # ── 0.25.0 修复 3：单行代码判定 / BOM / 纯符号串 / FungusLua 整文件 ──

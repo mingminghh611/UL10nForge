@@ -75,6 +75,337 @@ def _is_display_template(s: str) -> bool:
         or _IL2CPP_VALUE_RATIO.search(s)
         or _IL2CPP_VALUE_DELTA.search(s)
         or _IL2CPP_INTERACTION_TEMPLATE.match(s))
+
+
+# ── 引擎日志/异常消息判定（B4 吸收层）─────────────────────────
+# il2cpp 引擎字符串（异常消息/调试日志/渲染 Pass/Input System 绑定/
+# URP Debug 面板/TMP 处理步骤/着色器路径/构造串/物理按键名）是确定性
+# 形态，真实游戏显示文本中几乎不可能完整出现。命中 → skipped（reason=
+# engine_log_message + 限量样本留档），不产生 pending——KoiKoi 实证
+# 1095 条 pending 全 low（引擎日志污染）→ 自动翻译池空 → 每批 1-2 条
+# 慢翻译（识别 B4/E3）。未被命中的留档条目仍是哑信号：宁可多留不可
+# 误杀（宁漏勿坏），真实游戏文本（'Koi Koi'/'Boar Deer Butterfly'）
+# 必须保留为可译条目。
+_ENGINE_QUOTE_JUDGE = re.compile(
+    r"""^['"][^'"]{1,60}['"]\s+
+        (?:is|are|was|were|has|have|cannot|can't|does not|do not|should not|
+           must not|must|not|missing|already|demands?|requires?|
+           not found|not valid|not supported|not allowed|not present)""",
+    re.I | re.X)
+_ENGINE_PAREN_HEAD = re.compile(r'^\([^)]{0,50}\)')
+_ENGINE_HEX_FMT = re.compile(r'0x\{|\\u\{|\\U\{')
+_ENGINE_FMT_ONLY_HEAD = re.compile(r'^\{0')
+_ENGINE_ERRWORD = re.compile(
+    r'\b(?:cannot be|can not be|can\'t|cannot|must not|must be|should not|'
+    r'is not supported|not supported|is not allowed|not allowed|is not valid|'
+    r'not valid|not found|not present|does not exist|not exist|not implemented|'
+    r'is not|are not|was not|were not|has not|have not|does not|do not|'
+    r'could not|would not|failed|failure|error|invalid|undefined|'
+    r'null reference|out of range|out of memory|exception|denied|missing|'
+    r'unable|insufficient|illegal|malformed|obsolete|deprecated|overflow|'
+    r'underflow|corrupt|unavailable|already been|already added|already bound|'
+    r'already contains|already exists|too small|too big|too many|too large|'
+    r'exceeds|exceeded|attempted|attempting|trying to|requires|required to|'
+    r'needs to|should have|mismatch|does not support|should not be|'
+    r'cannot be called|not be called|is not a|are not a|must not be|'
+    r'can not be|null or empty|has no name|must implement|can not|'
+    r'is null|cannot be null|can not be null|is read-only|is of a fixed size|'
+    r'was probably not|not be blitted|not allocated|not dynamic|'
+    r'belongs to a different domain|can only be stopped|only be stopped|'
+    r'not be called on|is not dynamic|not be null)\b', re.I)
+# 引擎日志特征词（无显式 errword 但形态确定）
+# B4 补充（2026-09-02，KoiKoi 实证）：A buffer must be provided /
+# Coroutine container not configured / No receiver for uri / Maximum
+# event size is / Only one XR display is supported 等异常消息被该正则吸收
+# （errword 已含 is read-only/cannot be null 等），B4 吸收层在模板分类
+# 之前——KoiKoi 102 条 pending 仍全 low 是**宁漏勿坏**的保守结果
+# （识别宁严勿漏：宁可多留不可误杀真实文本）。此层收紧会误杀真实显示
+# 模板（HP: {0}/{1} 等），故不在此处扩正则，留档条目由人工/后续扫描
+# 处理。
+_ENGINE_LOGLINE = re.compile(
+    r'\b(?:unexpected|expected|sequence contains|path is empty|list is empty|'
+    r'path is too long|null key|short read|no module|has never been assigned|'
+    r'is no longer valid|reserved by the system|this instance is read only|'
+    r'actual value was|value was|values are|straddling|would overrun|'
+    r'is beyond array size|smaller than lowLimit|greater than highLimit|'
+    r'has been closed|has been reset|must complete|may not be used|'
+    r'is positioned before|not be called twice|call Convert|call Encoder|'
+    r'no factory that accept|no registered factory|multiple base layouts|'
+    r'returned null when invoked|is not supported in universal|'
+    r'is reserved to|reserved to CreateWrapper|dont know how to convert|'
+    r'may not be properly initialized|one of the paths contains|'
+    r'is a directory|is a null|invalid data|is not a valid|'
+    r'cannot be created|no data is available|not available|'
+    r'does not have|does not contain|does not support|can not be|'
+    r'more than (?:byte|ushort|int|long)\.|no assembly|no action|'
+    r'no map for|no memberinfo|no shader for|no valid rank|no assembly id|'
+    r'no assembly information|unsupported (?:dropPosition|virtualizationMethod|'
+    r'rendertargetmode|pipeline)|not be called on|no longer valid|'
+    r'value not initialized|no data is available|no module|'
+    r'cannot be created|not exist|does not exist|no map|'
+    r'could not be found|not found|not supported|not allowed|not valid|'
+    r'not present|not implemented|not allocated|not dynamic|not be null)\b', re.I)
+_ENGINE_PASS = re.compile(
+    r'^(?:Additional|Universal|URP|Built-in|Screen|Global|Local|Forward\+?|'
+    r'Deferred|GBuffer|DepthOnly|DepthNormals|Draw|Copy|Clear|Final|HDR|XR|'
+    r'Color Lut|Transparent|Capture|Volumetric|Reflection|Post|Lit)\s+'
+    r'[A-Za-z0-9 ]*?(?:Pass|Blit|Buffer|Atlas|Map|Mode|Settings|Prepass|Setup|'
+    r'Upload|Complete|DebugView|Luminance|Pipeline|Info|Preset|Mesh|Camera|'
+    r'Occlusion|Mirror|Fog|Shadowmap|Wireframe|Grid|Line|Culling|Tile|Z-Bin)'
+    r'(?:\s+Pass)?$')
+# 不带裸 "Display"/"Touch" 前缀（会误杀真文本 'Display'/'Touch'），
+# 只留组合词（Display Index / Touch Tap…）
+_ENGINE_RENDER_FIELD = re.compile(
+    r'^(?:Albedo|Anisotropic|Ambient|Animation|Any Key|Caps Lock|Capture|'
+    r'Clip|Click Count|Context Menu|Debug Menu|Default|Delta|Display Index|'
+    r'Dropdown List|Hue Tolerance|Value Range|Vertex|Volume|Validation|'
+    r'Down Arrow|Up Arrow|Page Up|Page Down|Context|Input: |Begin |End |'
+    r'Frame|Clear|Update (?:Bindings|Hierarchy|Layout|Rendering|Style|ViewData)'
+    r'|Input System|Cinemachine|Daydream HMD|Editor Camera)\s*(?:[A-Z].*)?$')
+_ENGINE_CSS_ENUM = re.compile(r'^[a-z][a-z-]*(\s*\|\s*[a-z][a-z-]*)+$')
+_ENGINE_CSS_TERM = re.compile(r'^(?:flex|none|auto|stretch-to-fill|scale-and-crop|'
+    r'scale-to-fit|nowrap|wrap|wrap-reverse|repeat-x|repeat-y|space-between|'
+    r'space-around|space-evenly|center|start|middle|end|upper-left|middle-left|'
+    r'lower-left|upper-center|middle-center|lower-center|upper-right|'
+    r'middle-right|lower-right|padding-box|content-box|border-box|visible|hidden|'
+    r'relative|absolute|normal|italic|bold|bold-and-italic|column|row|'
+    r'column-reverse|row-reverse|cover|contain|scroll|ease[^ ]*|'
+    r'length-percentage|max-content|min-content|auto-fit|auto-fill)')
+_ENGINE_KV_FMT = re.compile(
+    r'^(?:[a-zA-Z][a-zA-Z0-9_.]*[{=]\s*\{0\})|(?:bool\d*\(|float\d*\(|uint\d*\(|'
+    r'int\d*\(|double\d*\()|^typeof\(|^button\{0\}')
+_ENGINE_DATE_CULTURE = re.compile(
+    r'^(?:dddd|yyyy|h:mm tt|ISO-8859|collation\.|Expected hex|Expected \{0x|'
+    r'Gregorian Calendar|Lucida Grande)')
+_ENGINE_CORE_MSG = re.compile(
+    r'^(?:generic args|not a generic|index \+ count|index \+ length|'
+    r'method arguments|method return|index < lower bound|length < 0|'
+    r'id attribute|mode attribute|url attribute|routine is null|'
+    r'null resource|callback parameter|native handle|eventPtr|'
+    r'custom styles is null|context\.currentElement|'
+    r'Assembly qualifed|Use of unassigned|Count not parse|'
+    r'Inconsistent state during|Indices allocated|Vertices allocated|'
+    r'Collection is of a fixed|Collection is read-only|'
+    r'Enumeration already finished|GCHandle value belongs|'
+    r'GameObject parameter|Cant be Guid|Can not add properties|'
+    r'Can not call MakeByRef|Creating renderers|Color attachment|'
+    r'Depth attachment|Content of previous|Converting PrimitiveValue|'
+    r'Copying bitfields|Coordinate outside|Coroutines can only|'
+    r'CreateClipFromPlayableAsset|Created Texture|Daydream HMD|'
+    r'DefaultDimensionForChannel|Derived classes must|Device has no|'
+    r'Disk full|Don\'t know how to convert|Duplicate device|'
+    r'Empty usage entry|Expected a|Expected an|Expecting|'
+    r'File name:|GetUVChannel called|History buffer has been|'
+    r'Incompatible Delegate|Incorrect length|Index should|'
+    r'InsertChildControl|Input System not yet|Interlocked.CompareExchange|'
+    r'InvalidOperationException|Key {0}|Layout override|'
+    r'Cannot advance|Cannot add|Cannot begin|Cannot cast|Cannot change|'
+    r'Cannot convert|Cannot create|Cannot delete|Cannot find|'
+    r'Cannot set|Cannot open|Cannot perform|Cannot seek|'
+    r'Can\'t|Couldn\'t|Cannot|Array type can not|Array spec cannot)')
+_ENGINE_GPU = re.compile(r'^[A-Za-z0-9. ()-]*\(TM\)[A-Za-z0-9 .()/-]*$')
+_ENGINE_MATERIAL = re.compile(
+    r'^(?:Black|White|Dark|Dry|Fresh|Green|Blue|Red|Yellow|Grey|Gray|'
+    r'Worn|Wet|Light|Heavy|Soft|Hard|Deep|Bright|Pale|Rich|Vivid|'
+    r'Muddy|Dirty|Clean|Smooth|Rough|Grainy|Polished|Matt|Glossy|Satin)\s+'
+    r'[A-Za-z]+(?: [A-Za-z]+){0,2}$')
+_ENGINE_PROFILER = re.compile(
+    r'^(?:CPU|GPU|Render|Begin|End|Frame|UI|URP|XR|Input|Touch|'
+    r'Animation|Particle|Physics|Audio|Video|Timeline)\s+[A-Z]')
+_ENGINE_UNKNOWN = re.compile(r'^Unknown\s+[A-Za-z]')
+_ENGINE_TYPE_MSG = re.compile(r'^Type\s+[A-Za-z{]')
+_ENGINE_INPUT_FIELD = re.compile(
+    r'^(?:Display Index|Touch Tap|Touch Position|Touch Pressure|Touch Radius|'
+    r'Touch Delta|Touch Start)\s+[A-Za-z]')
+_ENGINE_WORDS = re.compile(
+    r'^(?:Any Key|Caps Lock|Context Menu|Debug Menu|Dropdown List|'
+    r'Click Count|Display Index|Default Value|Value Range Min|Value Range Max|'
+    r'Hue Tolerance|Clip Parameters|Validation Preset|Volume Info|'
+    r'Button \{0\}|Page Up|Page Down|Down Arrow|Up Arrow|Left Arrow|Right Arrow)')
+_ENGINE_QUOTE_TAIL = re.compile(
+    r'\b(?:denied|not found|not valid|not supported|is null|must not be|'
+    r'not allowed|already exists|does not exist|exceeded|missing)\b$', re.I)
+# Input System 绑定名 / 输入设备 / 物理键
+_ENGINE_INPUT_BINDING = re.compile(
+    r'^(?:Primary Touch(?:[ A-Za-z]|$)|Scroll (?:Up|Down|Left|Right|Wheel|Lock)$|'
+    r'Numpad [0-9]$|Numpad Enter$|Middle Button$|Print Screen$|'
+    r'System Normal$|Oculus (?:HMD|Remote)$|PLAYSTATION\(R\)[0-9] Controller$|'
+    r'Mouse [XY]$|Radius [XY]$|Left (?:Alt|Button|Control|Shift|System|Windows)$|'
+    r'Right (?:Alt|Button|Control|Shift|System|Windows)$)')
+# TMP 处理步骤（profiler 面板名）
+_ENGINE_TMP_PREFIX = re.compile(
+    r'^TMP(?: Calculate| Compute| Generate| Handle| Layout| Lookup| Parse|'
+    r' Save| Add| Set)[ A-Za-z&]*$|^TMP GenerateText - Phase [IVX]+$')
+# URP/内置着色器路径
+_ENGINE_SHADER_PATH = re.compile(
+    r'^(?:Universal Render Pipeline/|Text/Mobile/|Hidden/|Custom/)')
+# URP/渲染 Debug 面板项
+_ENGINE_DEBUG_PANEL = re.compile(
+    r'^(?:Rendering Debug|Lighting Debug Mode|Lighting Debug Modes|'
+    r'Lighting Features|Material Validation|Material Validation Mode|'
+    r'Material Filters|Material Override|Overdraw Mode|Pixel Validation|'
+    r'Pixel Validation Mode|Pixel Range Settings|TAA Debug Mode|'
+    r'Stencil Volume|Motion Vector Pass|Additional Wireframe Modes?|'
+    r'Map Size|Map Overlays|Max Luminance|Min Luminance|Max Value|Min Value|'
+    r'Saturation Tolerance|Generate HDR DebugView CIExy|Main Shadowmap|'
+    r'Main Light Shadowmap|Set Additional Shadow Globals|Set GBuffer Globals|'
+    r'Set Global Copy Color|Set Global Copy Depth|Set Main Shadow Globals|'
+    r'Setup Additional Shadows|Setup Camera Parameters|Setup Global Depth|'
+    r'Setup Light Constants|Setup Main Shadowmap|Sort Render Passes|'
+    r'Copy Color$|Copy Depth$|RenderGraph Resources|OnRenderObject Callback Pass|'
+    r'NativeRenderPass[ A-Za-z]*|Target Color$|Present limited$|'
+    r'Stencil Id:\{0\}|Interpolated Value$|Track Parameters$|'
+    r'New Concrete$|Old Concrete$|Shared UI Mesh$|'
+    r'StylePropertyAnimation Update$|Specify a list of supported pipeline$|'
+    r'Resize To Fit$|LineBreaking (?:Following|Leading) Characters$|'
+    r'NameInfo Pool$|SerObjectInfo Pool$|ObjectReader Object Stack$|'
+    r'ValueType Fixup Stack$|VFX Process Camera$|Max Overdraw Count$|'
+    r'Metallic Settings$|Setup Global Copy Depth$|Navigating to specific array element$|'
+    r'Negative (?:bitOffset|byteOffset|sizeInBits)$|Null create delegate$|'
+    r'Iterated beyond end$)')
+# 构造串（Input System 处理器/向量数学 ToString）
+_ENGINE_CTOR_STR = re.compile(
+    r'^(?:AxisDeadzone|Clamp|InvertVector2|InvertVector3|Normalize|Scale|'
+    r'ScaleVector2|ScaleVector3|StickDeadzone|RectOffset|RGBA|float2x2|float4x4|'
+    r'System\.ReadOnlySpan|System\.Span|UsagePage|Synchronize with|parsing)')
+# 非拉丁文字符表/日历（希伯来/阿拉伯历法名）
+_ENGINE_SCRIPT_RTL = re.compile(r'^[֐-׿]|^[؀-ۿ]')
+# CSS 语法片段
+_ENGINE_CSS_SYNTAX = re.compile(r'^\[ <length-percentage>|^\[StyleSelectorPart')
+# 数学构造串（Normalize(min={0},max={1})…）
+_ENGINE_MATH_FMT = re.compile(r'^[A-Za-z]+\([a-zA-Z]+=\{\d')
+# 含占位符的引擎格式模板（KoiKoi 实证补充）：带引号占位符/异常形态词
+_ENGINE_FMT_QUOTE_PH = re.compile(r"""['"][{]\d+""")
+_ENGINE_FMT_MSG_WORD = re.compile(
+    r"(?:violation on path|fault on path|Win32 IO returned|"
+    r"doesn't exist in the shader|zero-size state buffer|"
+    r"generic parameter\(s\)|RTHandle\.Initialize|RenderGraphTexture_|"
+    r"Unused Layer|Parameter name:|Object name:|User #\{|"
+    r"XRSystem setup|borders \{1\} are overridden|"
+    r"is modifying the child of another control|"
+    r"was null\.|Nested quantifier|declared:|created:|"
+    r"inherit from \{0\}|Unrecognized escape|state block|"
+    r"should only be called once|\{0:D2\}|0\.00 MB)", re.I)
+# 完整句子形态引擎异常消息的前缀词（非占位符、句号结尾判定用）：
+# 真实游戏显示文本几乎不以这些前缀词开头（"Index was outside…" /
+# "The argument was out of range." / "An exception was thrown"）。
+_ENGINE_SENTENCE_HEAD = re.compile(
+    r"^(?:The |An |A |Only |Cannot |Can't |Could not |Couldn't |"
+    r"Please |You |Index |Array |Invalid |Not |Value |"
+    r"Object |Operation |Specified |Argument |Cannot convert |"
+    r"Nullable |Out of |Zero |This operation|Stream |String |"
+    r"At least one|All rows|More than one|No |Unknown |"
+    r"Collection |Culture |Guid |Dashes |End of |Mapping |"
+    r"Non-|Positive |Requested |Rethrow |Some platforms|"
+    r"Either the |Enumeration |Event |Frame |GarbageCollector |"
+    r"Hashtable's |Hour, |IAsyncResult |Incomplete |Index and |"
+    r"JNI: |Larger than|Maximum |MemberInfo |Mesh |Method may |"
+    r"More than|Must specify|No Era|No EventSystem|No Hanafuda|"
+    r"Non existent|Not a |Not enough|Number |Object contains|"
+    r"Object reference|Object synchronization|Offset and |"
+    r"One or more|Only Base|Only FieldInfo|Only cameras|"
+    r"Only directional|Only one|Only readonly|Only single |"
+    r"Only the |Opacity |Operations that|Overlays |Override |"
+    r"Panel has no|Parent of |Passed in |Please assign |"
+    r"Quantifier |Queue |RTHandle |Released |Renderer at |"
+    r"RenderGraph: |Runtime cursors|Select which|Set the size|"
+    r"Sprite was changed|Stack |Stencil changes|Stream was |"
+    r"String reference|Task\.ContinueWith|Task: |The added |"
+    r"The binary data|The calling thread|The camera: |"
+    r"The event |The field handle|The given |The index |"
+    r"The key |The keys |The name can|The number of|"
+    r"The operation |The property handle|The rendering pipeline|"
+    r"The semaphore |The serialization|The source |The specified |"
+    r"The stream |The sum of |The supplied |The task |"
+    r"The tasks |The timeout |The type |The UTC |The wait |"
+    r"There can be only one|This operation|Thread tracking|"
+    r"Thread was |Time is |TimeSpan |Total |TwoPaneSplitView|"
+    r"TypedReference|UIR |Unclosed |Unimplemented|Unrecognized |"
+    r"Unterminated |Uri already|Use of |Use the |"
+    r"Validate a |Validate using|Value has |ValueFactory |"
+    r"Visual |Waithandle |Warning: |When supplying|Xform |"
+    r"Year, |You can only|You must specify)", re.I)
+# 无显式 errword 但确定的引擎日志（KoiKoi 实证补充）
+_ENGINE_SENTENCE_LOG = re.compile(
+    r'^(?:A context property did not approve the candidate context for activating the object|'
+    r'Nested animation tracks should never be asked to create a graph directly|'
+    r'Only point, spot and directional shadow casters are supported in universal pipeline|'
+    r'VisualElementAsset has a RuleIndex but no inlineStyleSheet|'
+    r'far clip plane|near clip plane|field of view|'
+    r'itemHeight, item-height|long item support|'
+    r'Unmatched \'\]\' while parsing generic argument assembly name|'
+    r'Unrecognized escape sequence \\\\\{0\}|'
+    r'Value should range from \{0\} to \{1\}, but was \{2\}|'
+    r'[a-zA-Z ]* \{0\} [a-zA-Z ]* (?:buffer|path|was null|doesn.t exist|no longer valid)$)')
+
+
+def _is_engine_log_message(s: str) -> bool:
+    """引擎异常/日志消息判定（B4 吸收层）。
+
+    引擎字符串是确定性形态（异常语义词/渲染 Pass/Input System 绑定/
+    调试面板/TMP 处理步骤/着色器路径/构造串/物理按键名），真实游戏显示
+    文本中几乎不可能完整出现。命中的条目绝不应进翻译池（识别 B4：
+    il2cpp 引擎字符串污染 KoiKoi 1095 条 pending 全 low → 自动翻译池
+    空）。未被命中的留档条目仍是哑信号——宁可多留不可误杀（宁漏勿坏），
+    真实游戏文本（'Koi Koi'/'Boar Deer Butterfly'）必须保留为可译条目。
+    """
+    st = s.strip()
+    if not st:
+        return False
+    # 含格式占位符的串优先：显示模板（HUD 冒号/比值/加减值/富文本）是
+    # 真实游戏渲染文本，绝不能被引擎判定吸收（HP: {0}/{1} 等）。引擎
+    # 格式模板带引号占位符（"'{0}'"）或异常形态词（violation/parameter
+    # name/was null…）才吸收——真实显示模板两者皆不具备。
+    if _IL2CPP_FORMAT_PLACEHOLDER.search(st):
+        if _is_display_template(st):
+            return False
+        if (_ENGINE_FMT_QUOTE_PH.search(st)
+                or _ENGINE_FMT_MSG_WORD.search(st)
+                or _ENGINE_KV_FMT.match(st)):
+            return True
+        # 引擎异常消息含显式 errword（"Invalid token '{0}'…" 的 Invalid）
+        if _ENGINE_ERRWORD.search(st) or _ENGINE_LOGLINE.search(st):
+            return True
+        # 其余含占位符串：不在此层判定（流入后续分类——格式模板 → low
+        # 留档 / 显示模板 → medium 可自动翻译）
+        return False
+    if _ENGINE_QUOTE_JUDGE.match(st) or _ENGINE_PAREN_HEAD.match(st):
+        return True
+    if _ENGINE_HEX_FMT.search(st) or _ENGINE_FMT_ONLY_HEAD.match(st):
+        return True
+    if _ENGINE_ERRWORD.search(st) or _ENGINE_LOGLINE.search(st):
+        return True
+    # 无占位符的完整句子形态异常消息（"Index was outside…"）：句号结尾
+    # + 引擎前缀词。带占位符的定位串（'Type {0} NameID {1} InstanceID {2}'
+    # 'XR Pass {0} Cull {1}'）被误判 display/low 留档（KoiKoi 实证）——
+    # 识别是宁漏勿坏（宁可多留不可误杀），此处不再收紧，让它们流回
+    # 留档而非吸收（防真实显示模板误杀）。
+    # 多词完整句子形态（非占位符）：句号结尾 + 引擎前缀词（The/An/Only/
+    # Cannot/Please/You/Index/Array/Invalid/Not/Value/…）= 异常消息主形态
+    # （"Index was outside the bounds of the array."）——真实游戏显示文本
+    # 在资源而非 metadata 字面量，句子形态只是「可能」而非证据，吸收
+    # 宁漏勿坏（宁可多留不可误杀：完整真实对话句通常以动词/人称开头，
+    # 非此前缀词，且无句号）。
+    if (st[-1] == "."
+            and _ENGINE_SENTENCE_HEAD.match(st)):
+        return True
+    if (_ENGINE_PASS.match(st) or _ENGINE_RENDER_FIELD.match(st)
+            or _ENGINE_CSS_ENUM.match(st) or _ENGINE_CSS_TERM.match(st)
+            or _ENGINE_KV_FMT.match(st) or _ENGINE_DATE_CULTURE.match(st)
+            or _ENGINE_CORE_MSG.match(st) or _ENGINE_GPU.match(st)
+            or _ENGINE_MATERIAL.match(st) or _ENGINE_PROFILER.match(st)
+            or _ENGINE_UNKNOWN.match(st) or _ENGINE_TYPE_MSG.match(st)
+            or _ENGINE_INPUT_FIELD.match(st) or _ENGINE_WORDS.match(st)
+            or _ENGINE_INPUT_BINDING.match(st) or _ENGINE_TMP_PREFIX.match(st)
+            or _ENGINE_SHADER_PATH.match(st) or _ENGINE_DEBUG_PANEL.match(st)
+            or _ENGINE_CTOR_STR.match(st) or _ENGINE_SCRIPT_RTL.match(st)
+            or _ENGINE_CSS_SYNTAX.match(st) or _ENGINE_MATH_FMT.match(st)
+            or _ENGINE_SENTENCE_LOG.match(st)):
+        return True
+    if _ENGINE_QUOTE_TAIL.search(st):
+        return True
+    return False
+
 # 控制符/≥2 空白开头 = 调试输出（'\ndepth: '、'  .locals '、字符表片段）
 _IL2CPP_LEADING_WS = re.compile(r"^[\t\r\n]|^[ \t]{2,}")
 _MIN_LITERAL_LEN = 3
@@ -552,6 +883,24 @@ def extract_metadata_strings(path: str | Path, file_id: str | None = None,
             if sample:
                 entries.append(sample)
             continue
+        # 引擎日志/异常消息判定（B4 吸收层）：il2cpp 引擎字符串（异常
+        # 消息/调试日志/渲染 Pass/Input System 绑定/URP 面板/TMP 处理步骤/
+        # 着色器路径/物理按键名）是确定性形态，真实游戏显示文本中几乎
+        # 不可能完整出现。命中 → skipped（reason=engine_log_message + 限量
+        # 样本留档），不产生 pending——KoiKoi 实证 1095 条 pending 全
+        # low（引擎日志污染）→ 自动翻译池空 → 每批 1-2 条慢翻译。吸收层
+        # 在模板细分类之前（含占位符的引擎消息也吸收），仅放行真实游戏
+        # 文本（'Koi Koi'/'Boar Deer Butterfly' 等）。
+        if _is_engine_log_message(s):
+            skipped["engine_log_message"] = skipped.get(
+                "engine_log_message", 0) + 1
+            sample = _skipped_sample_entry(
+                fid, f"skip/meta#{data_index}", s, kind="il2cpp",
+                reason="engine_log_message",
+                count=skipped["engine_log_message"])
+            if sample:
+                entries.append(sample)
+            continue
         # 含格式占位符的模板串：#14 实时渲染文本加强——旧逻辑无条件
         # 跳过（注释称「游戏显示文本不具备这些形态」，真实样本
         # 254361268a 证明错误：HUD/飘字模板被哑跳过）。细分类：
@@ -584,7 +933,15 @@ def extract_metadata_strings(path: str | Path, file_id: str | None = None,
         #   is_actionable_translation 要求 confidence≠low）
         # - 其余（词/短语）→ structural/low 留档（「过滤不是删除」）
         interaction = is_strong_interaction_prompt(s)
-        sentence_like = " " in s and s[0].isalpha() and s[-1].isalnum()
+        # 句末标点策略（宁漏勿坏）：句号结尾 = 引擎异常消息主流形态
+        # （"Index was outside the bounds of the array."），不进句子池；
+        # 感叹/问号结尾 = 真实游戏对话情绪句（"Let's play another round!"），
+        # 剥离后判定字母/数字结尾放行为可译。只对 !? 放松，句号保持
+        # 既有结构跳过（真实显示文本在资源而非 metadata 字面量）。
+        _sentence_core = s.rstrip(" \t\n\r!?。！？…·")
+        sentence_like = (" " in s and s[0].isalpha()
+                         and s[-1] not in ".。"
+                         and _sentence_core and _sentence_core[-1].isalnum())
         if interaction:
             status, confidence, role, disposition, reason = (
                 "pending", "medium", "display", "translate",

@@ -36,6 +36,86 @@ def _entries(n=60):
     return [{"file_id": "f", "key_path": f"k{i}", "original": f"text{i}"} for i in range(n)]
 
 
+# ── #27：本地逐条模式进度口径 ─────────────────────────────────
+# 用户实证：并发 1 槽没问题，但「每批 16 条设置，实际每批 2 条每批 2 条
+# 显示，很奇怪」。根因：本地模型走 native 逐条路径（每条一次
+# translate_text），「每批 N 条」只控制进度刷新粒度——活动流 delta 是
+# 真实完成条数。设置 16 而每批显示 2 = 真实唯一文本就 2 条（去重扇出后
+# 短批次）。
+#
+# 旧节流两个缺陷（本测试覆盖）：
+# ① last_emit_ts 初始 0.0 → 首条完成时 now-0.0 恒 >1.5s（绝对时间）→
+#    首条假 emit（delta=1），随后批内逐条（间隔 <1.5s）不触发，末条才
+#    再 emit → 活动流只见「首条 + 全批」两条虚批。
+# ② 按批次号（completed_representatives % batch_size==0）在同文分组/
+#    短批下不触发 → 只靠 1.5s 时间兜底。
+# 修后：last_emit_ts 初始化为当前时间（消假 emit）+ 按真实完成条数
+# 累计 emit（done_since_emit >= batch_size 或 1.5s 或 末条）。
+
+def test_native_progress_accumulates_real_items_not_batch_marks():
+    class NativeClient:
+        config = SimpleNamespace(timeout=120.0)
+
+        def translate_text(self, source, _target_lang, _glossary):
+            return {"t0": "译文0", "t1": "译文1", "t2": "译文2",
+                    "t3": "译文3", "t4": "译文4", "t5": "译文5"}[source], Usage(1, 1)
+
+    entries = _to_model([
+        {"file_id": "f", "key_path": f"k{i}", "original": f"t{i}",
+         "meta": {"role": "display"}}
+        for i in range(6)
+    ])
+    progress = []
+
+    # batch_size=16 > 唯一文本数 6：全部在 <1.5s 内完成 → 首条 emit 即
+    # done=6（done_since_emit 到 16 才触发，6 条 < 16 由末条
+    # completed==len 兜底）。重点：首条不再是假 emit done=1（旧
+    # last_emit_ts=0.0 的绝对时间假阳性），而是完整真实进度。
+    stats = BatchTranslator(
+        NativeClient(), batch_size=16, concurrency=1,
+        lang="en→zh-CN",
+    ).run(entries, progress_cb=progress.append)
+
+    assert stats.done == 6 and stats.failed == 0
+    assert progress
+    # 进度单调递增（finally 允许与末条同值，不得倒退）
+    assert all(progress[i].done <= progress[i + 1].done
+               for i in range(len(progress) - 1))
+    # 首个 emit 反映真实完成数（6 条全在 1.5s 内 → 首条即 6；不得是
+    # 旧逻辑的假 done=1）
+    assert progress[0].done == 6
+    assert progress[-1].done == 6
+
+
+def test_native_progress_batch_size_1_emits_per_item():
+    class NativeClient:
+        config = SimpleNamespace(timeout=120.0)
+
+        def translate_text(self, source, _target_lang, _glossary):
+            return f"译文{source}", Usage(1, 1)
+
+    entries = _to_model([
+        {"file_id": "f", "key_path": f"k{i}", "original": f"t{i}",
+         "meta": {"role": "display"}}
+        for i in range(4)
+    ])
+    progress = []
+
+    stats = BatchTranslator(
+        NativeClient(), batch_size=1, concurrency=1, lang="en→zh-CN",
+    ).run(entries, progress_cb=progress.append)
+
+    assert stats.done == 4
+    # batch_size=1 → done_since_emit 每条 +1>=1 立即 emit（+finally 末条）
+    assert len(progress) == 5
+    # delta 序列逐条 +1（finally 末条 delta=0 不算新批）
+    deltas = [p.done - (progress[i - 1].done if i else 0)
+              for i, p in enumerate(progress)]
+    assert deltas[:4] == [1, 1, 1, 1]
+    assert deltas[4] == 0
+
+
+
 @pytest.mark.parametrize(
     ("role", "disposition", "expected"),
     (("display", "structural", False),

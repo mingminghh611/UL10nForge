@@ -45,11 +45,13 @@ def _extract(tmp_path, literals):
 
 
 def _real(entries):
+    """真实条目（排除 skip/ 限量样本留档）。"""
     return [e for e in entries if not e.key_path.startswith("skip/")]
 
 
 def _by_original(pf):
-    return {e.original: e for e in _real(pf.entries)}
+    """含 skip/ 限量样本留档的完整映射（skipped 条目也在这里）。"""
+    return {e.original: e for e in pf.entries}
 
 
 # ── 显示模板 → pending/medium（可自动翻译） ───────────────────
@@ -79,7 +81,7 @@ def test_display_templates_classified_medium(tmp_path, text):
     assert e.meta["file_offset"] >= 0  # 真实条目定位（可写回）
 
 
-# ── 引擎消息/键值模板 → pending/low（留档可见，不自动翻译） ───
+# ── 引擎消息/键值模板 → skipped（B4 吸收：不产生 pending） ───
 
 @pytest.mark.parametrize("text", [
     "Invalid token '{0}' in input string",   # dcdb50a165 真实样本
@@ -89,16 +91,19 @@ def test_display_templates_classified_medium(tmp_path, text):
     "Argument '{0}' must be non-negative",
     "Format: expected {0} bytes, got {1}",
 ])
-def test_engine_messages_archived_low(tmp_path, text):
-    """引擎异常/键值模板 → pending/low 留档：可见不哑跳，且
-    质量门禁（confidence≠low）不自动翻译——批量引擎消息不浪费模型调用。"""
+def test_engine_messages_absorbed_skipped(tmp_path, text):
+    """引擎异常/键值模板 → skipped（reason=engine_log_message + 限量
+    样本留档）：B4 吸收层——识别 B4 检查点「引擎字符串标 skipped（原因=
+    engine_string）而非 low pending」。此前标 pending/low 留档导致
+    il2cpp 引擎字符串污染翻译池（KoiKoi 1095 条 pending 全 low → 自动
+    翻译池空 → 每批 1-2 条慢翻译）。跳过是哑信号——限量样本留档保持
+    可审计（过滤不是删除）。"""
     pf = _extract(tmp_path, [text])
     e = _by_original(pf)[text]
-    assert e.status == "pending"
-    assert e.meta["confidence"] == "low"
-    assert e.meta["role"] == "display"
-    assert e.meta["disposition"] == "translate"
-    assert e.meta["reason"] == "il2cpp_format_template"
+    assert e.status == "skipped"
+    assert e.meta["reason"] == "engine_log_message"
+    assert e.meta["disposition"] == "structural"
+    assert e.meta["skipped_count"] >= 1  # 限量样本留档（可审计）
 
 
 def test_pure_format_strings_still_skipped(tmp_path):
@@ -111,14 +116,15 @@ def test_pure_format_strings_still_skipped(tmp_path):
 
 def test_display_vs_engine_template_contrast(tmp_path):
     """区分度对照（真实样本）：HUD 比值模板 medium 可自动翻译，
-    引擎异常模板（多词前缀 + 冒号）low 留档不浪费模型调用。"""
+    引擎异常模板（多词前缀 + 冒号）skipped 吸收（不产生 pending，
+    不浪费模型调用）。"""
     pf = _extract(tmp_path, ["HP: {0}/{1}", "Exception caught: {0}"])
     hud = _by_original(pf)["HP: {0}/{1}"]
     assert hud.meta["reason"] == "il2cpp_display_template"
     assert hud.meta["confidence"] == "medium"
     engine = _by_original(pf)["Exception caught: {0}"]
-    assert engine.meta["reason"] == "il2cpp_format_template"
-    assert engine.meta["confidence"] == "low"
+    assert engine.status == "skipped"
+    assert engine.meta["reason"] == "engine_log_message"
 
 
 def test_placeholder_validation_preserved_in_pipeline(tmp_path):
@@ -134,3 +140,27 @@ def test_placeholder_validation_preserved_in_pipeline(tmp_path):
     from hanhua.core.placeholders import validate_translation
     ok, _missing, _extra = validate_translation(e.original, "生命：/1")
     assert not ok
+
+
+# ── 保真度：真实游戏文本绝不被引擎日志吸收层误杀（宁漏勿坏） ───
+
+@pytest.mark.parametrize("text", [
+    # KoiKoi 花札卡牌/役名（真实游戏显示文本）
+    "Koi Koi", "Boar Deer Butterfly", "Cherry Blossom Viewing",
+    "Moon Viewing", "Four in the Hand",
+    # HUD/飘字模板（必须保留为可译条目）
+    "HP: {0}/{1}", "Playtime: {0}", "<color=#00FF00>+{0} HP</color>",
+    "Press {0} to interact", "Level {0}/{1}", "Round {0}",
+    # 对话/句子形态
+    "Let's play another round!",
+    "You won the round!",
+    "Deck Play",
+])
+def test_real_game_text_not_absorbed_by_engine_log(tmp_path, text):
+    """识别 B4 检查点反向：引擎日志吸收层不得误杀真实游戏文本——
+    宁可多留不可误杀（宁漏勿坏）。这些条目必须保持为可译（pending）。"""
+    from hanhua.core.unity.il2cpp import _is_engine_log_message
+    assert _is_engine_log_message(text) is False
+    pf = _extract(tmp_path, [text])
+    e = _by_original(pf)[text]
+    assert e.status == "pending"
