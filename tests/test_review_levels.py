@@ -411,6 +411,21 @@ def test_memory_gate_pass_minor_enters_memory():
     assert mem.removed == []
 
 
+def test_memory_gate_blocks_builtin_conflict_on_pass():
+    """BUILTIN 冲突门禁（2026-09-01 污染系统性根治）：审核模型把
+    Disabled 判「残疾人士」PASS（审核端未注入 BUILTIN 强制）→ promote
+    前拦截，坏译文不得成为可命中记忆。"""
+    mem = _FakeMemory()
+    _memory_apply(mem, _entry(original="Disabled", translation="残疾人士"),
+                  "PASS", "m", "zh-CN")
+    assert mem.added == []
+    assert mem.removed == []
+    # 非冲突词对照常进入记忆
+    _memory_apply(mem, _entry(original="Start Game", translation="开始游戏"),
+                  "PASS", "m", "zh-CN")
+    assert mem.added == [("Start Game", "开始游戏", "m", "zh-CN")]
+
+
 def test_memory_gate_none_memory_is_noop():
     _memory_apply(None, _entry(), "CRITICAL", "m", "zh-CN")  # 不抛
 

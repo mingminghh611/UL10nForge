@@ -39,6 +39,7 @@ from .review_outcome import (APPROVED, APPROVED_MINOR, BLOCKED, CANCELLED,
 from .risk_gate import gate_entries
 from .review_server import ReviewModelService
 from .prompts import build_game_context_block
+from .translator import builtin_ui_conflict
 
 # ── 审核维度与四级判定标准 ─────────────────────────────────────────
 
@@ -61,7 +62,8 @@ _REVIEW_SYSTEM_PROMPT = """你是游戏本地化质量审核员。审核必须�
 3. 术语一致：游戏术语与 UI 标准词必须用行业标准译法——
    Resume=继续（不是简历/恢复）、Start=开始（不是播放）、Save=保存、
    Load=读取、Quit=退出、Options=选项、New Game=新游戏、
-   Main Menu=主菜单、Back=返回、Settings=设置、Continue=继续。
+   Main Menu=主菜单、Back=返回、Settings=设置、Continue=继续、
+   Disabled=已禁用（不是残疾人士）、Enabled=已启用（不是已启动）。
    若提示词给出「术语参考/语境参考」，译文必须与其一致。
    硬规则（2026-08-14 minato 实证）：术语参考只约束其中列出的词条，
    未列出的英文单词翻译成中文是正确行为——普通英文 UI 词
@@ -863,6 +865,12 @@ def _memory_apply(memory, entry: TextEntry, level: str, model: str,
         if level in ("MAJOR", "CRITICAL"):
             memory.remove_memory(entry.original, model, lang)
         else:
+            # BUILTIN 冲突门禁（2026-09-01 污染系统性根治）：PASS 系
+            # 审后 promote 前再拦一道——审核模型把 Disabled 判「残疾
+            # 人士」PASS（审核端只注入了术语维度无此强制）时，坏译文
+            # 不得成为可命中记忆。promote_memory 内部同样过滤（双保险）。
+            if builtin_ui_conflict(entry.original, entry.translation):
+                return
             promote = getattr(memory, "promote_memory", None)
             if promote is not None:
                 promote([(entry.original, entry.translation, model, lang)])

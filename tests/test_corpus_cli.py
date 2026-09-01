@@ -462,10 +462,9 @@ def test_cli_rejects_app_dir_junction_before_writing(tmp_path, capsys):
     junction = tmp_path / "app-junction"
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
-        capture_output=True, text=True, check=False,
-    )
+        capture_output=True, check=False)  # 中文 GBK 输出勿按 UTF-8 解码
     if created.returncode != 0:
-        pytest.skip(f"junction unavailable: {created.stderr.strip()}")
+        pytest.skip("junction unavailable")
     state = tmp_path / "state.json"
     report = tmp_path / "report.json"
 

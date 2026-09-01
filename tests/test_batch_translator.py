@@ -3839,6 +3839,54 @@ def test_play_mismatch_translation_still_gated_by_q1():
     assert e.meta["quality_reasons"] == ["builtin_ui_mismatch"]
 
 
+# ── 2026-08-31 用户实证：Disabled 残疾人士 vs 已禁用 ──────────────────
+
+def test_disabled_filled_deterministically_without_model_call():
+    """Disabled 精确命中内置 UI 引用 → 确定性直填「已禁用」，零模型调用——
+    杜绝本地模型误译「残疾人士」再被审核幻觉 PASS 的污染链。"""
+    from hanhua.core.batch_translator import BatchTranslator
+    from hanhua.core.models import TextEntry
+    client = FakeClient()
+    entry = TextEntry(file_id="f", key_path="k", original="Disabled",
+                      status="pending",
+                      meta={"role": "display", "disposition": "translate",
+                            "confidence": "high"})
+    stats = BatchTranslator(client, batch_size=1, concurrency=1,
+                            lang="en→zh-CN").run([entry])
+    assert client.calls == 0, "内置 UI 引用直填必须零模型调用"
+    assert stats.done == 1 and stats.failed == 0
+    assert entry.status == "translated"
+    assert entry.translation == "已禁用"
+
+
+def test_disabled_wrong_translation_rejected_by_q1():
+    """Q1 语义门：Disabled→残疾人士 必被拦（权威译名 已禁用 不在译文）。"""
+    from hanhua.core.batch_translator import BatchTranslator
+    from hanhua.core.models import TextEntry
+    bt = BatchTranslator(FakeClient())
+    e = TextEntry(file_id="f", key_path="k", original="Disabled",
+                  status="pending",
+                  meta={"role": "display", "disposition": "translate"})
+    assert not bt._apply_quality(e, "残疾人士")
+    assert e.meta["quality_reasons"] == ["builtin_ui_mismatch"]
+    assert e.meta["failure_category"] == "model_behavior"
+
+
+def test_enabled_filled_deterministically_without_model_call():
+    """Enabled → 已启用 确定性直填（与 Disabled 同源）。"""
+    from hanhua.core.batch_translator import BatchTranslator
+    from hanhua.core.models import TextEntry
+    client = FakeClient()
+    entry = TextEntry(file_id="f", key_path="k", original="Enabled",
+                      status="pending",
+                      meta={"role": "display", "disposition": "translate",
+                            "confidence": "high"})
+    stats = BatchTranslator(client, batch_size=1, concurrency=1,
+                            lang="en→zh-CN").run([entry])
+    assert client.calls == 0
+    assert entry.translation == "已启用"
+
+
 # ── AgentMemory 集成（2026-08-12 记忆模块） ──────────────────────────
 
 def _mem_store(tmp_path):

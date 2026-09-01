@@ -37,7 +37,8 @@ from pathlib import Path
 
 from hanhua.core.placeholders import FUNCTION_WORDS
 from hanhua.core.prompts import _GAME_CONTEXT_WORDS
-from hanhua.core.translator import BUILTIN_UI_REFERENCES
+from hanhua.core.translator import (BUILTIN_UI_REFERENCES,
+                                    builtin_ui_conflict)
 
 # 单字词保护集（2026-08-14 全量审校实证：play→播放 污染事故）：
 # 内置 UI 术语（BUILTIN_UI_REFERENCES）与游戏语境歧义词
@@ -157,6 +158,16 @@ class AgentMemory:
         证据 ≥ ACTIVE_MIN_EVIDENCE 且 rejects == 0 → 晋升 active。
         """
         if not key or not value:
+            return
+        if builtin_ui_conflict(key, value):
+            # BUILTIN 冲突门禁（2026-09-01 记忆污染系统性根治）：
+            # 单 token 原文命中内置 UI 权威表且译文与权威不符（如
+            # Disabled→残疾人士）→ 拒绝沉淀——自动记忆是后续游戏
+            # 的参考注入源，坏译文落库会覆盖内置规则（play→播放
+            # 事故同族）。与 reference_pairs 的 _PROTECTED_SINGLE_
+            # WORDS 过滤闭环：入口不沉淀，注入端不注入。
+            self._session["blocked_builtin_conflicts"] = \
+                self._session.get("blocked_builtin_conflicts", 0) + 1
             return
         ckey = context_key_of(role, morph)
         now = self._now()
@@ -442,7 +453,8 @@ class AgentMemory:
             counts = {s: self._session.get(s, 0) for s in (
                 "proposed", "evidence_added", "confirmed", "conflicts",
                 "direct_applied", "accepted", "rejected", "retired",
-                "blocked_function_words", "manual_applied")}
+                "blocked_function_words", "blocked_builtin_conflicts",
+                "manual_applied")}
             rows = self.conn.execute(
                 "SELECT type, status, COUNT(*) c FROM memories"
                 " GROUP BY type, status ORDER BY type, status").fetchall()

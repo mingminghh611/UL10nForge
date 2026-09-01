@@ -660,6 +660,89 @@ def test_explicit_add_memory_is_committed_immediately():
         "Open Door": "打开门"}
 
 
+def test_add_memory_blocks_builtin_conflict(tmp_path):
+    """BUILTIN 冲突门禁（2026-09-01 污染系统性根治）：add_memory 单
+    token Disabled→残疾人士（UI 状态标签误判「残疾」）→ 不落库——权威
+    译文（已禁用）由确定性直填在运行期恒胜出；权威译文与非冲突词照常
+    提交。"""
+    store = _store()
+    store.init_schema()
+    store.add_memory("Disabled", "残疾人士", "m", "en→zh-CN")
+    assert store.get_memory_hits(["Disabled"], "m", "en→zh-CN") == {}
+    # 权威译文 / 非冲突词照常
+    store.add_memory("Disabled", "已禁用", "m", "en→zh-CN")
+    store.add_memory("Enabled", "已启用", "m", "en→zh-CN")
+    store.add_memory("Press any key", "按任意键", "m", "en→zh-CN")
+    store.add_memory("itch", "itch", "m", "en→zh-CN")
+    hits = store.get_memory_hits(
+        ["Disabled", "Enabled", "Press any key", "itch"], "m", "en→zh-CN")
+    assert hits == {"Disabled": "已禁用", "Enabled": "已启用",
+                    "Press any key": "按任意键", "itch": "itch"}
+
+
+def test_batch_add_memory_blocks_builtin_conflict(tmp_path):
+    """批量 pending 桶同样拦截：Disabled→残疾人士 不入库——即使审核
+    关闭被 settle promote 也不会成为可命中记忆。"""
+    store = _store()
+    store.init_schema()
+    store.batch_add_memory([
+        ("Disabled", "残疾人士", "m", "en→zh-CN"),
+        ("Open Door", "打开门", "m", "en→zh-CN"),
+    ])
+    assert store.count_pending_memory() == 1            # 只有合法词对
+    store.promote_memory([("Disabled", "残疾人士", "m", "en→zh-CN"),
+                          ("Open Door", "打开门", "m", "en→zh-CN")])
+    # promote 同样拦截冲突词对：提交条数只算合法词
+    assert store.get_memory_hits(["Open Door"], "m", "en→zh-CN") == {
+        "Open Door": "打开门"}
+    assert store.get_memory_hits(["Disabled"], "m", "en→zh-CN") == {}
+
+
+def test_promote_memory_blocks_builtin_conflict(tmp_path):
+    """promote（审核通过后提交）直接返回过滤后条数——调用方（settle）
+    据此补记 revoked，守恒不破。"""
+    store = _store()
+    store.init_schema()
+    store.batch_add_memory([
+        ("Disabled", "残疾人士", "m", "en→zh-CN"),
+        ("Start Game", "开始游戏", "m", "en→zh-CN"),
+    ])
+    promoted = store.promote_memory([
+        ("Disabled", "残疾人士", "m", "en→zh-CN"),
+        ("Start Game", "开始游戏", "m", "en→zh-CN"),
+    ])
+    assert promoted == 1                                 # 只提升合法词
+    assert store.count_pending_memory() == 0
+    assert store.get_memory_hits(["Start Game"], "m", "en→zh-CN") == {
+        "Start Game": "开始游戏"}
+    assert store.get_memory_hits(["Disabled"], "m", "en→zh-CN") == {}
+
+
+def test_settle_builtin_conflict_promoted_zero(tmp_path):
+    """settle_translation_memory 守恒：冲突词对被 promote 过滤 → 计数为
+    revoked（不成为可命中记忆），promoted+revoked 恒等于 committed。"""
+    from hanhua.core.models import TextEntry
+    from hanhua.core.memory import settle_translation_memory
+
+    def entry(original, translation):
+        return TextEntry("f", original, original, translation=translation,
+                         status="translated", meta={"confidence": "high"})
+
+    store = _store()
+    store.init_schema()
+    store.batch_add_memory([("Disabled", "残疾人士", "m", "en→zh-CN"),
+                            ("Start Game", "开始游戏", "m", "en→zh-CN")])
+    result = settle_translation_memory(
+        store, [entry("Disabled", "残疾人士"),
+                entry("Start Game", "开始游戏")], "m", "en→zh-CN")
+    assert result["promoted"] == 1                        # 只提升 Start Game
+    assert result["revoked"] == 1                         # Disabled 被过滤
+    assert result["promoted"] + result["revoked"] == 2    # 守恒
+    assert store.get_memory_hits(["Disabled"], "m", "en→zh-CN") == {}
+    assert store.get_memory_hits(["Start Game"], "m", "en→zh-CN") == {
+        "Start Game": "开始游戏"}
+
+
 def test_old_schema_migrates_pending_column():
     """旧库（无 pending 列）init_schema 迁移：列补齐，旧记忆视为已提交。"""
     import hashlib as _hashlib

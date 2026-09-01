@@ -9,6 +9,10 @@ from pathlib import Path
 
 from hanhua.core.placeholders import should_skip
 from hanhua.core.review_failures import failure_pattern
+# 注意：不在此处导入 translator 的 builtin_ui_conflict——translator 顶部
+# import quality，quality 又 import 本模块（_UPPERCASE_ACTION_VERBS 等），
+# 顶层导入 translator 会成环（translator → quality → knowledge →
+# translator）。record_review_failure 内延迟导入。
 
 # ────────────────────────────────────────────────────────────────────────
 # 知识库：汉化全链路（识别/翻译/写回/质量门）遇到的特殊情况的经验存储。
@@ -1019,6 +1023,15 @@ class KnowledgeBase:
         填充由 reviewer 构建时保证（仅终态 APPROVED 系）。"""
         if self.store is None:
             return False
+        # BUILTIN 冲突门禁（2026-09-01 记忆库/知识库污染系统性根治）：
+        # 失败案例的 correct_translation 若与内置 UI 权威冲突（如
+        # Disabled→残疾人士）→ 留空——坏译名不得成为可召回的正确例。
+        # 幂等（pattern=game:locator）不变，仅净化内容。延迟导入避免
+        # 模块级成环（translator ↔ knowledge，见顶部注释）。
+        from hanhua.core.translator import builtin_ui_conflict
+        if builtin_ui_conflict(failure.get("original", ""),
+                               failure.get("correct_translation", "")):
+            failure = {**failure, "correct_translation": ""}
         pattern = failure_pattern(failure)
         if not pattern:
             return False

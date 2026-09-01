@@ -56,8 +56,54 @@ BUILTIN_UI_REFERENCES = (
     # reference 的 _ACTION_VERB_ZH 过滤）避免专名引用陷阱
     ("Interact hold", "交互（长按）"),
     ("Interact", "交互"),
+    # UGUI 控件状态词（2026-08-31 用户实证「Disabled 残疾人士 vs 已禁用」）：
+    # Disabled/Enabled 是 Unity 控件/组件的启用状态标签（天赋卡片「已禁用/
+    # 已启用」、设置面板 toggle 状态）——真 UI 标签。入表后 prompt 注入 +
+    # Q1 语义门 + 确定性直填 + _PROTECTED_SINGLE_WORDS 保护（防 AgentMemory
+    # 「Disabled→残疾人士」单字词参考注入污染）四线生效。同族的
+    # Normal/Highlighted/Pressed/Selected 是控件状态动画名（结构串），
+    # 不进翻译池（extractor 拦截），无需参考。
+    ("Disabled", "已禁用"),
+    ("Enabled", "已启用"),
 )
 BUILTIN_UI_SOURCE_TERMS = CORE_MENU_SOURCE_TERMS
+
+# 内置 UI 术语权威映射（source.casefold → 权威中文译名）——沉淀端共享
+# （2026-09-01 记忆库/知识库污染系统性根治）：翻译端已有 Q1 语义门 +
+# 确定性直填在运行期拦截坏译文，但自动沉淀路径（AgentMemory.propose、
+# memory.promote_memory/add_memory、glossary.add_reviewed、knowledge
+# 失败闭环）此前没有 BUILTIN 冲突门禁——任何词的坏译文仍可落库成为
+# 后续翻译的污染源（Disabled→残疾人士 实证）。本表供各沉淀路径在写库
+# 前判定「与内置权威冲突」，拒绝/跳过/留空。
+BUILTIN_UI_EXACT: dict[str, str] = {
+    str(source).strip().casefold(): target
+    for source, target in BUILTIN_UI_REFERENCES}
+
+
+def builtin_ui_conflict(source: str, target: str) -> bool:
+    """判定一条 (原文, 译文) 是否与内置 UI 权威译名冲突（沉淀端门禁）。
+
+    满足全部条件才判冲突：
+      - 原文是单 token（无空格）——多词短语（'Press any key'）是完整
+        表达，译文自由度高（'按任意键'/'按任意键继续'），不作冲突判定；
+      - 原文精确命中内置权威表（source.casefold 相等）；
+      - 译文不含权威译名子串（'已禁用' vs '残疾人士'）；
+      - 非保留型（target != source，'itch'→'itch' 是专名保留，无翻译
+        语义，不判冲突）。
+    冲突 = 自动沉淀会把坏译文变成权威——门禁拒绝它，让内置规则胜出。
+    """
+    src = str(source or "").strip()
+    if " " in src:
+        return False
+    authoritative = BUILTIN_UI_EXACT.get(src.casefold())
+    if authoritative is None:
+        return False
+    target_s = str(target or "").strip()
+    if not target_s:
+        return False                    # 无译文不判冲突（空 = 无正确例）
+    if target_s.casefold() == src.casefold():
+        return False
+    return authoritative not in target_s
 
 
 def merge_translation_references(glossary=()) -> tuple[tuple[str, str], ...]:

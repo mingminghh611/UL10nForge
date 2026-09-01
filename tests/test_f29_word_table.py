@@ -41,10 +41,14 @@ def test_large_word_table_skipped_entirely():
     assert len(entries) == 100
     for e in entries:
         assert e.status == "skipped", f"{e.original} 未跳过"
-        assert e.meta["reason"] == "word_table_object", e.original
+        assert e.meta["reason"] in ("word_table_object",
+                                    "unity_control_state"), e.original
     # 白名单词同样跳过（词表对象里白名单不生效）
     assert _find(entries, "play").meta["reason"] == "word_table_object"
     assert _find(entries, "gold").meta["reason"] == "word_table_object"
+    # 控件状态名（Normal 等）由 unity_control_state 硬拦截（语义一致：
+    # 视觉状态串不进池）——词表对象标签不覆盖它
+    assert _find(entries, "Normal").meta["reason"] == "unity_control_state"
 
 
 def test_small_word_list_not_triggered():

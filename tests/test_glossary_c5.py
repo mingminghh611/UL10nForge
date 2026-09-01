@@ -105,6 +105,39 @@ def test_high_frequency_word_blacklist(tmp_path, term):
     assert store.list_all() == []
 
 
+def test_builtin_ui_conflict_rejected(tmp_path):
+    """BUILTIN 冲突门禁（2026-09-01 污染系统性根治）：审核沉淀单 token
+    Disabled→残疾人士（UI 状态标签被误判「残疾」）→ REJECTED，不写全局
+    库——权威译名（已禁用）由内置表恒胜出；权威译文与非冲突词照常沉淀。"""
+    store = _store(tmp_path)
+    bad = store.add_reviewed("Disabled", "残疾人士", context="天赋卡片",
+                             game="g1")
+    assert bad.status == REJECTED
+    assert "内置 UI 术语" in bad.reason
+    # 权威译文照常沉淀（candidate）
+    good = store.add_reviewed("Disabled", "已禁用", context="天赋卡片",
+                              game="g1")
+    assert good.status == CANDIDATE
+    # 非冲突词不受影响（多词短语/保留型专名）
+    keep = store.add_reviewed("Press any key", "按任意键", context="c", game="g1")
+    assert keep.status == CANDIDATE
+    assert store.add_reviewed("itch", "itch", context="c", game="g1").status \
+        == CANDIDATE
+    # 库内只有合法条目（冲突译名未写入）
+    rows = store.conn.execute("SELECT term FROM glossary").fetchall()
+    assert sorted(r["term"] for r in rows) == [
+        "Disabled", "Press any key", "itch"]
+
+
+def test_builtin_ui_conflict_case_insensitive(tmp_path):
+    """大小写形态同样拒绝（disabled/ENABLED 命中内置权威表）。"""
+    store = _store(tmp_path)
+    assert store.add_reviewed("disabled", "残疾人", context="c", game="g").status \
+        == REJECTED
+    assert store.add_reviewed("ENABLED", "已启动", context="c", game="g").status \
+        == REJECTED
+
+
 def test_blacklist_ignores_case(tmp_path):
     """大写形态同样拒绝（审核建议常大写原文词）。"""
     store = _store(tmp_path)

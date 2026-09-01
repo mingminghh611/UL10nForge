@@ -78,6 +78,18 @@ _CODE_DRIVEN_METHODS = frozenset({
 _UNITY_CONTROL_STATE_NAMES = frozenset({
     "normal", "highlighted", "pressed", "selected", "disabled",
 })
+# UGUI Button 组件 m_AnimationTriggers 的视觉状态动画触发器字段（归一化
+# 后：m_DisabledTrigger/mDisabledTrigger/disabledTrigger → disabledtrigger）：
+# 值是动画状态名（Normal/Highlighted/Pressed/Selected/Disabled/Enabled），
+# 反射/状态机按名引用，翻译必断按钮动画状态切换。与 _UNITY_CONTROL_STATE_
+# NAMES 既有语义对齐（F38 排除），typetree 路径同样结构跳过——2026-08-31
+# 用户实证：Button 对象的 m_DisabledTrigger="Disabled" 被显示证据链误放行，
+# 本地模型译「残疾人士」→ 审核幻觉 PASS → AgentMemory active 跨游戏污染
+# （同一触发器字段还有 m_EnabledTrigger）。
+_TYPETREE_ANIMATION_TRIGGER_FIELDS = frozenset({
+    "normaltrigger", "highlightedtrigger", "pressedtrigger",
+    "selectedtrigger", "disabledtrigger", "enabledtrigger",
+})
 _INPUT_BINDING_NAMES = frozenset({
     "move", "wasd", "fire", "look", "dpad",
     "right click", "square button", "x button", "y button",
@@ -238,6 +250,7 @@ def _localization_bundle_probe(
         return None
     from UnityPy import Environment
     env = Environment()
+    env.path = str(path.parent)
     locales: set[str] = set()
     identities: set[str] = set()
     try:
@@ -598,7 +611,9 @@ def _typetree_string_entries(
                 # 裸 name 字段（对话角色名等）不受影响。
                 blocked = structural or bool(
                     _field_name_tokens(key) & _TYPETREE_STRUCTURAL_FIELDS) \
-                    or key.casefold() in _TYPETREE_IMMUTABLE_FIELD_NAMES
+                    or key.casefold() in _TYPETREE_IMMUTABLE_FIELD_NAMES \
+                    or _normalized_field_name(key) \
+                    in _TYPETREE_ANIMATION_TRIGGER_FIELDS
                 child_path = [*path, key]
                 if isinstance(child, str) and child.strip():
                     leaves.append((child_path, child, normalized, blocked))
@@ -1686,7 +1701,20 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
             continue
         reason = entry.meta.pop("structural_reason", None)
         stripped = entry.original.strip()
-        if is_word_table:
+        # 控件状态词硬拦截（2026-08-31 用户实证「Disabled 残疾人士」）：
+        # Normal/Highlighted/Pressed/Selected/Disabled 是 Unity 视觉状态
+        # 动画名（按钮 m_AnimationTriggers 状态值），即使孤立单串在 UI
+        # 对象里也是控件状态串（翻「正常/残疾」写回状态错乱）。typetree
+        # 路径已按 m_*Trigger 字段名结构跳过；rawstr 路径无字段名，按值
+        # 兜底拦截。'Enabled'/'Disabled' 双义——真 UI 标签（天赋卡片
+        # 「已启用/已禁用」）由 BUILTIN_UI_REFERENCES 权威译名 + 确定性
+        # 直填处理，不是这里放行进池的原因。
+        if stripped.casefold() in _UNITY_CONTROL_STATE_NAMES:
+            entry.status = STATUS_SKIPPED
+            entry.meta["obj_is_key_list"] = True
+            reason = "unity_control_state"
+            confidence, role = "low", "structural"
+        elif is_word_table:
             # 词表对象条目：整体跳过（含白名单词——词表词翻译破坏
             # 打字玩法；白名单显示词证据只在真实 UI 组件对象生效）
             entry.status = STATUS_SKIPPED
@@ -3147,6 +3175,9 @@ def extract_asset_file(path: str | Path, file_id: str | None = None,
     except OSError:
         pass
     env = Environment()
+    # 外部引用解析根=游戏目录（Mono 游戏 m_Script PPtr deref 需加载同
+    # 目录兄弟文件；Environment() 默认 path=os.getcwd() 工具目录不可用）
+    env.path = str(p.parent)
     if typetree_generator is not None:
         env.typetree_generator = typetree_generator
     entries: list[TextEntry] = []

@@ -75,27 +75,27 @@ def test_function_word_single_token_never_promotes(tmp_path):
 def test_same_context_diff_value_is_conflict_not_overwrite(tmp_path):
     """同语境同 key 不同译文 → 不覆盖、不积累证据，conflicts+1。"""
     mem = _mem(tmp_path)
-    mem.propose("Resume", "继续", "game-a", role="ui_button")
-    mem.propose("Resume", "恢复", "game-b", role="ui_button")
+    mem.propose("Load", "载入", "game-a", role="ui_button")
+    mem.propose("Load", "读取", "game-b", role="ui_button")
     row = mem.list_all()[0]
-    assert row["value"] == "继续"          # 首译文保留
+    assert row["value"] == "载入"          # 首译文保留
     assert row["evidence_count"] == 1      # 证据不积累（译文不一致）
     assert row["conflicts"] == 1
     conflicts = mem.detect_conflicts()
     assert len(conflicts) == 1
-    assert conflicts[0]["key"] == "Resume"
+    assert conflicts[0]["key"] == "Load"
     # 冲突记忆不参与运用（无 2 次一致证据，无法晋升 active）
     assert mem.reference_pairs() == []
 
 
 def test_same_key_diff_context_is_independent_memory(tmp_path):
-    """同 key 不同语境是独立记忆（Resume 按钮/名词不互相覆盖）。"""
+    """同 key 不同语境是独立记忆（Load 按钮/名词不互相覆盖）。"""
     mem = _mem(tmp_path)
-    mem.propose("Resume", "继续", "game-a", role="ui_button")
-    mem.propose("Resume", "简历", "game-b", role="display")
+    mem.propose("Load", "载入", "game-a", role="ui_button")
+    mem.propose("Load", "载荷", "game-b", role="display")
     rows = {r["context_key"]: r for r in mem.list_all()}
-    assert rows["r:ui_button"]["value"] == "继续"
-    assert rows["r:display"]["value"] == "简历"
+    assert rows["r:ui_button"]["value"] == "载入"
+    assert rows["r:display"]["value"] == "载荷"
     assert mem.detect_conflicts() == []  # 语境分化不是冲突
 
 
@@ -159,10 +159,10 @@ def test_exact_context_match_wins_over_plain(tmp_path):
 def test_multi_context_original_no_plain_fallback(tmp_path):
     """已语境分化的原文绝不用无语境记忆兜底（污染防护）。"""
     mem = _mem(tmp_path)
-    _grow(mem, "Resume", "继续", ["g1", "g2", "g3"], role="ui_button")
-    _grow(mem, "Resume", "简历", ["g1", "g2", "g3"], role="display")
+    _grow(mem, "Record", "记录", ["g1", "g2", "g3"], role="ui_button")
+    _grow(mem, "Record", "唱片", ["g1", "g2", "g3"], role="display")
     # 未知语境（role 不匹配任何记忆）→ 不用任一记忆兜底
-    assert mem.direct_applications(["Resume"], {"Resume": "other"}) == {}
+    assert mem.direct_applications(["Record"], {"Record": "other"}) == {}
 
 
 def test_unique_plain_memory_falls_back(tmp_path):
@@ -176,18 +176,19 @@ def test_unique_plain_memory_falls_back(tmp_path):
 def test_rejected_feedback_retires_after_two(tmp_path):
     """被质量门拒绝 → rejects+1 → 2 次后退休，不再参与任何运用。"""
     mem = _mem(tmp_path)
-    _grow(mem, "Press Start", "按开始", ["g1", "g2", "g3"], role="display")
+    _grow(mem, "Press any key", "按任意键", ["g1", "g2", "g3"], role="display")
     ckey = context_key_of("display")
-    assert mem.direct_applications(["Press Start"]) != {}
-    mem.apply_feedback("Press Start", ckey, accepted=False)
+    assert mem.direct_applications(["Press any key"]) != {}
+    mem.apply_feedback("Press any key", ckey, accepted=False)
     assert mem.list_all()[0]["rejects"] == 1
     assert mem.list_all()[0]["status"] == "active"  # 首次拒绝未退休
     # 1 次拒绝后仍给一次机会（质量门误杀容错）
-    assert mem.direct_applications(["Press Start"]) == {"Press Start": "按开始"}
-    mem.apply_feedback("Press Start", ckey, accepted=False)
+    assert mem.direct_applications(["Press any key"]) == {
+        "Press any key": "按任意键"}
+    mem.apply_feedback("Press any key", ckey, accepted=False)
     assert mem.list_all()[0]["status"] == "retired"  # 2 次确认不可信
     assert mem.reference_pairs() == []
-    assert mem.direct_applications(["Press Start"]) == {}
+    assert mem.direct_applications(["Press any key"]) == {}
 
 
 def test_accepted_feedback_increments_hits(tmp_path):
@@ -247,3 +248,32 @@ def test_reference_pairs_filters_conflicting_single_word(tmp_path):
     assert "Settings" not in pairs
     assert pairs.get("Reroll") == "重掷"
     assert pairs.get("Play with me") == "和我一起玩"
+
+
+def test_propose_blocks_builtin_conflict_single_word(tmp_path):
+    """BUILTIN 冲突门禁（2026-09-01 污染系统性根治）：单 token 原文命中
+    内置 UI 权威表且译文与权威不符（Disabled→残疾人士）→ 拒绝入池，
+    绝不成为后续游戏的参考注入源；权威译文（已禁用）与非冲突词照常沉淀。
+    """
+    mem = _mem(tmp_path)
+    mem.session_reset()
+    # 冲突译法：多次证据也不入池（入口门禁，不再等 reference_pairs 过滤）
+    _grow(mem, "Disabled", "残疾人士", ["game-a", "game-b", "game-c"])
+    _grow(mem, "disabled", "残疾人", ["game-a", "game-b"])
+    _grow(mem, "Enabled", "已启动", ["game-a"])
+    _grow(mem, "Play", "播放", ["game-a"])
+    # 权威译文照常沉淀
+    _grow(mem, "Disabled", "已禁用", ["game-a"])
+    _grow(mem, "Settings", "设置", ["game-a"])
+    # 非冲突词照常沉淀
+    _grow(mem, "Reroll", "重掷", ["game-a"])
+    rows = mem.list_all()
+    by = {r["key"]: r["value"] for r in rows}
+    assert by == {"Disabled": "已禁用", "Settings": "设置", "Reroll": "重掷"}, by
+    report = mem.session_report()
+    # Disabled×3 + disabled×2 + Enabled×1 + Play×1 = 7 次冲突门禁拦截
+    assert report["session"]["blocked_builtin_conflicts"] == 7, \
+        report["session"]
+    assert report["session"]["proposed"] == 3, report["session"]
+    # 冲突记忆完全不在库（非过滤而是不入池）
+    assert not any(r["key"] in ("Play", "Enabled") for r in rows)

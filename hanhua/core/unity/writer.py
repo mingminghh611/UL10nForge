@@ -504,6 +504,11 @@ def _asset_bundle_content_crc(path: Path) -> int:
     from UnityPy import Environment
 
     env = Environment()
+    # 外部引用解析根必须是游戏目录：Environment() 默认 path=os.getcwd()
+    # （工具自身目录），单文件 env.load 不更新 path——Mono 游戏
+    # MonoBehaviour 的 m_Script PPtr（FileID=1 → 外部
+    # globalgamemanagers.assets）deref 时 find_file 会用 CWD 搜索而失败。
+    env.path = str(path.parent)
     try:
         env.load([str(path)])
         bundles = {id(item): item for item in env.files.values()
@@ -779,6 +784,8 @@ def _verify_saved_bundle(
             tuple[str, int], tuple[list[str], dict[str, str]]] | None = None,
         expected_surrounding_values: dict[
             tuple[str, int], list[tuple[list[str | int], object]]] | None = None,
+        *,
+        source_dir: Path | None = None,
         typetree_generator=None,
 ) -> None:
     """重开临时容器，确认目标对象正确且未目标对象字节不变。
@@ -807,6 +814,12 @@ def _verify_saved_bundle(
     verifier = Environment()
     if typetree_generator is not None:
         verifier.typetree_generator = typetree_generator
+    # 外部引用解析根=游戏目录（同 _patch_asset/_asset_bundle_content_crc）。
+    # path 是临时副本（staging），同目录无兄弟文件——外部引用必须指向
+    # 原游戏源目录（source_dir，同卷），否则 Mono 游戏 m_Script PPtr
+    # deref 仍抛 FileNotFoundError。
+    _search_root = source_dir or path.parent
+    verifier.path = str(_search_root)
     try:
         verifier.load([str(path)])
         actual: dict[tuple[str, int], bytes] = {}
@@ -1056,6 +1069,9 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
     env = Environment()
     if typetree_generator is not None:
         env.typetree_generator = typetree_generator
+    # 外部引用解析根=游戏目录（Mono 游戏 m_Script PPtr deref 需加载
+    # 同目录兄弟文件如 globalgamemanagers.assets，见 _asset_bundle_content_crc）
+    env.path = str(path.parent)
     by_obj: dict[tuple[str, int], list[dict]] = {}
     for e in entries:
         meta = json.loads(e["meta"] or "{}")
@@ -1563,7 +1579,8 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                     saved, expected_raw_by_path_id, baseline_hashes,
                     expected_typetree_values, expected_immutable_values,
                     expected_string_sequences, expected_surrounding_values,
-                    typetree_generator=typetree_generator)
+                    typetree_generator=typetree_generator,
+                    source_dir=path.parent)
             except ValueError as exc:
                 # 逻辑层验证失败（含字符串序列不一致）——记录审计详情后
                 # 重新抛出：整体拒绝写回，副本保持原样，绝不落地坏产物

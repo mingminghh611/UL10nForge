@@ -378,9 +378,12 @@ def _make_loop_junction(tmp_path) -> bool:
     (game / "Data").mkdir()
     (game / "Data" / "text.txt").write_text("hello", encoding="utf-8")
     loop = game / "loop"
+    # cmd mklink 输出本地化（中文 GBK）→ text=True 的 _readerthread 按
+    # UTF-8 解码崩溃（Windows 全量回归 7 处 UnicodeDecodeError 根因）。
+    # 不读文本：bytes 捕获 + 仅判 returncode。
     result = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(loop), str(game)],
-        capture_output=True, text=True)
+        capture_output=True)
     return result.returncode == 0 and loop.is_dir()
 
 

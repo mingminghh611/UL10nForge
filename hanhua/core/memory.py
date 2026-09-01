@@ -8,6 +8,18 @@ from pathlib import Path
 
 from hanhua.core.models import STATUS_TRANSLATED, GameProfile
 from hanhua.core.review_outcome import PUBLISHABLE as _PUBLISHABLE_OUTCOMES
+from hanhua.core.translator import builtin_ui_conflict
+
+
+def _builtin_clean(rows: list[tuple]) -> list[tuple]:
+    """过滤与内置 UI 权威译名冲突的记忆行（2026-09-01 污染系统性根治）。
+
+    单 token 原文命中内置权威表且译文与权威不符（Disabled→残疾人士）
+    是历史坏记忆的注入源——promote（pending=0 可命中）前丢弃，不让
+    坏译文跨游戏污染。与 agent_memory.propose 门禁（入口不沉淀）闭环。
+    多词短语/保留型专名（itch→itch）不作冲突，照常通过。
+    """
+    return [r for r in rows if not builtin_ui_conflict(r[0], r[1])]
 
 
 def _now() -> str:
@@ -736,7 +748,14 @@ class ProjectStore:
         return entries_rows, memory_rows
 
     def add_memory(self, original, translation, model, lang):
-        """显式提交记忆（pending=0）：审核通过/人工写入——立即可命中。"""
+        """显式提交记忆（pending=0）：审核通过/人工写入——立即可命中。
+
+        BUILTIN 冲突门禁：与内置 UI 权威译名冲突的单 token 对不落库
+        （Disabled→残疾人士 历史污染根因；权威译名由确定性直填 + Q1
+        语义门在运行期恒胜出，冲突记忆只会覆盖它）。
+        """
+        if builtin_ui_conflict(original, translation):
+            return
         h = hashlib.md5(original.encode("utf-8")).hexdigest()
         with self._lock:
             self.conn.execute(
@@ -751,7 +770,14 @@ class ProjectStore:
         Phase B（PendingEvidence）：翻译管线机械门通过后先入 pending 桶，
         深审通过（promote）或未开启审核（settle）前不参与任何命中——
         坏译不得在深审前污染记忆。
+
+        BUILTIN 冲突门禁（2026-09-01）：与内置权威冲突的单 token 对
+        （Disabled→残疾人士）不入 pending 桶——坏译即使 pending 也会
+        在审核关闭时被 settle promote 成可命中记忆。
         """
+        if not rows:
+            return
+        rows = _builtin_clean(rows)
         if not rows:
             return
         with self._lock:
@@ -768,7 +794,14 @@ class ProjectStore:
         rows: [(original, translation, model, lang)]——upsert 语义，
         未入 pending 桶的条目（如审核期间反馈重译的新译文）直接提交。
         返回提交条数。
+
+        BUILTIN 冲突门禁（2026-09-01）：与内置权威冲突的单 token 对
+        不提升（Disabled→残疾人士 历史污染根因）——bad 译文不得成为
+        可命中记忆。
         """
+        if not rows:
+            return 0
+        rows = _builtin_clean(rows)
         if not rows:
             return 0
         with self._lock:
@@ -909,4 +942,7 @@ def settle_translation_memory(store, entries, model: str, lang: str) -> dict:
             store.remove_memory(e.original, model, lang)
             revoked += 1
     promoted = store.promote_memory(committed) if committed else 0
+    # BUILTIN 冲突门禁（2026-09-01）：promote 内过滤冲突对，返回条数
+    # 已剔除——这里补记 revoked 口径（promoted+revoked 守恒）。
+    revoked += max(0, len(committed) - promoted)
     return {"promoted": promoted, "revoked": revoked}

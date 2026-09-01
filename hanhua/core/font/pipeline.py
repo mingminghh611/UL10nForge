@@ -105,7 +105,8 @@ class FontCompatibilityPipeline:
             self.inputs.staging, self.inputs.font_config,
             unity_version=self.inputs.unity_version,
             required=plan,
-            typetree_generator=self.inputs.typetree_generator)
+            typetree_generator=self.inputs.typetree_generator,
+            source_dir=self.inputs.game_dir)
 
     @staticmethod
     def verify_static(static: FontReplaceResult | None) \

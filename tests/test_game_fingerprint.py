@@ -824,7 +824,7 @@ def test_real_internal_windows_junction_is_never_traversed(tmp_path):
     link = source / "linked"
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(link), str(outside.parent)],
-        capture_output=True, text=True, check=False)
+        capture_output=True, check=False)  # 中文 GBK 输出勿按 UTF-8 解码
     if created.returncode != 0:
         pytest.skip("junction creation unavailable")
     try:

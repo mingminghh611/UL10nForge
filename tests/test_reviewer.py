@@ -167,6 +167,16 @@ def test_system_prompt_has_ten_dimensions():
     assert "dimensions" in _REVIEW_SYSTEM_PROMPT
 
 
+def test_system_prompt_terms_include_disabled_enabled():
+    """术语一致维度含 Disabled=已禁用 / Enabled=已启用 权威译名（2026-08-31
+    用户实证「Disabled 残疾人士 vs 已禁用」：缺权威译名时 4B 对垃圾译文
+    「残疾人士」幻觉式 PASS）。"""
+    assert "Disabled=已禁用" in _REVIEW_SYSTEM_PROMPT
+    assert "Enabled=已启用" in _REVIEW_SYSTEM_PROMPT
+    assert "残疾人士" in _REVIEW_SYSTEM_PROMPT  # 明确的反例
+    assert "已启动" in _REVIEW_SYSTEM_PROMPT     # Enabled 反例
+
+
 def test_system_prompt_has_low_quality_worked_examples():
     """维度 11 带低质量原文具体示例（come-back 实证：4B 只读抽象规则仍
     把 not only 强调句当否定漏译）。"""

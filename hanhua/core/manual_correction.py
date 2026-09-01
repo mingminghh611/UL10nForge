@@ -40,7 +40,9 @@ def manual_correction(store, file_id: str, key_path: str, translation: str,
         return result
     normalized = result["translation"]
     if normalized:
-        # 工作记忆：提交（pending=0 立即可命中；覆盖旧译文行）
+        # 工作记忆：提交（pending=0 立即可命中；覆盖旧译文行）。
+        # BUILTIN 冲突门禁在 add_memory 内部：人工把 Disabled 改成
+        # 「残疾人士」属误改，不得覆盖权威（权威由内置表恒胜出）。
         store.add_memory(result["original"], normalized, model, lang)
         # 经验记忆：最高权重人工证据（未接 agent_memory 时跳过——
         # GUI/脚本可按需传入；核心回流不因缺 agent 而失败）

@@ -14,6 +14,7 @@ from hanhua.core.engine_strings import (InputEvent, has_display_text_evidence,
 from hanhua.core.memory import ProjectStore
 from hanhua.core.models import STATUS_SKIPPED, TextEntry
 from hanhua.core.unity.extractor import (_is_engine_string, _raw_string_entries,
+                                        _UNITY_CONTROL_STATE_NAMES,
                                         _decode_field_path,
                                         _encode_field_path,
                                         _localization_bundle_probe,
@@ -81,6 +82,35 @@ def test_typetree_excludes_display_values_under_structural_fields():
     display, _ = _typetree_string_entries("f", 8, tree)
 
     assert [entry.original for entry in display] == ["Visible"]
+
+
+def test_typetree_animation_trigger_values_are_structural_not_display():
+    # 2026-08-31 用户实证「Disabled 残疾人士 vs 已禁用」根因：UGUI Button
+    # 组件 m_AnimationTriggers 的视觉状态动画触发器字段（m_NormalTrigger/
+    # m_HighlightedTrigger/m_PressedTrigger/m_SelectedTrigger/m_DisabledTrigger/
+    # m_EnabledTrigger）值是动画状态名（Normal/Highlighted/Pressed/Selected/
+    # Disabled/Enabled），反射/状态机按名引用——翻译必断按钮动画状态切换。
+    # 必须按结构串拦截（不进 display 也不进候选层），与 _UNITY_CONTROL_
+    # STATE_NAMES 既有语义对齐（F38/F39 已排除，此处补 typetree 路径）。
+    tree = {
+        "m_AnimationTriggers": {
+            "m_DisabledTrigger": "Disabled",
+            "m_NormalTrigger": "Normal",
+            "m_HighlightedTrigger": "Highlighted",
+            "m_PressedTrigger": "Pressed",
+            "m_SelectedTrigger": "Selected",
+        },
+        "m_Text": "Settings",
+        "panel": {"text": "Real UI text"},
+    }
+
+    display, candidates = _typetree_string_entries("f", 7, tree, "fixture.assets")
+
+    assert [entry.original for entry in display] == ["Settings", "Real UI text"]
+    assert not any("Trigger" in str(e.meta["field_path"])
+                   for e in display + candidates)
+    assert not any(e.original in _UNITY_CONTROL_STATE_NAMES
+                   for e in display)
 
 
 def test_typetree_type_descriptor_never_a_display_text():
@@ -1414,7 +1444,7 @@ def test_code_heavy_button_object_skips_control_state_names():
     assert by_orig["Instructions"].status == "pending"
     assert by_orig["Instructions"].meta["reason"] == "code_heavy_display_word"
     assert all(by_orig[text].status == "skipped"
-               and by_orig[text].meta["reason"] == "code_heavy_identifier"
+               and by_orig[text].meta["reason"] == "unity_control_state"
                for text in ("Normal", "Highlighted", "Pressed", "Disabled"))
 
 
@@ -1612,10 +1642,14 @@ def test_raw_string_entries_inputsystem_binding_path_object_all_skipped():
     assert by_orig["Press(behavior=2)"].status == "skipped"
     assert by_orig["Press(behavior=2)"].meta["reason"] == "prefilter_engine_string"
     # 动作名/绑定组名在输入配置对象内全部跳过
-    for name in ("Normal", "Proceed", "Interact", "Action", "Button",
+    for name in ("Proceed", "Interact", "Action", "Button",
                  "Controls", "Arrow Keys"):
         assert by_orig[name].status == "skipped", name
         assert by_orig[name].meta.get("reason") == "input_system_object", name
+    # 'Normal' 是控件状态名，被新硬拦截（unity_control_state）——语义与
+    # F38 一致（视觉状态串不进池），比输入配置对象标签更精确
+    assert by_orig["Normal"].status == "skipped"
+    assert by_orig["Normal"].meta.get("reason") == "unity_control_state"
 
 
 def test_raw_string_entries_timeline_object_skipped():

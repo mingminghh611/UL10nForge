@@ -68,9 +68,10 @@ def test_apply_static_runs_install_static_fonts(tmp_path, monkeypatch):
     from hanhua.core.font import pipeline as pipeline_module
 
     def fake_install_static(staging, config, *, unity_version, required,
-                            typetree_generator=None):
+                            typetree_generator=None, source_dir=None):
         calls["staging"] = staging
         calls["unity_version"] = unity_version
+        calls["source_dir"] = source_dir
         from hanhua.core.unity.font_replace import FontReplaceResult
         return FontReplaceResult(replaced=1)
 
@@ -80,6 +81,7 @@ def test_apply_static_runs_install_static_fonts(tmp_path, monkeypatch):
     result = pipeline.apply_static(pipeline.plan())
     assert result is not None and result.replaced == 1
     assert calls["unity_version"] == "2022.3"
+    assert calls["source_dir"] == Path(tmp_path) / "game"
 
 
 def test_verify_static_extracts_coverage(tmp_path):
@@ -224,7 +226,7 @@ def test_run_dynamic_consumer_flipped_when_plugin_deployed(
     from hanhua.core.unity.font_replace import FontReplaceResult
 
     def fake_static(staging, config, *, unity_version, required,
-                            typetree_generator=None):
+                            typetree_generator=None, source_dir=None):
         return _dynamic_static(required)
 
     monkeypatch.setattr(pipeline_module, "install_static_fonts", fake_static)
@@ -254,7 +256,7 @@ def test_run_dynamic_consumer_stays_blocked_without_plugin(tmp_path,
     from hanhua.core.font import BLOCKED
 
     def fake_static(staging, config, *, unity_version, required,
-                            typetree_generator=None):
+                            typetree_generator=None, source_dir=None):
         return _dynamic_static(required)
 
     monkeypatch.setattr(pipeline_module, "install_static_fonts", fake_static)
@@ -279,7 +281,7 @@ def test_run_returns_unified_outcome(tmp_path, monkeypatch):
     from hanhua.core.unity.font_replace import FontReplaceResult
 
     def fake_static(staging, config, *, unity_version, required,
-                            typetree_generator=None):
+                            typetree_generator=None, source_dir=None):
         consumers = [FontConsumer(
             "covered", "tmp_font", static_replaced=True,
             font_scalars=frozenset(ord(c) for c in "设置"),
@@ -429,7 +431,7 @@ def test_run_integration_bitmap_injection_recomputes_coverage(
     fnt.write_text("old", encoding="utf-8")
 
     def fake_static(staging, config, *, unity_version, required,
-                            typetree_generator=None):
+                            typetree_generator=None, source_dir=None):
         return FontReplaceResult(
             replaced=1, consumers=[
                 FontConsumer("c1", "tmp_font", static_replaced=True,

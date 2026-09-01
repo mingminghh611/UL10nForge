@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from hanhua.core.knowledge import _UPPERCASE_ACTION_VERBS
+from hanhua.core.translator import BUILTIN_UI_EXACT, builtin_ui_conflict
 
 # 归一化冲突键：大小写 + 空白压缩 + 去标点。用于检测「同源不同译」：
 # "moon key" 与 "Moon Key" 是同一术语，若译名不同则模型会无所适从
@@ -213,6 +214,20 @@ class GlossaryStore:
                 f"拒绝沉淀：{term_s!r} 是高频普通词单 token 词对"
                 f"（无语境可区分动词/名词/方向用法，全局强制会误杀"
                 f"其他语境——F22-4 三连杀实证）", term=term_s)
+        # BUILTIN 冲突门禁（2026-09-01 记忆库/知识库污染系统性根治）：
+        # 单 token 原文命中内置 UI 权威表且译文与权威不符（Disabled→
+        # 残疾人士）→ 拒绝沉淀。审核把 UI 状态标签误判成「残疾」是
+        # 语义错误，沉淀成全局词对会让后续游戏全部误用。权威译名
+        # （已禁用/已启用）由内置表 + 确定性直填恒胜出，此门防坏
+        # 译名成为候选/激活。
+        if builtin_ui_conflict(term_s, trans_s):
+            authoritative = BUILTIN_UI_EXACT.get(term_s.strip().casefold())
+            return DepositResult(
+                REJECTED,
+                f"拒绝沉淀：{term_s!r} 是内置 UI 术语，权威译名应为"
+                f"{authoritative!r}（不是 {trans_s!r}——'Disabled' 是"
+                f"控件启用状态标签，审核判错会污染全局术语）",
+                term=term_s)
         games = [g for g in re.split(r"[,，]", game or "") if g]
         note = f"来源 {game or '?'}"
         if context:

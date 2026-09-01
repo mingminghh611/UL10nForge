@@ -84,7 +84,7 @@ class TmpBundlePayload:
 
 # ── 版本映射 ────────────────────────────────────────────────
 
-def _make_env(typetree_generator=None):
+def _make_env(typetree_generator=None, path: str | None = None):
     """UnityPy Environment 构造：Mono 游戏 typetree 生成器透传。
 
     资产构建未带 typetree 时（DisableWriteTypeTree），MonoBehaviour 读取
@@ -96,6 +96,10 @@ def _make_env(typetree_generator=None):
     env = Environment()
     if typetree_generator is not None:
         env.typetree_generator = typetree_generator
+    # 外部引用解析根=游戏目录（默认是 os.getcwd() 工具目录，Mono 游戏
+    # m_Script PPtr deref 需加载同目录兄弟文件 globalgamemanagers.assets）
+    if path:
+        env.path = str(path)
     return env
 
 
@@ -183,6 +187,7 @@ def load_tmp_bundle(bundle: Path) -> TmpBundlePayload:
     """解析版本化 TMP 字体 bundle，返回载荷。"""
     from UnityPy import Environment
     env = Environment()
+    env.path = str(bundle.parent)
     font_obj = atlas_obj = None
     try:
         env.load([str(bundle)])
@@ -375,10 +380,13 @@ def _replace_and_swap(path: Path, env, verify_fn=None) -> None:
                 _time.sleep(0.8)
 
 
-def _verify_legacy_saved(saved: Path, ttf_bytes: bytes, replaced: int) -> None:
+def _verify_legacy_saved(saved: Path, ttf_bytes: bytes, replaced: int,
+                         source_dir: Path | None = None) -> None:
     """重开临时容器验证全部 Font 的 m_FontData 均已被替换。"""
     from UnityPy import Environment
     verify = Environment()
+    # 临时副本同目录无兄弟文件——外部引用在原游戏目录解析
+    verify.path = str(source_dir or saved.parent)
     try:
         verify.load([str(saved)])
         seen: set[tuple[str, str, int]] = set()
@@ -407,16 +415,21 @@ def replace_legacy_fonts_in_container(
     ttf_bytes: bytes,
     progress: int = 0,
     typetree_generator: Any | None = None,
+    source_dir: Path | None = None,
 ) -> tuple[int, list[str], list]:
     """替换单个 Unity 容器（.assets/level/bundle）内全部 Font 对象的内嵌 TTF。
 
     返回 (替换数, 跳过原因列表, 消费者记录列表)。Phase 2：每个 Font 对象
     都进消费者清单——已替换的附目标 TTF 真实字符集（cmap 解析），未替换的
     记为 STATIC_NOT_REPLACED（不得静默消失）。
+
+    source_dir：外部引用解析根（写回副本路径时传原游戏目录——副本临时
+    替换文件同目录无兄弟文件，Mono 游戏 m_Script PPtr deref 需在原目录
+    解析 external；与 writer._verify_saved_bundle 同语义）。
     """
     from hanhua.core.font import FontConsumer
     from hanhua.core.font.ttf_charset import ttf_charset
-    env = _make_env(typetree_generator)
+    env = _make_env(typetree_generator, path=str(source_dir or path.parent))
     replaced = 0
     skipped: list[str] = []
     consumers: list[FontConsumer] = []
@@ -450,7 +463,8 @@ def replace_legacy_fonts_in_container(
             return 0, skipped, consumers
         _replace_and_swap(
             path, env,
-            verify_fn=lambda saved: _verify_legacy_saved(saved, ttf_bytes, replaced),
+            verify_fn=lambda saved: _verify_legacy_saved(
+                saved, ttf_bytes, replaced, source_dir=source_dir),
         )
     finally:
         _dispose_environment(env)
@@ -641,6 +655,7 @@ def replace_tmp_fonts_in_container(
     required: set[int] | None = None,
     unity_version: str | None = None,
     typetree_generator: Any | None = None,
+    source_dir: Path | None = None,
 ) -> tuple[int, list[str], list]:
     """替换单个容器内全部 TMP_FontAsset 对象。
 
@@ -649,9 +664,12 @@ def replace_tmp_fonts_in_container(
       缺任何需求码点都必须替换；
     - 每个 TMP 对象都进消费者清单：布局不匹配 / dynamic 0 glyph /
       atlas 未解析 / 已覆盖 / 已替换 各有明确终态（实现重点 3/4/5）。
+
+    source_dir：外部引用解析根（写回副本路径时传原游戏目录，同
+    replace_legacy_fonts_in_container）。
     """
     from hanhua.core.font import FontConsumer
-    env = _make_env(typetree_generator)
+    env = _make_env(typetree_generator, path=str(source_dir or path.parent))
     replaced = 0
     skipped: list[str] = []
     patched: list = []
@@ -789,21 +807,23 @@ def replace_tmp_fonts_in_container(
         _replace_and_swap(
             path, env,
             verify_fn=lambda saved: _verify_tmp_saved(
-                saved, payload, replaced, typetree_generator))
+                saved, payload, replaced, typetree_generator,
+                source_dir=source_dir))
     finally:
         _dispose_environment(env)
     return replaced, skipped, consumers
 
 
 def _verify_tmp_saved(saved: Path, payload: TmpBundlePayload, replaced: int,
-                      typetree_generator: Any | None = None) -> None:
+                      typetree_generator: Any | None = None,
+                      source_dir: Path | None = None) -> None:
     """重开临时容器验证 TMP 字形表 + 图集像素均已替换。
 
     只验字形数量会漏掉「元数据更新但流没写入」的假通过——旧实现正是如此
     （同尺寸分支只改 typetree 不写像素）。图集流数据必须逐字节等于
     payload.atlas_stream。
     """
-    verify = _make_env(typetree_generator)
+    verify = _make_env(typetree_generator, path=str(source_dir or saved.parent))
     try:
         verify.load([str(saved)])
         seen: set[tuple[str, str, int]] = set()
@@ -898,6 +918,7 @@ def _split_parts(parts: tuple):
 def install_static_fonts(out_dir, config, *, unity_version=None,
                          required=None,
                          typetree_generator: Any | None = None,
+                         source_dir: Path | None = None,
                          ) -> FontReplaceResult:
     """在写回副本上执行静态字体替换（legacy Font + TMP_FontAsset）。
 
@@ -907,6 +928,9 @@ def install_static_fonts(out_dir, config, *, unity_version=None,
     逐对象消费者记录汇总为结构化覆盖：replaced > 0 不再代表全局成功；
     任何消费者 CANDIDATE_ONLY/BLOCKED → result.incomplete=True
     （「一个成功一个失败」的 fixture 结果必须是 INCOMPLETE 而非 PASS）。
+
+    source_dir：外部引用解析根（staging 副本路径传原游戏目录——副本
+    asset 加载/重开验证的 Mono m_Script deref 需在原目录解析兄弟文件）。
     """
     from hanhua.core.font import compute_coverage
     required_scalars = set(required.scalars) if required is not None else None
@@ -927,7 +951,8 @@ def install_static_fonts(out_dir, config, *, unity_version=None,
         for asset in _asset_candidates(out_dir):
             try:
                 parts = replace_legacy_fonts_in_container(
-                    asset, ttf_bytes, typetree_generator=typetree_generator)
+                    asset, ttf_bytes, typetree_generator=typetree_generator,
+                    source_dir=source_dir)
             except Exception as exc:  # noqa: BLE001
                 result.warnings.append(f"{asset.name}: {exc}")
                 continue
@@ -952,7 +977,8 @@ def install_static_fonts(out_dir, config, *, unity_version=None,
                     parts = replace_tmp_fonts_in_container(
                         asset, payload, required=required_scalars,
                         unity_version=unity_version,
-                        typetree_generator=typetree_generator)
+                        typetree_generator=typetree_generator,
+                        source_dir=source_dir)
                 except Exception as exc:  # noqa: BLE001
                     result.warnings.append(f"{asset.name}: {exc}")
                     continue

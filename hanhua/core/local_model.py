@@ -198,6 +198,11 @@ def _kill_llama_on_port(port: int) -> bool:
     try:
         out = subprocess.run(
             ["netstat", "-ano"], capture_output=True, text=True,
+            # -X utf8 下 text=True 按 UTF-8 解码，而中文 Windows 的
+            # netstat 输出是 GBK → _readerthread 解码崩溃、stdout=None
+            # （全量回归 7 处 UnicodeDecodeError 根因）。errors=replace
+            # 兜底：中文列变 � 不影响 TCP/LISTENING/PID 解析。
+            encoding="utf-8", errors="replace",
             timeout=10,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         ).stdout
@@ -217,7 +222,9 @@ def _kill_llama_on_port(port: int) -> bool:
         try:
             rows = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",  # 中文列名 GBK 兜底
+                timeout=10,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             ).stdout
             name = rows.split(",")[0].strip('"') if rows else ""

@@ -288,6 +288,41 @@ def test_record_review_failure_cross_game_distinct(tmp_path):
     assert len(rows) == 2
 
 
+def test_record_review_failure_builtin_conflict_correct_cleared(tmp_path):
+    """BUILTIN 冲突门禁（2026-09-01 污染系统性根治）：失败案例
+    correct_translation 若与内置 UI 权威冲突（Disabled→残疾人士，UI
+    状态标签被误判「残疾」）→ 留空——坏译名不得成为可召回的正确例；
+    案例本身仍记录（wrong_translation 留档）。"""
+    kb = _kb(tmp_path)
+    assert kb.record_review_failure(
+        _failure(original="Disabled", wrong_translation="残疾人士",
+                 correct_translation="残疾人士", locator="f:disabled",
+                 error_type=ERROR_CRITICAL)) is True
+    rows = kb.store.list_by_domain("fail_case")
+    assert len(rows) == 1
+    note = json.loads(rows[0]["note"])
+    assert note["correct_translation"] == ""
+    assert note["wrong_translation"] == "残疾人士"
+
+
+def test_record_review_failure_builtin_conflict_authoritative_kept(tmp_path):
+    """非冲突正确例照常落库（权威译名/多词短语不受影响）。"""
+    kb = _kb(tmp_path)
+    kb.record_review_failure(
+        _failure(original="Disabled", wrong_translation="残疾人士",
+                 correct_translation="已禁用", locator="f:disabled2",
+                 error_type=ERROR_CRITICAL))
+    kb.record_review_failure(
+        _failure(original="Press any key", wrong_translation="按键盘",
+                 correct_translation="按任意键", locator="f:key",
+                 error_type=ERROR_CRITICAL))
+    rows = kb.store.list_by_domain("fail_case")
+    notes = {json.loads(r["note"])["original"]: json.loads(r["note"])
+             for r in rows}
+    assert notes["Disabled"]["correct_translation"] == "已禁用"
+    assert notes["Press any key"]["correct_translation"] == "按任意键"
+
+
 # ── #48 全量送审明细（审校后完整记录） ─────────────────────────────
 
 def test_review_entries_collects_full_detail(monkeypatch):

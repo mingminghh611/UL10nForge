@@ -279,8 +279,7 @@ def test_inventory_ignores_direct_game_junction(tmp_path):
     junction = root / "Junction Game"
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
-        capture_output=True,
-        text=True,
+        capture_output=True,  # 中文 GBK 输出勿按 UTF-8 解码（_readerthread 崩溃）
         check=False,
     )
     if created.returncode != 0:
@@ -302,8 +301,7 @@ def test_inventory_does_not_cross_internal_game_junction(tmp_path):
     junction = game_dir / "Game_Data" / "linked-assets"
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
-        capture_output=True,
-        text=True,
+        capture_output=True,  # 中文 GBK 输出勿按 UTF-8 解码（_readerthread 崩溃）
         check=False,
     )
     if created.returncode != 0:
