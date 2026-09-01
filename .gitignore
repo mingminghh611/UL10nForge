@@ -51,3 +51,6 @@ coord_runtime_embed.json
 
 # TMP bundle 构建的参考字体资产（可随时用 build_tmp_font_bundles.py 重建，148M 不入库）
 .ref_fonts/
+
+# 发行包产物（dist/ 由 scripts/_package_0371.py 生成，可重建）
+dist/
