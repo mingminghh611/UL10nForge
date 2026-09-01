@@ -2153,6 +2153,73 @@ def _is_lexicon_word(s: str) -> bool:
     return bool(s and _LEXICON_WORD_RE.match(s))
 
 
+# 消息脚本命令 token（fromivan 实证 2026-09-01）：'RECEIVED_MSG|Hey, kiddo!'
+# 逐行对话脚本的 '|' 左列是引擎指令（DELAY/TYPING/RECEIVED_MSG/SENT_MSG/
+# WAIT_FOR_PRESS/OPEN_IF/OPEN…）。形态 = 全大写字母 + 可选下划线连词
+# （命令名），翻译写坏对话时序。右列是玩家可见对话内容。
+# 只用全大写形态（不用 TitleCase——'PlayerName'/'Settings' 等普通词会
+# 误命中，防真实词典 CSV 被误判消息脚本）。
+_MSG_SCRIPT_COMMAND = _re.compile(r"^[A-Z]{2,}(?:_[A-Z]{2,})*$")
+
+
+def _is_msg_script(text: str) -> bool:
+    """消息脚本判定：'|' 分隔行 ≥2 行，且「命令列全大写」占比 ≥80%
+    （左右列都可判定，命令 token 形态无论行位置都命中——fromivan 实测
+    全语料左列 8 种命令 100% 命中，词典表/列表 CSV 无此信号）。
+    右列含对话内容（小写单词）不参与判定，整文件仍判消息脚本走 line
+    拆分——命令+内容单行处理，写回按行号重建命令前缀。
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    pipe_lines = [ln for ln in lines if "|" in ln]
+    if len(pipe_lines) < 2:
+        return False
+    hits = 0
+    for ln in pipe_lines:
+        for part in ln.split("|"):
+            part = part.strip()
+            if part and _MSG_SCRIPT_COMMAND.match(part):
+                hits += 1
+                break
+    return hits / len(pipe_lines) >= 0.8
+
+
+def _msg_dialogue_content(line: str) -> str:
+    """消息脚本行的对话内容（'|' 后首个非命令列），无则返回 ''。
+
+    'RECEIVED_MSG|Hey, kiddo!' → 'Hey, kiddo!'；'DELAY|1'（右列纯数字）
+    /'OPEN_IF|INDEPENDENT|FRIEND|Set4-Friend-N'（右列全命令/标识符）→ ''。
+    命令列（全大写）跳过；含数字/段内连字符下划线的标识符列跳过（分支
+    参数名，翻译破坏流程）；真对话 = 含空格句子 / 句末标点 / 纯字母词。
+    句末标点（'.'）不视为标识符符号（'Please tell me there was some
+    improvement.' 是真句子）。
+    """
+    for part in line.split("|"):
+        part = part.strip()
+        if not part or _MSG_SCRIPT_COMMAND.match(part):
+            continue
+        if any(ch.isdigit() for ch in part):
+            continue
+        core = part.rstrip(".!?…")
+        if not core:
+            continue
+        if any(ch in "-_." for ch in core):
+            continue
+        if any(ch.isalpha() for ch in core):
+            if " " in core or part[-1:] in ".!?…" or all(
+                    ch.isalpha() for ch in core):
+                return part
+    return ""
+
+
+def _is_msg_script_line(line: str) -> bool:
+    """单行消息脚本判定：任一 '|' 分隔列命中命令 token 形态。"""
+    for part in line.split("|"):
+        part = part.strip()
+        if part and _MSG_SCRIPT_COMMAND.match(part):
+            return True
+    return False
+
+
 def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
                        asset_file_name: str = "",
                        skipped: dict[str, int] | None = None,
@@ -2168,6 +2235,16 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
     按代码处理不产生条目（代码文本翻译即破坏功能，属于硬结构规则）。
     """
     if _looks_like_script_source(raw):
+        return []
+    # Spine 图集文件（.atlas，soul-delivery/monsters-of-new-spark 实证
+    # 2026-09-01）：1000.png\nsize: 2048,1024\nformat: RGBA8888\nfilter:
+    # Linear,Linear\nrepeat: none 开头 + Defulat/Body 式皮肤路径行——值是
+    # 纹理名/皮肤路径/uv 数值，全机器引用。yaml 分支会把这些按行号进池，
+    # 翻译写坏精灵加载。头部三键签名整文件跳过（皮肤路径行还可能是任意
+    # '文件夹/子名' 形态，只按行前缀拦会漏）。
+    _HEAD = raw[:256]
+    if _HEAD.count(b"size: ") >= 1 and b"format: RGBA" in _HEAD and b"filter: " in _HEAD:
+        skipped["textasset_spine_atlas"] = skipped.get("textasset_spine_atlas", 0) + 1 if skipped else 1
         return []
     prefix = (f"asset#{asset_file_name}#{obj_path_id}"
               if asset_file_name else f"asset#{obj_path_id}")
@@ -2256,8 +2333,13 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
         try:
             out = extract_xml_text(stripped, file_id)
         except Exception:  # noqa: BLE001
-            out = []
-        if out:
+            out = None  # 非良构 XML（如 < 开头的纯文本），落到按行拆分
+        if out is not None:
+            # 良构 XML 即使零条目也返回结构化结果（不落到按行拆分）：
+            # operation-ops PlayerStats 实证 2026-09-01——单行 XML 文档
+            # 的叶子（name=Player/hp=3/speed=8…）全部被机器值过滤合法跳过
+            # 后 out 为空，若不返回会落到 line 拆分把整段 XML 当一个显示
+            # 文本条目进池，翻译即毁掉整个存档 XML。
             return _stamp(out, "xml")
     from hanhua.core.formats.csv_format import extract_csv_text, looks_like_csv_text
     from hanhua.core.formats.yaml_format import extract_yaml_text, looks_like_yaml_text
@@ -2265,7 +2347,12 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
     # 含冒号（'SeaWall_D1,Arum: Apa kau...'）命中 YAML kv 模式 → 误判
     # yaml → 表头行被过滤 → 重建丢行 → 游戏 CSVParser 越界黑屏。CSV 是
     # 行列宽度一致的表结构，判定更确定，必须排在 yaml 之前。
-    if looks_like_csv_text(text):
+    # 例外：消息脚本（fromivan 实证 2026-09-01：'RECEIVED_MSG|Hey, kiddo!'
+    # 逐行对话脚本）也是「每行 2 列」的一致宽度表，会被 looks_like_csv_text
+    # 命中——但 '|' 左列是引擎命令（DELAY/TYPING/RECEIVED_MSG/…），翻译
+    # 写坏对话时序。整文件命令列全大写占比判定 → 走 line 拆分（命令+内容
+    # 单行处理，写回按行号重建命令前缀）。
+    if looks_like_csv_text(text) and not _is_msg_script(text):
         out, _ = extract_csv_text(text, file_id, overwrite_source=csv_overwrite_source)
         return _stamp(out, "csv")
     if looks_like_yaml_text(text):
@@ -2301,9 +2388,28 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
             _skip("textasset_lexicon")
             return []
     lines: list[TextEntry] = []
+    # 消息脚本文件判定（fromivan 实证 2026-09-01）：整文件 '|' 左列命令
+    # token 占比 ≥80% → 是逐行消息脚本（非 CSV 表）。行级处理：命令+
+    # 内容单行进池，命令前缀原样保留；无内容的命令行（DELAY|1）跳过。
+    msg_script_file = _is_msg_script(text)
     for i, line in enumerate(all_lines):
         content = line.strip()
         if not content:
+            continue
+        # 消息脚本行：'RECEIVED_MSG|Hey, kiddo!'——命令列（RECEIVED_MSG/
+        # DELAY/TYPING…）是引擎解析指令（翻译写坏对话时序），'|' 后的内容
+        # 才是玩家可见对话。整行进池会让模型把命令一起翻译——只在右列有
+        # 真内容时进池，保留原行（含命令前缀），写回按行号重建。
+        if msg_script_file and "|" in content and _is_msg_script_line(content):
+            _rhs = _msg_dialogue_content(content)
+            if not _rhs:
+                _skip("textasset_msg_command")
+                continue
+            lines.append(TextEntry(
+                file_id=file_id, key_path=f"{prefix}/line/{i}",
+                original=content,
+                meta={**base_meta, "kind": "textasset", "line": i,
+                      "msg_script": True}))
             continue
         # C4 识别侧留档：行级跳过的每一类都记 skipped_count（引擎串/键
         # 标识符/代码行），不再静默 continue——「纯文本行跳过、判定规律

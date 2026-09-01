@@ -9,6 +9,21 @@ from hanhua.core.formats import read_text
 TRANSLATABLE_ATTRS = {"name", "title", "text", "tooltip", "label", "caption", "hint", "description"}
 # 形如 menu_start / accept / quest_3 的值视为键而非显示文本，不翻译
 _ID_LIKE = re.compile(r"^[a-z][a-zA-Z0-9_.\-]{1,40}$")
+# 数字/数值型文本节点（operation-ops 关卡 XML 实证 2026-09-01）：关卡文件
+# 是 <DesignSaveD>16.5</DesignSaveD> 式数值数据（坦克位置/地面 UV/血量/伤害
+# 表），全部是机器数值——翻译必然破坏关卡解析。纯数字节点（'0.5'/'8.782622'/
+# '31.5'/负数）跳过；'Player'（玩家存档名）与含字母的真文本不受影响。
+_NUMERIC_TEXT = re.compile(r"^[+\-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+\-]?\d+)?$")
+# 大写开头单 token 标识符（对象实例名，如 Switch2 / MapEditor / Wall1 / Player）：
+# 关卡/存档 XML 里 <name> 节点的这类值不是显示文本，而是预制体实例/存档引用
+# （operation-ops 实证：DesignSaveData 的 name 即运行时 GameObject 名，代码按名
+# 查找；PlayerStats 的 name 即玩家存档标识）。只作用于 <name> 文本节点——
+# 对话 XML 的说话人名走 <speaker> 标签（Aria/Orin 不受影响），真显示文本
+# 多为多词/含小写，单 token 大写 <name> 值压倒性属于机器标识。翻译必破坏
+# 关卡加载/存档读写。
+_OBJECT_NAME = re.compile(r"^[A-Z][A-Za-z0-9_\-.]{0,39}$")
+# 挂载/目标引用字段：值是被引用对象的标识（父对象名/任务目标对象名），翻译破坏查找
+_XML_REF_FIELDS = frozenset(("parentName", "objectiveMapObject"))
 
 
 def _tag(el: ET.Element) -> str:
@@ -47,9 +62,26 @@ def extract_xml_text(text: str, file_id: str | None = None) -> list[TextEntry]:
                 entries.append(TextEntry(file_id=fid, key_path=f"{path}/@{attr}", original=v))
         if el.text:
             t = el.text.strip()
-            if t and not _ID_LIKE.match(t):
+            if t and not _ID_LIKE.match(t) and not _NUMERIC_TEXT.match(t):
                 # 文本节点的 key_path 即元素路径本身；属性路径以 @ 开头
-                entries.append(TextEntry(file_id=fid, key_path=path, original=t))
+                # 引用字段叶子值整段跳过（值为引用标识，翻译破坏查找）
+                if _tag(el) in _XML_REF_FIELDS:
+                    pass
+                elif _tag(el) == "name" and (
+                        "DesignSaveData" in parent_path
+                        or _OBJECT_NAME.match(t)):
+                    # 关卡对象实例名（operation-ops 实证 2026-09-01）：
+                    # objectiveMapObject='Prof. Plum' 跨字段引用 DesignSaveData
+                    # 的 name='Prof. Plum'——代码按名查找对象，翻译写坏交互；
+                    # <name> 大写单 token 值（Switch2/MapEditor/Player）同上
+                    # （PlayerStats 存档 name 也是机器标识）。
+                    pass
+                elif "switchObjects" in parent_path:
+                    # 对象名引用数组（switchObjects/switchObjectsManipulated
+                    # 的 string 值 = 开关目标对象名列表，'rd0 rd1 rd2' 等），同上
+                    pass
+                else:
+                    entries.append(TextEntry(file_id=fid, key_path=path, original=t))
         children = list(el)
         tag_counts = Counter(_tag(child) for child in children)
         seen: dict[str, int] = {}

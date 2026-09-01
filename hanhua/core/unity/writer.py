@@ -1711,7 +1711,17 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
                     continue
                 eol = target_lines[matched][
                     len(target_lines[matched].rstrip("\r\n")):]
-                target_lines[matched] = entry["translation"] + eol
+                if meta.get("msg_script") and "|" in orig_content:
+                    # 消息脚本行：命令列原样保留，只替换 '|' 后的对话内容
+                    cmd_part = orig_content.split("|", 1)[0]
+                    t = entry["translation"]
+                    if "|" in t:
+                        # 模型可能把命令+内容一起回显（'RECEIVED_MSG|你好'）
+                        # ——只取 '|' 后内容（命令列原样保留）
+                        t = t.split("|", 1)[1]
+                    target_lines[matched] = cmd_part + "|" + t + eol
+                else:
+                    target_lines[matched] = entry["translation"] + eol
                 result.note_written(entry)
             text = "".join(target_lines)
         data = text.encode("utf-8")
@@ -1737,6 +1747,26 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
         e = by_line.get(i)
         if e is None or not e["translation"]:
             new_lines.append(line)
+            continue
+        # 消息脚本行（fromivan 实证 2026-09-01）：'RECEIVED_MSG|Hey, kiddo!'
+        # ——命令列是引擎指令，模型可能把命令一起翻译（RECEIVED_MSG→收到
+        # 消息）。识别侧只进「命令|对话内容」行；写回侧把命令前缀剥掉
+        # 只替换 '|' 后的对话内容（命令列+分隔符原样保留），无论模型
+        # 怎么回显命令都不会破坏脚本解析。译文自身可能带 '|'（'HELLO|
+        # 世界'）——只取 '|' 前部分，防命令列被译后写回时保留原命令。
+        if meta.get("msg_script"):
+            if "|" in content:
+                cmd_part, _sep, _rhs = content.partition("|")
+                t = e["translation"]
+                # 模型可能把命令+内容一起回显（'RECEIVED_MSG|你好'）——
+                # 译文自带的 '|' 段剥掉，只取 '|' 后内容（命令列原样保留）
+                if "|" in t:
+                    t = t.split("|", 1)[1]
+                new_lines.append(cmd_part + "|" + t + eol)
+            else:
+                # 兜底：命令列外内容（理论上不发生产——提取只进命令行，
+                # 防御旧库漏网的非命令行）整行替换
+                new_lines.append(e["translation"] + eol)
             continue
         new_lines.append(e["translation"] + eol)
     new_text = "".join(new_lines)

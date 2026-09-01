@@ -1,6 +1,7 @@
 from __future__ import annotations
 import csv
 import io
+import re
 from pathlib import Path
 from hanhua.core.models import STATUS_SKIPPED, TextEntry
 from hanhua.core.formats import read_text
@@ -11,6 +12,14 @@ TARGET_LANG_ALIASES = {
 }
 
 NON_LANG_HEADERS = {"key", "id", "type", "category", "comment", "notes"}
+
+# 对话框消息脚本命令值（fromivan 实证 2026-09-01：TextAsset 是
+# 'RECEIVED_MSG|Hey, kiddo!' 式逐行消息脚本，被 CSV 判定误当 2 列表——
+# 命令列（RECEIVED_MSG/DELAY/TYPING/SENT_MSG/WAIT_FOR_PRESS）是引擎
+# 解析指令，翻译写坏对话时序。真对话在 '|' 另一侧，但 CSV 分支按
+# 行列对齐整行翻译会连命令一起译坏。命令形态（全大写或 TitleCase
+# 单 token）命中即跳过；'|' 分隔的对话行保持原样由 line 拆分处理）
+_MSG_SCRIPT_COMMAND = re.compile(r"^[A-Z]{2,}(?:_[A-Z]{2,})*$|^[A-Z][a-z]+(?:_[A-Za-z0-9]+)*$")
 
 
 def pick_target_col(header: list[str], target_lang: str) -> int | None:

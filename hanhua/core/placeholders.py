@@ -123,6 +123,10 @@ _ENGLISH_WORD_MIN3 = re.compile(r"[A-Za-z]{3,}")
 _MIXED_SYMBOL_TOKEN = re.compile(
     r"^(?=.*[%#&^$@|\\])(?=.*[A-Za-z])[^\s]+$")
 _HAS_LETTER = re.compile(r"[^\W_0-9]")
+# 东亚文字探测（CJK 统一表意/假名/谚文）：单字即整词（'你'/'の'/'안'），
+# 单字母结构过滤不得误伤（F49 配套规则）
+_HAS_EAST_ASIAN = re.compile(r"[㐀-䶿一-鿿豈-﫿"
+                             r"぀-ヿ가-힯]")
 _STRIP_RICH_TEXT = re.compile(r"<[^>]+>")
 # Unity 实例化对象名：frameVertical(Clone) / Player(Clone)(Clone)
 _CLONE_SUFFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\(Clone\))+$")
@@ -1035,6 +1039,17 @@ def is_hard_structural(text: str) -> bool:
     # （与 a-catfiends 白名单优先于资源猜测的证据分层同语义）
     if s.casefold() in DISPLAY_WORDS:
         return False
+    # F49（fromivan 实证 2026-09-01）：孤立单字母碎片——'n۶?'（1 个 ASCII
+    # 字母 + 阿拉伯-印度数字 U+06F6 + '?'）是二进制/专利残留串，被
+    # display_evidence_tier 当句子放行（U+06F6 是 \w，'_DISPLAY_WORD'
+    # 的 [A-Za-z…]{2,} 把 'n'+U+06F6 凑成词）误判 pending 进池翻译。
+    # 'F1'/'A1'/'x7' 等「单字母 + 数字/符号」串同样无成词内容。真实显示
+    # 文本必有 ≥2 字母（Mr./OK）或东亚整字（'你' 单字即词）；东亚文字
+    # （CJK/假名/谚文）单字即整词，不误伤。数字（含阿拉伯-印度数字）
+    # isalpha()=False 不计字母。
+    if not _HAS_EAST_ASIAN.search(s) and (
+            sum(1 for c in s if c.isalpha()) == 1):
+        return True
     if _NET_ASSEMBLY_QUALIFIED_TYPE.match(s):
         return True                  # F53：.NET 程序集限定类型名（反射键）
     if s.isdigit():

@@ -561,7 +561,13 @@ def test_mixed_symbol_token_is_structural():
     # 'a50%' 长度不足、'a b % c' 有空格（'50%' 本身是格式后缀分支跳过）
     assert not is_hard_structural("100% sure")
     assert not is_hard_structural("save+load")
-    assert not is_hard_structural("a50%")
+    # F49（fromivan 实证 2026-09-01）：孤立单字母碎片 'n۶?'（ASCII 字母 +
+    # 阿拉伯-印度数字 U+06F6 + '?'）是二进制/专利残留，被 display_evidence
+    # 当句子放行误进池；'a50%' 单字母+数字/符号同形态 → 结构跳过。
+    # 'ab50%'（2 字母，真实按钮标签形态）不命中。
+    assert is_hard_structural("a50%")
+    assert is_hard_structural("n۶?")
+    assert not is_hard_structural("ab50%")
     assert not is_hard_structural("a b % c")
 
 
