@@ -21,14 +21,18 @@ SEVEN_ZIP = Path(r"C:\Program Files\7-Zip\7z.exe")
 # GitHub Release 单文件上限 2GB（必须严格小于 2147483648）
 VOLUME_BYTES = 2 * 1024 * 1024 * 1024 - 1024 * 1024
 
-# 三通道：Full=含全部模型；Lite=只带重排模型（在线 API 用户）；
-# rerank=重排模型包（Lite 用户备用/单独补齐）
+# 三通道（2026-09-01 用户口径）：
+#   Full   = 全部内容（含四个模型）
+#   Lite   = 不含大模型，只留重排（在线 API 用户；重排恒本地）
+#   Models = 三个大模型打包（翻译+审核+检索，Lite 用户补齐用；重排已在 Lite 里）
 CHANNELS = {
     "Full": None,  # None = 不过滤
     "Lite": {"Hy-MT2-1.8B-Q6_K.gguf",
              "Qwen3.5-4B-Q4_K_M.gguf",
              "Qwen3-Embedding-0.6B-Q8_0.gguf"},
-    "rerank": {"__ONLY__", "Qwen3-Reranker-0.6B.Q8_0.gguf"},
+    "Models": {"__ONLY__", "Hy-MT2-1.8B-Q6_K.gguf",
+               "Qwen3.5-4B-Q4_K_M.gguf",
+               "Qwen3-Embedding-0.6B.Q8_0.gguf"},
 }
 
 
@@ -70,7 +74,8 @@ def _build(channel: str, exclude: set[str] | None) -> Path:
                           stderr=subprocess.STDOUT, text=True,
                           encoding="utf-8", errors="replace")
     if proc.returncode != 0:
-        print((proc.stdout or "")[-400:])
+        print((proc.stdout or "")[-400:].encode(
+            "gbk", errors="replace").decode("gbk"))
         raise SystemExit(f"[FAIL] {channel} 7z 退出码 {proc.returncode}")
     print(f"  打包完成，耗时 {time.monotonic() - start:.0f}s")
     return out

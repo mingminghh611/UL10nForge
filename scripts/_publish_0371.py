@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """UL10nForge 0.37.1 GitHub Release 发布。
 
-创建 v0.37.1 release（带完整发布文案）并上传三通道分卷；
-断点续传：已存在的同名资产自动跳过。
+默认只创建 v0.37.1 release（带完整发布文案 + SHA256 校验清单），
+分卷由用户在 GitHub 网页手动上传（2026-09-01 用户指令）。
 
-    python scripts/_publish_0371.py              # 创建 + 上传全部分卷
-    python scripts/_publish_0371.py --notes-only  # 只创建/更新文案
+    python scripts/_publish_0371.py              # 创建/更新 release 文案
+    python scripts/_publish_0371.py --upload     # 文案 + 自动上传全部分卷
 """
 from __future__ import annotations
 
@@ -32,11 +32,11 @@ BODY = """# UL10nForge 0.37.1
 
 | 包 | 内容 | 适合谁 |
 |---|---|---|
-| `UL10nForge-0.37.1-Full.7z.001~004`（4 卷，共约 7.3 GB） | 全部四个模型 + 内置 Python + llama.cpp | **本地离线用户**（默认模式，数据不出本机） |
-| `UL10nForge-0.37.1-Lite.7z.001~002`（2 卷，共约 2.4 GB） | 只带重排模型（0.6B）+ 运行时 | **在线 API 用户**（翻译/审核/检索走云端接口） |
-| `UL10nForge-0.37.1-rerank.7z.001`（约 0.64 GB） | 单独的重排模型包 | Lite 用户补齐 / 备用 |
+| `UL10nForge-0.37.1-Full.7z.001~004`（4 卷，共约 7.3 GB） | 全部四个模型 + 内置 Python + llama.cpp | **本地离线用户**（默认模式，数据不出本机，解压即用） |
+| `UL10nForge-0.37.1-Lite.7z.001~002`（2 卷，共约 2.4 GB） | 不含大模型，只带重排模型（0.6B）+ 运行时 | **在线 API 用户**（翻译/审核/检索走云端接口） |
+| `UL10nForge-0.37.1-Models.7z.001~002`（2 卷，共约 4.2 GB） | 三个大模型（翻译 1.8B / 审核 4B / 检索 0.6B） | Lite 用户转本地离线时补齐模型 |
 
-> Full 版已含全部模型，无需再下模型包；在线 API 模式只有**重排**这一个 0.6B 轻量任务恒走本地，Lite 版已附带。
+> Full 版已含全部模型，无需再下模型包；在线 API 模式只有**重排**这一个 0.6B 轻量任务恒走本地，Lite 版已附带。Lite + Models 组合等价于 Full。
 
 **安装**：同一目录下载全部分卷 → 用 7-Zip 解压 `.001` → 解压到**纯英文路径** → 双击 `启动UL10nForge.bat`。详见 README「安装与模型下载」章节。
 
@@ -70,7 +70,8 @@ UL10nForge-0.37.1-Full.7z.003  526cf7ced4de44b4403b9e8c7c7cfdb299c1a82a1f26e17e5
 UL10nForge-0.37.1-Full.7z.004  0991df90b7f37b0064736c0d0a6c4d23699699fe875ff3a791c8a73f8bb0e756
 UL10nForge-0.37.1-Lite.7z.001  2c813a9a64af9bea133cbf677044642b5c69a0b9d75e62992c62e6428992e30d
 UL10nForge-0.37.1-Lite.7z.002  0aeb8a562627d8d25e69ab10cfd708549ca551ea3b431c9af679fe820ff42813
-UL10nForge-0.37.1-rerank.7z.001  3720cda55614bd19f6a296f88b8358ecfd89de5811681e8ea60d674a9269fdd9
+UL10nForge-0.37.1-Models.7z.001  50dd0f29594cd987ea03dea9eb0c50b279b40bf33bb1c24b82da57c65465b9c7
+UL10nForge-0.37.1-Models.7z.002  922434628bcf61c0d3fa8b8a09299400313d7767abdcd074a5189066da2aec53
 ```
 """
 
@@ -105,7 +106,14 @@ def _create_release() -> dict:
         with urlopen(req, timeout=60) as r:
             return json.loads(r.read().decode("utf-8"))
     except Exception as exc:  # noqa: BLE001
-        if "already_exists" not in str(exc):
+        # HTTPError 的 str 不含响应体——必须读 body 才能看到 already_exists
+        detail = ""
+        if hasattr(exc, "read"):
+            try:
+                detail = exc.read().decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                pass
+        if "already_exists" not in str(exc) + detail:
             raise
     # 已存在 → 取 id 并同步文案
     req = Request(
@@ -146,7 +154,9 @@ def _upload_asset(release_id: int, path: Path) -> None:
 def main() -> int:
     release = _create_release()
     print(f"release: {release.get('html_url')} (id={release.get('id')})")
-    if "--notes-only" in sys.argv:
+    if "--upload" not in sys.argv:
+        print("[done] release 已就绪；分卷请到网页手动上传"
+              "（或加 --upload 自动上传）")
         return 0
     parts = sorted(DIST.glob("UL10nForge-0.37.1-*.7z.*"))
     if not parts:
