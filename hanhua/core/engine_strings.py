@@ -356,6 +356,25 @@ _INTERACTION_DIAGNOSTIC_CONTEXT = re.compile(
     r"(?:missing|not[ \t]+(?:displayed|shown)|observed|failed)\b",
     re.I,
 )
+# 方括号包围的交互动作标签（seijunDROP 实证 2026-09-01：'[PICK UP]'——
+# 游戏把「拾取物品」提示以 [动作] 形态硬编码在 IL2CPP 字面量里）。方括号
+# 标签是输入/交互提示的确定性形态（[E] 键位、[PICK UP] 动作、[OPTIONS]
+# 菜单项——游戏常用它标注 UI 按键位与交互提示）。剥去方括号后是 2+ 词
+# 动作短语（PICK UP/OPEN DOOR/PUSH CART）或白名单 UI 词（OPTIONS/EXIT）。
+# 与 _INTERACTION_PROMPT 区分：后者是「按键 → 动作」完整提示
+# （'Press E to interact'），本规则是「动作本身被括号标注」的短标签
+# （'[PICK UP]'）。不做成完整动词白名单（防过宽），只命中无空格歧义
+# 的括号动作形态。真实显示文本 '[2026.09.01]' 类日期/数字括号无动作词，
+# 不命中。
+_BRACKET_ACTION_LABEL = re.compile(
+    r"^\[[A-Za-z0-9][^\]\r\n]{1,39}\]$")
+# 方括号动作标签内的动作词根：_INTERACTION_ACTION 的动词形态（去掉
+# 'pick\s*up' 的补语要求——'[PICK]' 单动作词同样真实）+ 补充 push 按键
+# 动词。从开头匹配 + \b 边界防误伤（'[BREAD]' 含 read 子串不命中；
+# 'read' 是动作词根，但 ^ 开头匹配保证 BREAD 不被 search 误判）。
+_BRACKET_ACTION_ROOT = re.compile(
+    rf"^(?:{_INTERACTION_ACTION.replace(r'pick\s*up', 'pick')}|push)\b",
+    re.I)
 _CODE_ACTION = re.compile(
     r"(?:(?:[A-Za-z_][A-Za-z0-9_]*\.)+[A-Za-z_][A-Za-z0-9_]*|"
     r"(?:get|set)_[A-Za-z_][A-Za-z0-9_]*|m_[A-Za-z_][A-Za-z0-9_]*)"
@@ -621,6 +640,25 @@ def is_strong_interaction_prompt(text: str) -> bool:
         return False
     if _INTERACTION_DIAGNOSTIC_CONTEXT.search(stripped):
         return False
+    # 方括号交互动作标签（seijunDROP '[PICK UP]'）：括号动作 + 白名单动作词
+    # /UI 词 → 强交互证据。'[E]' 等纯键位括号（_PREFIX_LITERAL_EVENT 已覆盖
+    # 形态）不重复拦截，由括号动作词判定。剥去括号后是真实动作短语
+    # （PICK UP / OPEN DOOR）或白名单 UI 词（OPTIONS/EXIT）才命中。
+    bracket_match = _BRACKET_ACTION_LABEL.fullmatch(stripped)
+    if bracket_match:
+        inner = stripped[1:-1].strip()
+        inner_words = inner.split()
+        # 懒加载：placeholders.py 从本模块导入（循环依赖），DISPLAY_WORDS
+        # 只在命中括号形态时才解析。2+ 词动作短语由动作词根判定
+        # （PICK UP/OPEN DOOR/PUSH CART）；单词括号（[PICK]/[OPTIONS]/
+        # [EXIT]/[PLAY]）需动作词根或白名单 UI 词才放行（纯键位 [E]/[B2]/
+        # [WASD] 无动作词不命中）。
+        from hanhua.core.placeholders import DISPLAY_WORDS
+        has_action = any(
+            _BRACKET_ACTION_ROOT.match(w) or w.casefold() in DISPLAY_WORDS
+            for w in inner_words)
+        if has_action:
+            return True
     bare_command = stripped.rstrip(" .!?。！？")
     has_prefix_input = bool(
         _PREFIX_LITERAL_EVENT.fullmatch(bare_command)

@@ -2275,6 +2275,30 @@ def test_strong_interaction_rejects_terminal_and_modal_predicates(text):
     assert is_strong_interaction_prompt(text) is False
 
 
+@pytest.mark.parametrize("text", [
+    "[PICK UP]", "[PICK]", "[PUSH]", "[OPEN DOOR]", "[PUSH CART]",
+    "[SAVE GAME]", "[NEW GAME]", "[CLOSE]", "[ENTER]", "[USE]",
+    "[OPTIONS]", "[PLAY]", "[EXIT]", "[HELLO]", "[BACK]", "[READY]",
+])
+def test_strong_interaction_accepts_bracket_action_labels(text):
+    """方括号交互动作标签（seijunDROP 实证 2026-09-01：'[PICK UP]'——
+    IL2CPP 字面量里的「拾取物品」提示以 [动作] 形态硬编码）。括号动作
+    短语（PICK UP/OPEN DOOR）或白名单 UI 词（OPTIONS/EXIT）→ 交互
+    证据进池翻译。"""
+    assert is_strong_interaction_prompt(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "[E]", "[R]", "[X]", "[B2]", "[WASD]", "[2026.09.01]", "[1]",
+    "[BREAD]", "[OPENLY]", "[Gasp]", "[Sigh]", "[Laughs]", "[equals]",
+    "[esc]", "[Unknown]", "[DISPID=0]",
+])
+def test_strong_interaction_rejects_non_action_brackets(text):
+    """纯键位/日期/数字/状态括号（[E]/[B2]/[2026.09.01]/[Gasp]）无动作词
+    或白名单 UI 词 → 不是交互提示，不得进池。"""
+    assert is_strong_interaction_prompt(text) is False
+
+
 def test_dll_only_promotes_verified_ldstr_to_ui_setter(tmp_path, monkeypatch):
     import dnfile
 
