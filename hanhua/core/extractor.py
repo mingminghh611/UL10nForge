@@ -212,6 +212,22 @@ def parse_file(path: str | Path, file_id: str | None = None) -> ParsedFile:
 
         entries, fmt, meta = _parse_compressed(raw, p, fid)
 
+    elif suffix in (".bat", ".cmd"):
+
+        # Windows 启动脚本（electric-trains/outrun-clone 实证假盲区）：
+        # .bat/.cmd 引用 exe 路径/窗口参数，翻译破坏启动；census 普查
+        # 已排除（_CENSUS_SKIP_SUFFIXES），提取侧同样整文件跳过——
+        # 每行留 1 条 skipped 占位（line_no/raw 保真），写回逐行原样
+        # 重建，不产生空文件也不破坏启动脚本。registry：
+        # _UNITY_ENGINE_CONFIG_FILES 同款「整文件跳过」语义。
+        text = _decode_text(raw)
+        entries = [TextEntry(
+            file_id=fid, key_path=f"plain/{i}", original=line,
+            status=STATUS_SKIPPED,
+            meta={"kind": "launcher_script", "line_no": i, "raw": line})
+            for i, line in enumerate(text.splitlines())]
+        fmt, meta = "txt", {}
+
     elif suffix in (".json", ".json5", ".jsonc", ".jsonl", ".ndjson", ".arb"):
 
         entries = json_format.extract_json(p, fid)

@@ -139,3 +139,62 @@ def test_readme_credit_file_skipped_f54():
         found = [p.name for p in discover(root)]
     assert "README_Credits_MoreInfo.txt" not in found
     assert "dialogue.txt" in found
+
+
+def test_launcher_bat_cmd_skipped():
+    """Windows 启动脚本（.bat/.cmd）整文件跳过——引用 exe 路径/窗口
+    参数，翻译破坏启动（electric-trains et.bat 实证：'-screen-fullscreen'
+    被误译成中文破折号且引号变弯引号，破坏启动参数）。"""
+    import tempfile
+    from pathlib import Path
+    from hanhua.core.extractor import parse_file
+    from hanhua.core.models import STATUS_SKIPPED
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "et.bat"
+        p.write_text(
+            '"Electric Trains.exe" -screen-fullscreen 0 -screen-width 1920 '
+            '-screen-height 1080\n',
+            encoding="utf-8")
+        parsed = parse_file(p)
+    assert parsed.noise is True
+    assert parsed.format == "txt"
+    assert all(e.status == STATUS_SKIPPED for e in parsed.entries)
+    assert parsed.entries[0].meta.get("kind") == "launcher_script"
+    assert not [e for e in parsed.entries if e.status == "pending"]
+    # 占位条目 line_no/raw 保真——写回走 apply_txt 的 skipped 分支
+    # 逐行原样重建，不产生空文件也不破坏启动参数（KeyError: 'line_no'
+    # 实证：占位缺字段会崩写回管线）。
+    assert parsed.entries[0].meta["line_no"] == 0
+    assert parsed.entries[0].meta["raw"] == (
+        '"Electric Trains.exe" -screen-fullscreen 0 -screen-width 1920 '
+        '-screen-height 1080')
+
+
+def test_launcher_bat_cmd_roundtrip_byte_exact():
+    """写回保真：.bat 的 skipped 占位经 writer._render + _encode 逐字节
+    还原（含 CRLF 与行尾换行）——写回后启动脚本不被清空/改写（B7）。"""
+    import tempfile
+    from pathlib import Path
+    import json
+    from hanhua.core.extractor import parse_file
+    from hanhua.core.writer import _render, _encode
+    payload = (
+        '@echo off\r\n'
+        '"Electric Trains.exe" -screen-fullscreen 0 -screen-width 1920 '
+        '-screen-height 1080\r\n'
+        'pause\r\n')
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "et.bat"
+        p.write_bytes(payload.encode("utf-8"))
+        pf = parse_file(p)
+        f = {"id": "et.bat", "rel_path": "et.bat", "format": pf.format,
+             "encoding": pf.encoding, "eol": pf.eol, "meta": pf.meta}
+        entries = [{"file_id": "et.bat", "key_path": e.key_path,
+                    "original": e.original, "translation": "",
+                    "status": e.status,
+                    "meta": json.dumps(e.meta, ensure_ascii=False)}
+                   for e in pf.entries]
+        body = _render(p, f, entries, "zh-CN")
+        out = _encode(body, p, f)
+    assert out == payload.encode("utf-8"), (
+        f".bat 写回不逐字节还原：\n{out!r}\nvs\n{payload.encode('utf-8')!r}")
