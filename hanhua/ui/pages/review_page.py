@@ -841,9 +841,17 @@ class ReviewPage(QWidget):
         online_review_cfg = (
             self.state.settings.api_config("review")
             if self.state.api.mode == "api" else None)
+        # 设计文档 §16：单条强制送审同样注入 Game Context（与翻译/批审
+        # 同源——profile 已带 context_* 字段）。此前只传 game_name，
+        # 单条审核模型看不到游戏背景/术语/风格，判定语境错误无据。
+        # getattr 防御：测试桩/mock 的 Project 可能无 profile 属性。
+        try:
+            review_profile = self.state.profile
+        except (AttributeError, RuntimeError):
+            review_profile = None
         worker = Worker(self._run_single_review, entry, store,
                         app_dir, game_name, online_review_cfg,
-                        data_dir)
+                        data_dir, review_profile)
         self._review_worker = worker
         worker.signals.finished.connect(
             lambda r: self._on_review_done(token, r))
@@ -853,7 +861,8 @@ class ReviewPage(QWidget):
 
     @staticmethod
     def _run_single_review(entry: TextEntry, store, app_dir, game_name: str,
-                           online_review_cfg=None, data_dir=None):
+                           online_review_cfg=None, data_dir=None,
+                           review_profile=None):
         """后台线程：单条强制送审。translator=None → 不触发反馈重译，
         判定结果直接终态化（人工再审语义）。"""
         return review_entries(
@@ -861,7 +870,8 @@ class ReviewPage(QWidget):
             translator=None, memory=store, store=store,
             app_dir=app_dir, data_dir=data_dir,
             model_name="", lang="zh-CN",
-            force_send=True, online_review_cfg=online_review_cfg)
+            force_send=True, online_review_cfg=online_review_cfg,
+            profile=review_profile)
 
     # ── AI 翻译填充（2026-08-15 用户要求：失败文本一键 AI 翻译） ──
 
