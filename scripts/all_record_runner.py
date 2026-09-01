@@ -905,6 +905,52 @@ def run_game(game_dir: Path, *, batch: int | None = None,
     if do_translate and not resume:
         print("[2/4] 翻译（真实本地模型）…")
         manager = LocalModelManager(PROJECT_ROOT, startup_timeout=180)
+        # ── 语境识别（任务 #15：runner 与 GUI 同链路）──
+        # GUI 的「识别游戏语境」按钮走 _recognize_worker（本地=4B 审核
+        # 模型 / 云端=create_client），识别结果经 save_game_context 同步
+        # 进 game_profile.context_*——翻译 system prompt 与审校 hint 都
+        # 从 profile 注入。headless runner 此前从未调用语境识别：批量
+        # 闭环里 profile.context_* 恒空，Game Context 零注入（GUI 手动
+        # 点过才有的语境，runner 全量跑反而没有）。此处补齐：本地模式
+        # 走 ReviewModelService(4B)（与审核共用端口 8081，跑完审核阶段
+        # 直接复用）；云端走 create_client。识别失败不阻断翻译（与 GUI
+        # error 降级同语义），仅打印告警。
+        try:
+            from hanhua.core.game_context import (
+                GameContextRecognizer, game_context_summary,
+                parse_game_context, sample_entries, save_game_context)
+            rows = project.store.get_entries()
+            samples = sample_entries(rows)
+            if samples:
+                ctx_config = api
+                if api.mode == "local":
+                    from hanhua.core.review_server import ReviewModelService
+                    _svc = ReviewModelService(PROJECT_ROOT)
+                    _info = _svc.ensure_running()
+                    ctx_config = replace(
+                        api, base_url=_info["base_url"],
+                        api_key=_info["api_key"], model="game-context")
+                _recognizer = GameContextRecognizer(ctx_config)
+                _raw = _recognizer.recognize(
+                    samples,
+                    source_lang=str(profile.source_lang or "") or "auto")
+                _ctx = parse_game_context(_raw)
+                _ctx["_sampled_total"] = len(rows)
+                save_game_context(project.store, _ctx)
+                _summary = game_context_summary(_ctx)
+                if _summary:
+                    print(f"  [语境] 游戏语境已建立：{_summary}")
+                    # profile 已被 save_game_context 更新——重新读出，
+                    # 让下方 build_system_prompt 注入 context_* 字段
+                    profile = project.profile
+                else:
+                    print("  [语境] 识别完成但无可注入内容（全「未知」）"
+                          "——按无语境翻译")
+            else:
+                print("  [语境] 无可识别文本样本，跳过语境识别")
+        except Exception as _ctx_exc:  # noqa: BLE001 识别失败不阻断翻译
+            print(f"  [语境] 识别失败（{_ctx_exc}）——按无语境翻译，"
+                  "不阻断流程")
         # 2026-08-16 用户指令：智能上下文——local_context_auto 时按原文
         # 统计（最长/平均原文 → 预估译文 token）计算安全合理 ctx，不再
         # 用固定值（drova 6144 固定导致大批次降级逐条/显存冗余）。
