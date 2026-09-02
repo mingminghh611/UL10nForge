@@ -206,6 +206,15 @@ _EVENT_BINDING_FIELDS = frozenset({
     # 脏话/或正常词被误杀）。开发词表非显示文本。
     "swears", "profanity", "bannedwords", "filterwords",
     "blacklist", "blockedwords",
+    # FMOD Platform 平台继承键（give-me-strength 实证 2026-09-02）：
+    # parentIdentifier='default'（平台继承查找键）——值恰是普通词形态
+    # 漏网；identifier 值 32hex 已被 GUID 拦。字段名级登记。
+    "parentidentifier",
+    # TMP 字体资产元数据字段（give-me-strength 实证 2026-09-02）：m_FamilyName/
+    # m_StyleName 值（'ITC Clearface Std'/'Regular'）是字体族/字重元数据
+    # （asset 含 '1.1.0'+'SDF' 同池，typetree 路径下 raw tmp_asset 判定
+    # 不适用）——<font> 按名引用，翻译断字体。真显示文本无此字段名。
+    "familyname", "stylename", "sourcefontfileguid",
 })
 
 # InputManager 轴名（Unity 旧输入系统 Input.GetAxis 查找键）：Standalone

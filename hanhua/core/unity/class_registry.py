@@ -72,6 +72,14 @@ _CLASS_ROWS: tuple[ClassEntry, ...] = (
     ClassEntry("UniversalRenderPipelineAsset", "config", "urp_render"),
     ClassEntry("VolumeProfile", "config", "urp_render"),
     ClassEntry("PostProcessData", "config", "urp_render"),
+    # ── config：Photon Pun 联机同步组件（bottle-cracks 实证 2026-09-02）──
+    # PhotonAnimatorView 的 m_SynchronizeParameters[].Name 值（'Speed'/
+    # 'Direction'/'Jump'——Animator 参数名）是 Photon 按名同步的网络键，
+    # 翻译断联机动画同步（所有客户端动画参数不同步）；PhotonView 的
+    # RPC/变量名同理。命名空间前缀 Photon.Pun. 内全是联机配置/同步类。
+    ClassEntry("PhotonAnimatorView", "config", "photon_net"),
+    ClassEntry("PhotonView", "config", "photon_net"),
+    ClassEntry("PhotonTransformView", "config", "photon_net"),
     # FMODUnity 家族：只登记无歧义类名（Studio*/FMODEvent* 前缀是 FMOD
     # 专有词）。通用词类名（Settings/Platform/EventHandler/RuntimeManager
     # 等）不裸名登记——游戏自有同名类（设置界面 Settings）会被误杀；
@@ -188,6 +196,12 @@ def disposition(script_class: str) -> str | None:
         return "config"
     if script_class.startswith(_REWIRED_NAMESPACE_PREFIXES):
         # Rewired/InControl 命名空间内全部是输入插件配置类
+        return "config"
+    if script_class.startswith("Photon."):
+        # Photon Pun/Photon 联机命名空间（PhotonView/PhotonAnimatorView/
+        # PhotonTransformView/PhotonNetwork…）：网络同步/RPC 配置——按名
+        # 同步键翻译断联机（bottle-cracks 实证 2026-09-02 PhotonAnimatorView
+        # m_SynchronizeParameters Name 'Speed'/'Jump' 是 Animator 参数同步名）。
         return "config"
     if script_class.startswith("UnityEngine.Rendering."):
         # URP/HDRP 渲染管线命名空间（RenderPipelineAsset/VolumeProfile/
