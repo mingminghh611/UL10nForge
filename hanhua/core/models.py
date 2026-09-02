@@ -2,6 +2,55 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+# 延迟导入：should_skip / is_engine_string_core 在 _final_structural_backstop
+# 内局部导入（placeholders 反向 import models 里的 TextEntry/states，模块级
+# 硬导入会成环；函数级导入已由 Python 惰性求值保证安全）。
+import re as _re
+# C#/引擎转义换行符（字面 2 字符 \n / \r / \t）：多行对话/HUD 显示模板的
+# 合法结构，硬结构判定前保护替换（见 _final_structural_backstop）。
+_PROTECT_ESCAPES = _re.compile(r"\\[nrt]")
+
+
+def _final_structural_backstop(entry: TextEntry) -> bool:
+    """翻译前最终结构兜底：**无歧义**结构文本绝不允许进翻译队列。
+
+    本函数是 is_actionable_translation 的内部最终闸门，只拦「无论如何都不该
+    进队列」的内容：
+    - is_hard_structural：URL/路径/GUID/JSON/程序集限定名/纯数字/版本号/
+      混合符号 token/hard structural 反模式——翻译必然破坏引用或无可译内容；
+    - is_engine_string_core：确定性引擎串（着色器属性/字体名/Timeline 轨道/
+      FMOD 事件/InputSystem 绑定/hex）——即使提取层标 display 也是引擎内部
+      串（default sprite asset 等）。
+
+    不做键风格标识符判定（is_key_style_identifier）：'ui_newGame' / 'text0' /
+    'Level1' 这类单 token 是「上下文决定」的——真按钮/关卡名（Level1/Room2）
+    与键同形，提取器已按对象语境正确分层（role=display 才进 pending），终检
+    再拦会误伤正常对话名，且与既有提取逻辑重复。键风格标识符由各提取器的
+    should_skip 已拦，本闸门只补提取器可能漏判的无歧义机器结构。
+
+    白名单 UI 词豁免：'2d'/'3d'（图形设置标签）命中 hex 形态
+    （is_engine_string_core('3d')=True）但却是真 UI 词——与 is_hard_structural
+    的 DISPLAY_WORDS 先例一致，白名单优先于形态猜测。
+    """
+    from hanhua.core.engine_strings import is_engine_string_core
+    from hanhua.core.placeholders import DISPLAY_WORDS, is_hard_structural
+    # 先 strip：首尾空白是格式噪音不是结构信号——`is_hard_structural` 的
+    # _WHITESPACE_PADDED_FRAGMENT 会误伤带换行 padding 的真显示模板
+    # （'\r\nSettings\r\n\r\n{0}kg\n£{1:0.00}\r\n' 是设置项模板，必须可译）。
+    # 所有核心结构判定（URL/路径/GUID/json/程序集名）在内部都 strip 后再查，
+    # 故 strip 不削弱结构拦截；仅去掉「整段是空白片段」的误报。
+    text = (entry.original or "").strip()
+    # C# 转义换行是**显示文本的结构标记**（多行对话/HUD 模板常用字面 \n），
+    # 不是噪音——`_MIXED_SYMBOL_TOKEN` 把反斜杠当强代码符号会误伤
+    # （'Alpha\n\nBravo\nCharlie' 字面 \n 是合法显示模板）。保护 \n/\r/\t
+    # 转义（替换为空格）后再做硬结构判定，避免把真显示文本当结构拦下。
+    probe = _PROTECT_ESCAPES.sub(" ", text)
+    if is_hard_structural(probe):
+        return True
+    if text.casefold() in DISPLAY_WORDS:
+        return False
+    return is_engine_string_core(probe)
+
 STATUS_PENDING = "pending"
 STATUS_TRANSLATED = "translated"
 STATUS_FAILED = "failed"
@@ -39,11 +88,29 @@ def is_actionable_translation(entry: TextEntry) -> bool:
     else:
         role = str(entry.meta.get("role", "display"))
     confidence = str(entry.meta.get("confidence", entry.confidence))
-    return (entry.status in (STATUS_PENDING, STATUS_FAILED)
+    if not (entry.status in (STATUS_PENDING, STATUS_FAILED)
             and not entry.locked
             and role not in {"structural", "code", "key"}
             and (confidence != "low"
-                 or entry.meta.get("confidence_promoted") is True))
+                 or entry.meta.get("confidence_promoted") is True)):
+        return False
+    # —— 翻译前最终结构兜底（识别 B 节：结构性文本绝不能进翻译队列）——
+    # 本函数是全部队列入口（翻译页待翻译池 / runner run_scope / 概览计数）
+    # 的单一权威判定。各提取器（rawstr/typetree/mono/il2cpp/textasset/json…）
+    # 已各自分类，但历史上曾出现某条路径误把键/ID/路径/资源名标成
+    # role=display、disposition=translate 放行进池（0.37.x 多游戏回归）。
+    # 这里在**任何队列接纳前**对原文内容做一次确定性结构终检：命中
+    # should_skip（硬结构值 JSON/URL/路径/GUID/程序集名/纯数字，或键风格
+    # 标识符 ui_newGame/MENU_PLAY/en）→ 一律拒于队列之外，无论提取层为何
+    # 判定。真显示文本（句子/TMP 组合串/TitleCase 按钮词/白名单词）不受
+    # 影响——should_skip 对它们恒 False（真实语料 minato/fromivan/hickory/
+    # hrana 实测 0 误伤，见 test_models final structural gate 契约）。
+    #
+    # 性能：正则级判定，仅在建队列时每条目执行一次（run_scope 过滤复用），
+    # 非每 token 路径，无热路径放大。
+    if _final_structural_backstop(entry):
+        return False
+    return True
 
 
 # 审核待处理终态（Phase A 统一落 review_outcome；C6 时代遗留

@@ -53,17 +53,19 @@ def _entries(n=60):
 # 累计 emit（done_since_emit >= batch_size 或 1.5s 或 末条）。
 
 def test_native_progress_accumulates_real_items_not_batch_marks():
+    _WORDS = ["Resume", "Settings", "Options", "Graphics", "Volume", "Credits"]
+
     class NativeClient:
         config = SimpleNamespace(timeout=120.0)
 
         def translate_text(self, source, _target_lang, _glossary):
-            return {"t0": "译文0", "t1": "译文1", "t2": "译文2",
-                    "t3": "译文3", "t4": "译文4", "t5": "译文5"}[source], Usage(1, 1)
+            i = _WORDS.index(source)
+            return f"译文{i}", Usage(1, 1)
 
     entries = _to_model([
-        {"file_id": "f", "key_path": f"k{i}", "original": f"t{i}",
+        {"file_id": "f", "key_path": f"k{i}", "original": w,
          "meta": {"role": "display"}}
-        for i in range(6)
+        for i, w in enumerate(_WORDS)
     ])
     progress = []
 
@@ -88,16 +90,18 @@ def test_native_progress_accumulates_real_items_not_batch_marks():
 
 
 def test_native_progress_batch_size_1_emits_per_item():
+    _WORDS = ["Resume", "Settings", "Options", "Graphics"]
+
     class NativeClient:
         config = SimpleNamespace(timeout=120.0)
 
         def translate_text(self, source, _target_lang, _glossary):
-            return f"译文{source}", Usage(1, 1)
+            return f"译文{_WORDS.index(source)}", Usage(1, 1)
 
     entries = _to_model([
-        {"file_id": "f", "key_path": f"k{i}", "original": f"t{i}",
+        {"file_id": "f", "key_path": f"k{i}", "original": w,
          "meta": {"role": "display"}}
-        for i in range(4)
+        for i, w in enumerate(_WORDS)
     ])
     progress = []
 
@@ -1365,6 +1369,10 @@ def test_chat_slot_repair_preserves_rich_text_newlines_and_inputs():
 
 @pytest.mark.parametrize("delimiter", ["\n", "\r\n", r"\n"])
 def test_native_multiline_repair_restores_empty_segment_topology(delimiter):
+    # 用真显示词（空行拓扑的空行由调度/重建逻辑处理，与语义无关）
+    source = delimiter.join(("Alpha", "", "Bravo", "Charlie"))
+    segments = {"Alpha": "甲", "Bravo": "乙", "Charlie": "丙"}
+
     class MovingBlankLineClient:
         config = SimpleNamespace(timeout=120.0)
 
@@ -1376,9 +1384,8 @@ def test_native_multiline_repair_restores_empty_segment_topology(delimiter):
             self.calls.append(source)
             if source == self.source:
                 return delimiter.join(("甲", "乙", "", "丙")), Usage(5, 2)
-            return {"A": "甲", "B": "乙", "C": "丙"}[source], Usage(5, 2)
+            return segments[source], Usage(5, 2)
 
-    source = delimiter.join(("A", "", "B", "C"))
     client = MovingBlankLineClient(source)
     entry = _to_model([{
         "file_id": "ui", "key_path": "menu/topology",
@@ -1389,7 +1396,7 @@ def test_native_multiline_repair_restores_empty_segment_topology(delimiter):
 
     assert stats.done == 1 and stats.failed == 0 and stats.requests == 4
     assert entry.translation == delimiter.join(("甲", "", "乙", "丙"))
-    assert client.calls == [source, "A", "B", "C"]
+    assert client.calls == [source, "Alpha", "Bravo", "Charlie"]
 
 
 def test_native_multiline_repair_fails_when_a_meaningful_segment_stays_empty():

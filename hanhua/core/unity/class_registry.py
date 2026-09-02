@@ -43,6 +43,8 @@ class ClassEntry:
 #               平台继承查找键——翻译后 RuntimeManager 加载银行失败，
 #               全游戏静音。StudioEventEmitter 的 event 路径已由
 #               engine_strings event:/ 规则拦截，其余字段同类整体跳过）
+#  render_layer = 渲染层/排序组件（hrana 实证：OrderInLayer 的
+#               Front/Behind 层名是排序引用）
 # display 出处分组：
 #  ui_text    = TMP/UI 文本组件（指南 §3.2 显示组件）
 _CLASS_ROWS: tuple[ClassEntry, ...] = (
@@ -69,6 +71,15 @@ _CLASS_ROWS: tuple[ClassEntry, ...] = (
     ClassEntry("StudioGlobalParameterTrigger", "config", "fmod"),
     ClassEntry("FMODEventTrack", "config", "fmod"),
     ClassEntry("FMODEventPlayable", "config", "fmod"),
+    # ── config：渲染层/排序组件（hrana 实证 2026-09-02）──
+    # OrderInLayer（命名空间无）：组件的序列化字段是渲染层 ID——'Front'/
+    # 'Behind' 是游戏对象排序层引用（默认渲染顺序的前/后），翻译成「前面/
+    # 后面」写回后游戏按层名查找断裂，对象渲染/遮挡顺序错乱。组件字段值
+    # 是确定性结构（层名），非玩家可见文本；UI 文本组件（Text/TMP）不在
+    # 本类，由 display 分组放行。obj86417 实证：单 MonoBehaviour 值
+    # Front/Behind 成对出现（= 图层序列化），无 UI 字段证据，此前被
+    # single_visible_string/f38_released 放行进池。
+    ClassEntry("OrderInLayer", "config", "render_layer"),
     # ── display ──
     ClassEntry("TextMeshProUGUI", "display", "ui_text"),
     ClassEntry("TMP_InputField", "display", "ui_text"),

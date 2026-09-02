@@ -148,9 +148,9 @@ def test_write_safety_bar_explains_disabled_state(qapp, tmp_path):
 def test_review_filter_chip_updates_proxy(qapp, tmp_path):
     page = ReviewPage(_state(tmp_path), _Window())
     page.model.setEntries([
-        {"original": "A", "translation": "", "status": "pending",
+        {"original": "Save", "translation": "", "status": "pending",
          "file_id": "f", "key_path": "a", "locked": False, "meta": {}},
-        {"original": "B", "translation": "译", "status": "translated",
+        {"original": "Load", "translation": "载入", "status": "translated",
          "file_id": "f", "key_path": "b", "locked": False, "meta": {}},
     ])
     page.filter_chips["pending"].click()
