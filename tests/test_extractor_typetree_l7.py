@@ -257,3 +257,36 @@ def test_animname_field_skipped_even_when_display_evidence_present(
     # 真 UI 文本保留
     assert any(e.status == "pending" and e.original == "Use this item?"
                for e in pf.entries)
+
+
+# ── Unity PerformanceTestRunInfo JSON（B11c，minato 实证 2026-09-02）──
+# 性能测试运行信息：TestSuite 根键 + Player/Editor 渲染与构建配置
+# （RenderThreadingMode='Split'/AndroidBuildSystem='Gradle'/Branch='6000.3/staging'）
+# + Dependencies 包名列表——全机器元数据，曾被 json_format 提取进池。
+
+def test_perftest_document_skipped():
+    """PerformanceTestRunInfo JSON → 整文件跳过（_is_perftest_document）。"""
+    from hanhua.core.unity.extractor import _is_perftest_document
+    from hanhua.core.unity.extractor import _textasset_entries
+    data = {
+        "TestSuite": "", "Date": 0,
+        "Player": {"RenderThreadingMode": "Split", "MtRendering": False,
+                   "AndroidBuildSystem": "Gradle", "GraphicsApi": "",
+                   "ScriptingBackend": "IL2CPP"},
+        "Hardware": {"OperatingSystem": "", "ProcessorCount": 0},
+        "Editor": {"Version": "6000.3.11f1", "Branch": "6000.3/staging"},
+        "Dependencies": ["com.unity.ugui@2.0.0", "com.unity.inputsystem@1.19.0"],
+        "Results": [],
+    }
+    assert _is_perftest_document(data)
+    # 真实 TextAsset 内容（m_Script 字节）走 _textasset_entries 整文件跳过
+    import json as _json
+    skipped = {}
+    out = _textasset_entries(
+        "f", 53, _json.dumps(data).encode("utf-8"), "resources.assets", skipped)
+    # 无显示条目（skip 留档，不产生机器值条目）
+    assert not any("Split" in (e.original or "")
+                   or "Gradle" in (e.original or "")
+                   or "6000.3/staging" in (e.original or "")
+                   for e in out)
+    assert skipped.get("textasset_json_perftest") == 1

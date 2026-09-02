@@ -2512,6 +2512,13 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
                 # （宁漏勿坏，防译坏分支跳转/命令解析）。判定与 Spine 同款。
                 _skip("textasset_json_pachat")
                 return []
+            if _is_perftest_document(data):
+                # Unity PerformanceTestRunInfo JSON（minato 实证 2026-09-02）：
+                # Player/Editor 渲染与构建配置 + Dependencies 包名列表——
+                # 机器元数据，整文件跳过（RenderThreadingMode Split/Version
+                # 6000.3.11f1/Branch 6000.3/staging 曾被当显示文本进池）。
+                _skip("textasset_json_perftest")
+                return []
             return _stamp(json_format.extract_json_text(stripped, file_id), "json")
     if stripped.startswith("<") and ">" in stripped:
         from hanhua.core.formats.xml_format import extract_xml_text
@@ -3215,6 +3222,23 @@ _SPINE_TOP_KEYS = frozenset((
 # （project-arrhythmia 实证 2026-09-01）：分支名/命令 token/settings 配置
 # 是机器引用，真显示文本只占少部分且逐条混杂 → 整文件跳过（宁漏勿坏）。
 _PACHAT_TOP_KEYS = frozenset(("settings", "branches"))
+# Unity PerformanceTestRunInfo JSON（minato 实证 2026-09-02）：性能测试
+# 运行信息——Player 渲染配置（RenderThreadingMode='Split'/AndroidBuildSystem=
+# 'Gradle'）+ Editor 版本/分支（Branch='6000.3/staging'）+ Dependencies 包名
+# 列表（com.unity.*@x.y.z）。键值全是机器元数据/构建产物引用，翻译即破坏
+# 性能报告解析。根含 'PerformanceTestRunInfo'/'TestSuite'/'Dependencies' 键
+# 即测试框架数据（非玩家内容）。与 Spine/PAChat 同款整文件跳过。
+_PERFTEST_TOP_KEYS = frozenset((
+    "TestSuite", "Date", "Player", "Hardware",
+    "Editor", "Dependencies", "Results",
+))
+
+
+def _is_perftest_document(data: Any) -> bool:
+    """JSON 根是否 Unity PerformanceTestRunInfo（返回 True → 整文件跳过）。"""
+    return bool(isinstance(data, dict) and data
+                and "TestSuite" in data
+                and all(key in _PERFTEST_TOP_KEYS for key in data))
 
 
 def _is_spine_document(data: Any) -> bool:
