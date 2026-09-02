@@ -2402,6 +2402,23 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
         if alpha / len(all_lines) < 0.5:
             _skip("textasset_low_alpha_density")
             return []
+        # 数字密集行补充过滤（electric-trains 实证 2026-09-02）：fp_level_*
+        # 列车调度表与 mission_*_targets 关卡目标表——行是「数字冒号段:资源名」
+        # 调度结构（'2:-1:-1:FreeTrain_v14_hopper'），无玩家可见文本，却被当
+        # textasset_display_text 逐行进池（135+ 条/文件，模型把 FreeTrain_…
+        # 模型名音译/乱译写回后列车加载失败）。单行判定：**数字占比 ≥15%**
+        # 或 **≥3 段数字冒号分隔**（'0:29:-1:Name' 数字比例 12-14% 但冒号
+        # 结构确定是配置）→ 配置行。真字幕/对话（'Hello, how are you today?'/
+        # 'Level 1 complete!'）无冒号段，不命中。整文件配置行占比过半 →
+        # 数字/调度表，不做条目（fp_level 实测 98%、mission_15_targets 5/5）。
+        digit_lines = sum(
+            1 for ln in all_lines
+            if sum(c.isdigit() for c in ln) / max(1, len(ln)) >= 0.15
+            or (sum(c.isdigit() for c in ln) >= 3
+                and ln.count(":") >= 2))
+        if digit_lines / len(all_lines) >= 0.5:
+            _skip("textasset_digit_dense_data")
+            return []
     # 词库型 TextAsset（0.26 地毯式实证：force-reboot data.unity3d#obj268
     # 是脏话检测黑名单——1100+ 行全英文短词，被当显示文本 974 条全翻译
     # 写回，游戏过滤逻辑失效）：单词行（无空格纯词）占比 ≥90% 且 ≥30 行
