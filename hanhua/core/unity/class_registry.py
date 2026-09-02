@@ -133,6 +133,15 @@ _CLASS_ROWS: tuple[ClassEntry, ...] = (
     ClassEntry("Fungus.StopFlowchart", "config", "fungus_struct"),
     # FungusTrigger：触发器名（'DEATH' 等按键/事件触发名，Block 启动按名匹配）
     ClassEntry("FungusTrigger", "config", "fungus_struct"),
+    # ── config：装备/AI 决策配置类（drova 实证 2026-09-02）──
+    # AI_EquipItem 的 Values/Primary/Secondary/Range/Melee（AI 判断装备优劣
+    # 的评分类型枚举）与 TAL_Req_CheckItemTag 的 Values/Handedness/Range
+    # （物品标签匹配键）——游戏代码按 TagString 匹配物品（检查手上武器是否
+    # Melee 类型决定 AI 行为），翻译断物品标签匹配。UI 文本（物品名/属性标签
+    # 德语/英语显示）在 CustomFramework.Localization 的 Value 表单独提取，
+    # 不受影响。裸类名精确登记（防误杀同名前缀游戏类）。
+    ClassEntry("AI_EquipItem", "config", "drova_item_tag"),
+    ClassEntry("TAL_Req_CheckItemTag", "config", "drova_item_tag"),
     # ── display ──
     ClassEntry("TextMeshProUGUI", "display", "ui_text"),
     ClassEntry("TMP_InputField", "display", "ui_text"),
@@ -191,6 +200,12 @@ def disposition(script_class: str) -> str | None:
         return "config"
     if script_class in DISPLAY_CLASSES:
         return "display"
+    # 裸类名登记兼容命名空间限定名（AI.AI_EquipItem → AI_EquipItem）：
+    # 精确登记行用裸名（drova AI_EquipItem 实证 script_class 带 AI. 前缀），
+    # 带命名空间时剥到最后一段再查，防跨游戏误杀（只影响已精确登记的类）。
+    _simple = script_class.rsplit(".", 1)[-1]
+    if _simple != script_class and _simple in CONFIG_CLASSES:
+        return "config"
     if script_class.startswith(_FMOD_NAMESPACE_PREFIXES):
         # FMODUnity/FMODUnityResonance 命名空间内全部是音频集成配置类
         return "config"
