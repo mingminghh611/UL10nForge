@@ -53,6 +53,19 @@ HARD_STRUCTURAL_CASES = [
     "-screen-fullscreen 0", "--platform=Windows",
     # 确定性引擎串（即使提取层标 display 也是引擎内部串）
     "default sprite asset",
+    # B9（Dobraminhos 实证 2026-09-02）：UnityEvent m_TargetAssemblyTypeName
+    # 值（'GameMaster, Assembly-CSharp' 目标脚本程序集限定类名，642 条被
+    # typetree_display_evidence 放行）——反射按名绑定键，翻译断事件绑定
+    # （按钮无反应）；自定义 InputSystem 动作映射 m_ActionName 值
+    # （'PlayerActionsXbox/Move'，389 条）——输入动作运行时按名查找，
+    # 翻译断按键映射。值形态 + 程序集段/动作路径是确定性机器结构，无论
+    # 提取层为何判定都不得进队列。
+    "GameMaster, Assembly-CSharp", "MenuMaster, Assembly-CSharp",
+    "PlayerAttack, Assembly-CSharp", "PlayerMovement, Assembly-CSharp",
+    "SoundControl, Assembly-CSharp", "ShowControls, Assembly-CSharp",
+    "UnityEngine.Object, UnityEngine",
+    "PlayerActionsXbox/Move", "PlayerActionsPS/Attack",
+    "GlobalActionsController/Pause", "PlayerInUI/New action",
 ]
 
 
@@ -95,6 +108,14 @@ DISPLAY_CASES = [
     "Level1", "Room2",
     # 2 词短语（按钮/菜单）
     "Rate the game",
+    # B9 反误杀：第二段是普通英文词/句的「逗号结构」不被当程序集段拦截
+    #（'GameMaster, Assembly-CSharp' 第二段 Assembly-CSharp 是连字符程序集名；
+    #  'Hello, world' 第二段 world 是普通词）——真实对话含逗号极常见
+    "Hello, world", "Hello, my friend", "Save, Load and Quit",
+    "Come on, let's go!", "See you, space cowboy",
+    # B9 反误杀：带斜杠的动作短语（'Attack, Move' 等多选提示）——
+    # 动作映射路径要求「映射段/动作段」单斜杠无空格前后缀
+    "Attack / Move", "Player / Enemy",
 ]
 
 

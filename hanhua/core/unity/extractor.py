@@ -156,6 +156,25 @@ _UNITYEVENT_TARGET_TYPES = frozenset({
     "UnityEngine.EventSystems.EventTrigger, UnityEngine.UI",
 })
 
+# UnityEvent 持久化回调 / 自定义输入动作映射的**绑定元数据字段**（casefold 名，
+# 不带 m_ 前缀——与 _normalized_field_name 输出对齐）：值是按名绑定键，绝不
+# 可能是玩家显示文本——
+#   m_TargetAssemblyTypeName：'GameMaster, Assembly-CSharp'（目标脚本程序集
+#     限定类名，Dobraminhos 实证 642 条被 typetree_display_evidence 放行进
+#     池）；m_ObjectArgumentAssemblyTypeName 同理（方法参数类型引用）。
+#   m_ActionName/m_ActionEvents：'PlayerActionsXbox/Move'（输入动作映射路径，
+#     Dobraminhos 实证 389 条）——'PlayerInUI/New action' 还是编辑器默认名。
+# 字段名是确定性结构证据（值=反射按名查找的键，翻译断事件绑定 → 按钮无
+# 反应/输入失灵，知识库案例转规则），值形态（'X, Y' 恰似短语）不足以推翻。
+# typetree 路径逐字段可见，命中即整子树跳过（含 m_Calls 数组下的全部叶子）。
+_EVENT_BINDING_FIELDS = frozenset({
+    "persistentcalls", "listener", "callstate",
+    "target", "methodname", "arguments",
+    "targetassemblytypename", "objectargumentassemblytypename",
+    "objecttypename",
+    "actionevents", "actionname", "actionid",
+})
+
 # InputManager 轴名（Unity 旧输入系统 Input.GetAxis 查找键）：Standalone
 # InputModule 的 Horizontal/Vertical/Submit/Cancel、相机 Orbit 轴的
 # Mouse X/Mouse Y、Fire1/2/3、Jump 等。轴名是运行时按名查找键，翻译必
@@ -604,12 +623,19 @@ def _typetree_string_entries(
         if isinstance(value, dict):
             for key, child in value.items():
                 normalized = _normalized_field_name(key)
+                # 事件绑定元数据字段（UnityEvent 回调 m_Calls 下的
+                # m_TargetAssemblyTypeName/m_ActionEvents…，见文件头
+                # _EVENT_BINDING_FIELDS 注释）：值是反射按名绑定键/类型
+                # 引用/输入动作路径，绝不显示。结构证据直达字段名——
+                # 命中字段名即该子树整枝跳过（不依赖值形态猜测）。
+                event_branch = structural or bool(
+                    normalized in _EVENT_BINDING_FIELDS)
                 # m_Name 等 Unity 惯例对象标识字段（Inspector 标题/Find 查找
                 # 键/引用/地址）：翻译破坏对象查找与回写（immutable_field_
                 # protected 会拦截）——即使对象含值证据也不得升格 display
                 # （doubleshake 实证）。casefold 拦截 m_name/M_Name 变体；
                 # 裸 name 字段（对话角色名等）不受影响。
-                blocked = structural or bool(
+                blocked = structural or event_branch or bool(
                     _field_name_tokens(key) & _TYPETREE_STRUCTURAL_FIELDS) \
                     or key.casefold() in _TYPETREE_IMMUTABLE_FIELD_NAMES \
                     or _normalized_field_name(key) \
@@ -993,6 +1019,55 @@ def _has_sentence_shape(text: str) -> bool:
     # Shader'（2 词引擎配置名）误判为句子放行；2 词短语归 phrase 档，
     # 由对象级证据（组件对象/UI 控件/白名单）决定放行与否。
     return display_evidence_tier(text.strip()) == "sentence"
+
+
+# 游戏脚本『配置管理器』类判定（F53b，Dobraminhos 实证 2026-09-02）：
+# 类名形如 XManager/XControl/XController（X 含 Audio/Sound/Game/UI/
+# Music/Scene 等配置域词）的 MonoBehaviour 单例——序列化字段几乎都是
+# 运行时按键（音频触发名/状态名/场景流键）。此类对象内的 TitleCase 词
+# 不得被 F39 word_list_object 当 UI 目录放行（见 is_word_list_object）。
+# 判定用类名 token：须**同时**含配置域词（audio/game/sound/ui/…）与
+# 收尾段（manager/control/controller/master/state）。'MenuMaster'/'GameMaster'
+# 同样收尾 master；引擎类名（GameObject/Transform/AudioListener）收尾不是
+# 这些段、或被 _CODE_QUALIFIED 形态排除，不误杀。单收尾词（'Manager'）
+# 单独不足以成立——'PlayerManager' 可能是 UI 名字面板组件；域词 + 收尾
+# 双条件是『游戏总控/音频/UI 管理器』的确定性形态。
+_MANAGER_DOMAIN = frozenset({
+    "audio", "sound", "sfx", "music", "game", "ui", "menu", "scene",
+    "level", "player", "enemy", "input", "save", "settings", "option",
+    "screen", "map", "world", "state", "flow", "control", "volume",
+})
+_MANAGER_SUFFIX = ("manager", "control", "controller", "master", "state")
+
+
+def _manager_domain_tokens(script_class: str) -> frozenset[str]:
+    """类名 → 配置域词集合：GameManager → {game}；PlayerActionsController
+    → {player}（actions 不在域词表）；UIController → {ui}。拆词用标准
+    camelCase 边界（含首部全大写缩写 UI/AI 等：upper→upper→lower 在最后一个
+    大写前断开），不用单纯 lower→upper——纯缩写前缀整段粘连会丢域词。"""
+    import re as _re_tok
+    parts = _re_tok.sub(
+        r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])",
+        " ", script_class).casefold()
+    return frozenset(t for t in parts.split() if t in _MANAGER_DOMAIN)
+
+
+def _is_manager_script_class(script_class: str) -> bool:
+    """类名是否『配置管理器』（X 含域词 + Manager/Control/Master 收尾）。"""
+    if not script_class or script_class != script_class.strip():
+        return False
+    # 命名空间限定名剥到最后一段（FMODUnity.X 是引擎配置，另有 class_
+    # registry；本判定只处理游戏脚本裸类名）
+    simple = script_class.rsplit(".", 1)[-1]
+    if not simple or len(simple) > 48:
+        return False
+    import re as _re_mgr
+    if not _re_mgr.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", simple):
+        return False
+    lower = simple.casefold()
+    if not lower.endswith(_MANAGER_SUFFIX):
+        return False
+    return bool(_manager_domain_tokens(simple))
 
 
 # R5：预过滤留档样本上限——每对象每原因最多保留 N 条样本条目（防止
@@ -1657,7 +1732,18 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
         and not is_input_axis_object
         and not is_small_config_object and not is_key_list
         and not is_word_table and not is_tmp_asset_object
-        and not is_config_class)
+        and not is_config_class
+        # F53b（Dobraminhos 实证 2026-09-02）：AudioManager 单例对象
+        # （脚本类名 = 确定性『音频管理器』语义）内同文件重复 25 个
+        # TitleCase 词——'Lobby'/'Boss'/'Preto'/'Ataque' 全是 PlayOneShot/
+        # AudioSource 按名触发的音频键（同对象内 Boss_Final/Inimigo_*
+        # 下划线键 + 'Normal' 状态名是同类证据），不是商店/物品目录。
+        # 音频键是运行时按名查找，翻译断音效触发。UI 文本（菜单/设置
+        # 按钮）在 TMP_Text m_Text 字段经 typetree 单独提取，不受影响。
+        # 类名按 token 拆：Audio/Game/Sound/Music 等『配置管理器』语义段
+        # + Manager/Control/Controller 收尾段——游戏脚本类常叫 GameManager
+        # /SoundManager，引擎类不叫这个名字。
+        and not _is_manager_script_class(script_class))
     # F38（adapt-prologue 实证）：对象最终会被释放（非代码/输入/
     # Timeline/事件绑定/共享配置/键列表/词表/资产对象）时，其
     # prefilter_high_frequency 样本是**游戏 UI 词**而非引擎高频——

@@ -92,6 +92,18 @@ _DEBUG_LEADING_JUNK = re.compile(r"^[^\w]+\s")
 # 不用 {N} 裸占位符，命中即代码文本
 _FORMAT_PLACEHOLDER = re.compile(r"\{[0-9]+\}")
 
+# B9b（8 More Lives 实证 2026-09-02）：程序集限定类型引用后缀
+# ——', Assembly-CSharp' / ', UnityEngine' / ', mscorlib'（C# 代码里
+# Type.GetType 反射按名加载的字符串，如 'Inventory, Assembly-CSharp'）。
+# #US 串含此程序集段即类型引用形态，不是对话/UI 句（真对话 'Hello,
+# world' 第二段 world 不是程序集段；与 models._ASSEMBLY_SEGMENT 同词表，
+# 此处处理 #US 整串含后缀的情形，不做整串匹配——反射串可能是
+# 'Namespace.Type, Assembly' 多段的一部分）。
+_ASSEMBLY_QUALIFIED_SUFFIX = re.compile(
+    r",\s*(?:Assembly-CSharp|Assembly-CSharp-firstpass|mscorlib|netstandard|"
+    r"UnityEngine(?:\.[A-Za-z_][A-Za-z0-9_.]*)?|Unity[A-Za-z]*|"
+    r"[A-Za-z_][A-Za-z0-9_]*[.-][A-Za-z0-9_]+|System(?:\.[A-Za-z_][A-Za-z0-9_.]*)?)\s*$")
+
 # 引擎/编辑器诊断句式（2026-08-24 come-back 实证）：动词开头的错误消息
 # 不被 _is_mono_diagnostic_string 拦截（它只拦开发词开头的句子）。这些
 # 是玩家不可见的引擎/输入系统诊断（'There is already a virtual axis
@@ -121,8 +133,19 @@ def _is_sentence_display_text(s: str) -> bool:
     - 代码格式模板（'bool2({0}, {1})' 含 {N} 占位符）是引擎/算法调试
       消息，翻译无意义——{N} 占位符是强代码形态，直接拒（真实 UI 句
       不用 {0} 裸占位符）。
+
+    B9b（8 More Lives 实证 2026-09-02）：#US 里的程序集限定类型引用值
+    （'Inventory, Assembly-CSharp'——C# 代码里 Type.GetType 反射按名加载
+    的字符串，8 More Lives 4 条被译成「库存，Assembly-CSharp」，译文写入
+    后反射加载断链）。含 `, <程序集名>`（第二段 Assembly-CSharp/UnityEngine
+    /mscorlib/Unity.* 程序集段）即类型引用形态，不是对话/UI 句（真对话
+    'Hello, world' 第二段 world 不是程序集段）。模型对这类串吃逗号/半翻
+    恒败。
     """
     if len(s) < 4 or not re.search(r"[A-Za-z]", s):
+        return False
+    # B9b：程序集限定类型引用值——含 `, 程序集段` 的串不是句子
+    if _ASSEMBLY_QUALIFIED_SUFFIX.search(s):
         return False
     if _FORMAT_PLACEHOLDER.search(s):
         return False

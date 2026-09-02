@@ -114,3 +114,87 @@ def test_display_field_rows_carry_source_group():
     assert groups <= {"ui", "dialogue", "locale", "misc"}
     assert groups == {"ui", "dialogue", "locale", "misc"}
     assert len(_TYPETREE_DISPLAY_FIELD_ROWS) >= 40  # 原清单规模保持
+
+
+# ── 事件绑定元数据字段（F53c，Dobraminhos 实证 2026-09-02）──────────
+# m_TargetAssemblyTypeName/m_ActionEvents 等字段值（'GameMaster,
+# Assembly-CSharp'/'PlayerActionsXbox/Move'）是反射/InputSystem 按名绑定键，
+# 曾因『值恰似短短语』被 typetree_display_evidence 放行（642+389 条）。
+# 字段名是确定性结构证据 → 字段命中即整子树跳过，值形态不参与。
+
+def _onclick_tree() -> dict:
+    """Unity Button/事件回调的 typetree：m_OnClick 持久化回调含 m_Target
+    AssemblyTypeName（目标脚本类型引用）+ m_MethodName（绑定方法名）。"""
+    return {
+        "m_Name": "btn",
+        "m_OnClick": {
+            "m_PersistentCalls": {
+                "m_Calls": [
+                    {
+                        "m_TargetAssemblyTypeName": "GameMaster, Assembly-CSharp",
+                        "m_MethodName": "StartGame",
+                        "m_Arguments": {
+                            "m_ObjectArgumentAssemblyTypeName":
+                                "UnityEngine.Object, UnityEngine"},
+                    }
+                ]
+            }
+        },
+    }
+
+
+def test_unityevent_target_assembly_type_field_skipped(tmp_path, monkeypatch):
+    """UnityEvent m_TargetAssemblyTypeName 值（目标脚本程序集限定类名）→
+    不产生 pending display 条目（字段名命中 _EVENT_BINDING_FIELDS 整枝跳过）。"""
+    pf = _extract(tmp_path, [
+        _FakeObject(Path("level1"), _onclick_tree(), path_id=445),
+    ], monkeypatch)
+    assert not any(
+        e.status == "pending" and "GameMaster" in (e.original or "")
+        for e in pf.entries), "UnityEvent 目标类型引用不得 pending"
+    assert not any(
+        e.meta.get("role") == "display"
+        for e in pf.entries if "Assembly-CSharp" in (e.original or ""))
+
+
+def test_action_events_map_paths_skipped(tmp_path, monkeypatch):
+    """自定义输入 m_ActionEvents[].m_ActionName 值（'PlayerActionsXbox/Move'
+    输入动作映射路径 + 编辑器默认 'New action'）→ 不得 pending display。"""
+    tree = {
+        "m_Name": "act",
+        "m_ActionEvents": [
+            {"m_ActionName": "PlayerActions/Move[/Keyboard/a,/Keyboard/d]",
+             "m_ActionId": "abc"},
+            {"m_ActionName": "PlayerActionsXbox/Jump", "m_ActionId": "def"},
+            {"m_ActionName": "PlayerInUI/New action", "m_ActionId": "ghi"},
+        ],
+    }
+    pf = _extract(tmp_path, [
+        _FakeObject(Path("level2"), tree, path_id=2326),
+    ], monkeypatch)
+    pend = [e for e in pf.entries
+            if e.status == "pending" and "Action" in e.key_path]
+    assert pend == [], "输入动作映射路径/默认名不得进队列"
+
+
+def test_event_binding_field_blocked_even_in_value_evidence_object(
+        tmp_path, monkeypatch):
+    """事件绑定字段命中优先于对象级值特征（即使同树有 m_Text 显示证据，
+    m_TargetAssemblyTypeName 子树仍不得升格）。"""
+    tree = {
+        "m_Name": "root",
+        "m_OnClick": {"m_PersistentCalls": {"m_Calls": [
+            {"m_TargetAssemblyTypeName": "MenuMaster, Assembly-CSharp",
+             "m_MethodName": "OpenPause"}]}},
+        "m_Text": "Press J to interact.",   # 真显示证据在同对象
+    }
+    pf = _extract(tmp_path, [
+        _FakeObject(Path("level1"), tree, path_id=451),
+    ], monkeypatch)
+    # 真 UI 文本保留可译
+    assert any(e.status == "pending"
+               and e.original == "Press J to interact." for e in pf.entries)
+    # 类型引用不得升格
+    assert not any(
+        e.meta.get("role") == "display"
+        and "Assembly-CSharp" in (e.original or "") for e in pf.entries)

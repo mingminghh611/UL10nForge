@@ -10,6 +10,32 @@ import re as _re
 # 合法结构，硬结构判定前保护替换（见 _final_structural_backstop）。
 _PROTECT_ESCAPES = _re.compile(r"\\[nrt]")
 
+# .NET 程序集限定类型名的「值形态」（Unity 序列化字段值，非字段路径）：
+#   'GameMaster, Assembly-CSharp' / 'System.Boolean, mscorlib' / 'UnityEngine.
+#   EventSystems.UnityEvent, UnityEngine.UI'。m_TargetAssemblyTypeName 等字段
+#   已由字段名级证据（_EVENT_BINDING_FIELDS）在 typetree 路径跳过；rawstr
+#   路径无字段名，靠值形态兜底。至少一边带点才命中（F53 _NET_ASSEMBLY_
+#   QUALIFIED_TYPE 要求「一边含点」防 'Hello, world'——但裸类名 + 裸程序集
+#   段（GameMaster + Assembly-CSharp 都无点）是 Unity m_TargetAssemblyTypeName
+#   最常见的写法，故此处放宽到任一边无点，用第二段形态兜底：'Assembly-CSharp'
+#   （连字符 PascalCase 程序集名）/'UnityEngine'（命名空间单段）在真实句子
+#   的第二段几乎不出现。两段都是裸普通词（'Hello, world'）仍需防误杀——
+#   用第二段是否像「程序集/命名空间段」判定：第二段含连字符大写、或以
+#   UnityEngine/Assembly-/mscorlib/System/Unity 等已知程序集名为准。
+_ASSEMBLY_SEGMENT = _re.compile(
+    r"^(?:Assembly-CSharp|Assembly-CSharp-firstpass|mscorlib|netstandard|"
+    r"UnityEngine(?:\.[A-Za-z_][A-Za-z0-9_.]*)?|Unity[A-Za-z]*|"
+    r"[A-Za-z_][A-Za-z0-9_]*[.-][A-Za-z0-9_]+|System(?:\.[A-Za-z_][A-Za-z0-9_.]*)?)$")
+_ASSEMBLY_QUALIFIED_VALUE = _re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_.]*\s*,\s*(?P<asm>[A-Za-z_][A-Za-z0-9_.\-]*)$")
+# 输入动作映射路径值：'PlayerActionsXbox/Move' / 'PlayerInUI/New action'
+# （Unity InputSystem 运行时按名查找的 action 路径；编辑器默认 'New action'
+# 是模板未填值）。含斜杠映射路径段 + 动作段 = 确定性的输入绑定引用。
+_ACTION_MAP_PATH = _re.compile(
+    r"^[A-Za-z0-9_]+/[A-Za-z][A-Za-z0-9_ ]*$")
+# 音效/动画触发键值（audio_trigger）：'Boss'/'Inimigo_Trigger'/'Restaura_Vida'
+# ——单值形态无法与 UI 词区分，交由 raw 对象级过滤，此处不拦（防误伤）。
+
 
 def _final_structural_backstop(entry: TextEntry) -> bool:
     """翻译前最终结构兜底：**无歧义**结构文本绝不允许进翻译队列。
@@ -46,6 +72,20 @@ def _final_structural_backstop(entry: TextEntry) -> bool:
     # 转义（替换为空格）后再做硬结构判定，避免把真显示文本当结构拦下。
     probe = _PROTECT_ESCAPES.sub(" ", text)
     if is_hard_structural(probe):
+        return True
+    # 无歧义机器结构（B9 兜底层，本闸门与硬结构判定互补）：值形态
+    # 程序集限定类型名（'GameMaster, Assembly-CSharp'）与输入动作映射路径
+    # （'PlayerActionsXbox/Move'）在**任何语境**都不可能是玩家显示文本——
+    # 反射按名绑定/InputSystem 按名查找，翻译必断绑定（按钮无反应/输入失灵）。
+    # 真显示文本不含「段,段」程序集形态（'Hello, world' 第二段是普通英文词，
+    # 不是 PascalCase/连字符标识符）也不含「映射段/动作段」路径形态。
+    if _ASSEMBLY_QUALIFIED_VALUE.match(text):
+        m = _ASSEMBLY_QUALIFIED_VALUE.match(text)
+        # 第二段须像程序集/命名空间段（Assembly-CSharp/UnityEngine/
+        # mscorlib/System…），防 'Hello, world'（第二段是普通词）误杀
+        if m and _ASSEMBLY_SEGMENT.match(m.group("asm")):
+            return True
+    if _ACTION_MAP_PATH.match(text):
         return True
     if text.casefold() in DISPLAY_WORDS:
         return False
