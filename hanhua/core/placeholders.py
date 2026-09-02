@@ -93,6 +93,20 @@ _DEV_TEMPLATE_PLACEHOLDER = re.compile(
     r"(?i)^(?:[a-z0-9]+ ){0,4}"
     r"(?:description|name|title|text|content|info|details|dialog|dialogue) here!*$",
 )
+# 引擎/编辑器默认名占位（开发者未填写字段的默认值，翻译无意义且是哑信号）：
+# 'Information text'（Fungus.InfoText 默认）、'Character Name'（Fungus.Character
+# 默认角色名）、'New Text'/'New Sprite'/'New Material'（Unity 编辑器默认资源名）——
+# 模型对占位名稳定回显或音译，恒败（a-catfiends 实证 2026-09-02：Information
+# text/Character Name 被当显示文本进池）。True 显示词（'Information'/'Character'
+# 作正式按钮文本）不在此列——本正则要求完整形态匹配「占位标签 + Name/Text 后缀」
+# 或裸 'new xxx' 编辑器名，真实 UI 词不含该结构。
+_DEFAULT_NAME_PLACEHOLDER = re.compile(
+    r"(?i)^(?:information|description|character|player|enemy|item|object|"
+    r"dialogue|dialog|message|text|name)\s+(?:text|name|label|title|icon)[']?s?$"
+    r"|^new\s+(?:text|sprite|material|game\s*object|script|animation|audio|"
+    r"particle|prefab|material|scene|ui|canvas|button|image|text\s*mesh)[\s'']*$"
+    r"|^game\s+name[']?s?$|^enter\s+(?:name|title|text)\b",
+)
 
 _HTML_OR_BB = re.compile(
     r"^(?:<[^>]+>|\[/?(?:b|i|u|s|color|size|font|url|sprite)(?:=[^\]]+)?\])$",
@@ -1065,6 +1079,10 @@ def is_hard_structural(text: str) -> bool:
     if _DEV_TEMPLATE_PLACEHOLDER.match(s):
         # 开发者模板占位（"beast description here" / "Option description here!!!"）：
         # 内容未填写的占位字符串，翻译无意义（真实语料漏检样本）
+        return True
+    if _DEFAULT_NAME_PLACEHOLDER.match(s):
+        # 引擎/编辑器默认名占位（'Information text'/'Character Name'/'New Sprite'）：
+        # 字段默认值不是显示文本（Fungus 组件默认名实证）
         return True
     if _URL.match(s) or _ONLY_SYMBOL.match(s) or _HTML_OR_BB.match(s):
         return True

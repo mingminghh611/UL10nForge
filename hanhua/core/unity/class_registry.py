@@ -80,6 +80,38 @@ _CLASS_ROWS: tuple[ClassEntry, ...] = (
     # Front/Behind 成对出现（= 图层序列化），无 UI 字段证据，此前被
     # single_visible_string/f38_released 放行进池。
     ClassEntry("OrderInLayer", "config", "render_layer"),
+    # ── config：Fungus 对话系统结构类（a-catfiends 实证 2026-09-02）──
+    # Fungus 对话组件序列化字段值是运行时按名查找键，翻译必断对话流程：
+    # BooleanVariable/FloatVariable 等 *Variable 的 Key（'Menu'/'milk'/
+    # 'LYNCH'/'LOCATION' 是变量名——对话 SetVariable/Compare 按名引用）；
+    # Block 的 BlockName（'Opening (Copy)' 对话块跳转引用）；PlayAnimState
+    # 的 AnimState（'end transition'/'kalkam' 动画状态名）；MessageReceived/
+    # SendMessage 的 Message（'DEATH' 消息名，Block 触发按名匹配）；StopBlock/
+    # StopFlowchart 的 BlockName（被停止块引用）；Flowchart 名称/描述
+    # （编辑器定位，非游戏内显示）。
+    # **不在本组的 Fungus 类**（其序列化值是真显示文本，必须保留翻译）：
+    # Fungus.Say（storyText 对话正文 178 条 actionable 实证）、
+    # Fungus.Character（角色显示名）、Fungus.InfoText（Info 字段是游戏内
+    # 说明文本，'Information text' 只是默认占位）——精确到类的登记保证
+    # 只拦结构类、不误杀对话/显示类。typetree 解析出命名空间限定名
+    # （Fungus.X）精确匹配。
+    ClassEntry("Fungus.BooleanVariable", "config", "fungus_struct"),
+    ClassEntry("Fungus.FloatVariable", "config", "fungus_struct"),
+    ClassEntry("Fungus.IntegerVariable", "config", "fungus_struct"),
+    ClassEntry("Fungus.StringVariable", "config", "fungus_struct"),
+    ClassEntry("Fungus.AudioSourceVariable", "config", "fungus_struct"),
+    ClassEntry("Fungus.GameObjectVariable", "config", "fungus_struct"),
+    ClassEntry("Fungus.MaterialVariable", "config", "fungus_struct"),
+    ClassEntry("Fungus.SpriteVariable", "config", "fungus_struct"),
+    ClassEntry("Fungus.Block", "config", "fungus_struct"),
+    ClassEntry("Fungus.Flowchart", "config", "fungus_struct"),
+    ClassEntry("Fungus.PlayAnimState", "config", "fungus_struct"),
+    ClassEntry("Fungus.MessageReceived", "config", "fungus_struct"),
+    ClassEntry("Fungus.SendMessage", "config", "fungus_struct"),
+    ClassEntry("Fungus.StopBlock", "config", "fungus_struct"),
+    ClassEntry("Fungus.StopFlowchart", "config", "fungus_struct"),
+    # FungusTrigger：触发器名（'DEATH' 等按键/事件触发名，Block 启动按名匹配）
+    ClassEntry("FungusTrigger", "config", "fungus_struct"),
     # ── display ──
     ClassEntry("TextMeshProUGUI", "display", "ui_text"),
     ClassEntry("TMP_InputField", "display", "ui_text"),
