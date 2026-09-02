@@ -188,6 +188,24 @@ _EVENT_BINDING_FIELDS = frozenset({
     "targetassemblytypename", "objectargumentassemblytypename",
     "objecttypename",
     "actionevents", "actionname", "actionid",
+    # Cinemachine 相机混合容器（hrana 实证 2026-09-02：obj m_Name='ZoomBlends'
+    # 的 m_CustomBlends[].m_From/m_To 值 'Cinemachine vcam2 Main'/'**ANY
+    # CAMERA**' 是相机名引用——CinemachineBrain 按名混合相机，翻译断镜头
+    # 过渡）。容器字段名归一化命中即整枝跳过。用归一化名（customblends）
+    # 而非 token 拆分——_TYPETREE_STRUCTURAL_FIELDS 是按拆 token 匹配，
+    # 单合并 token 命中不了。
+    "customblends",
+    # 网络/连接配置字段（forgeverse 实证 2026-09-02）：offlineScene/
+    # onlineScene（'Assets/Scenes/xxx.unity' 场景加载路径，已被路径形态
+    # 拦）与 networkAddress（'localhost' 主机地址，纯文本形态漏网）——
+    # 网络地址/主机名是运行时连接查找键，翻译断联机。字段名级登记。
+    "networkaddress", "ipaddress", "hostname", "serveraddress",
+    "offlinescene", "onlinescene",
+    # 词表过滤字段（forgeverse 实证 2026-09-02）：Swears 脏话过滤词表
+    # （'anal anus arse…' 聊天过滤用）——翻译破坏过滤词匹配（玩家可发
+    # 脏话/或正常词被误杀）。开发词表非显示文本。
+    "swears", "profanity", "bannedwords", "filterwords",
+    "blacklist", "blockedwords",
 })
 
 # InputManager 轴名（Unity 旧输入系统 Input.GetAxis 查找键）：Standalone
@@ -1061,6 +1079,12 @@ _MANAGER_DOMAIN = frozenset({
     "audio", "sound", "sfx", "music", "game", "ui", "menu", "scene",
     "level", "player", "enemy", "input", "save", "settings", "option",
     "screen", "map", "world", "state", "flow", "control", "volume",
+    # 场景背景/视差层管理器（fish 实证 2026-09-02：SeamlessBackgroundController
+    # 序列化 Sky/Parallax/Trees/Grass/TreesFar/Near = 背景渲染层按名引用键，
+    # 翻译断无缝滚动背景切换）——'background'/'parallax' 收尾 Controller/
+    # Manager 才是层管理器，UI 背景选择按钮（'Background' 无 Controller 收尾）
+    # 不命中。
+    "background", "parallax",
 })
 _MANAGER_SUFFIX = ("manager", "control", "controller", "master", "state")
 
@@ -1714,10 +1738,23 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
     # （不进 non_engine），但同对象其余串（精灵名 Smiley/Wink、布局
     # 参数 Character/Line Spacing）进池——资产名是判定证据必须可见。
     _pool_lower = " ".join(s.strip().casefold() for _, _, s in scanned)
+    # TMP 资产对象探测放宽（B11，handshakes 实证 2026-09-02）：资产对象
+    # 也可能只带 m_Version='1.1.0' + 字体字段（m_FamilyName/m_StyleName/
+    # m_SourceFontFileGUID）而无 'sdf'/'sprite asset' 字样——typetree
+    # 字段名（familystyle/…）是确定性资产结构证据。raw scan 的串池探测
+    # 覆盖不到字段名（只看到值 Medium/rainyhearts），故放宽到「对象含
+    # 字体资产字段名串」（m_StyleName 值 Medium + 邻域 m_Name 字体名）。
+    # 判定仍要求 m_Version '1.1.0' 值在场（m_FamilyName 字体族名 + 资产
+    # 版本号 = 字体资产形态）。
+    _asset_field_sig = (
+        "m_familyname" in _pool_lower or "m_stylename" in _pool_lower
+        or "m_sourcefontfileguid" in _pool_lower
+        or "m_fontassets" in _pool_lower)
     is_tmp_asset_object = (
         _re.search(r"\b1\.1\.0\b", _pool_lower) is not None
         and (_re.search(r"\bsdf\b", _pool_lower) is not None
-             or "sprite asset" in _pool_lower)
+             or "sprite asset" in _pool_lower
+             or _asset_field_sig)
     )
     # 识别 L9：确定性脚本类注册表（class_registry）。config 类（TMP
     # 字体/精灵资产、InputSystem/Timeline 配置）对象内字符串是按名

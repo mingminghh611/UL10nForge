@@ -59,6 +59,19 @@ _CLASS_ROWS: tuple[ClassEntry, ...] = (
     ClassEntry("InputControlScheme", "config", "input"),
     ClassEntry("TimelineAsset", "config", "timeline"),
     ClassEntry("PlayableDirector", "config", "timeline"),
+    # ── config：URP 渲染管线配置（hickory 实证 2026-09-02）──
+    # Renderer2DData 的混合模式枚举（'Multiply'/'Additive'/'Multiply with
+    # Mask'，2D 光照渲染模式）、UniversalRenderPipelineGlobalSettings 的
+    # 'Default' 等——渲染管线配置按名引用（URP 资产是引擎渲染设置，非
+    # 玩家 UI 文本；'Multiply' 若翻成「相乘」会断 2D 光照混合渲染）。与
+    # Timeline/FMOD 同属引擎渲染/演出配置类。UnityEngine.Rendering.*
+    # 命名空间内还有大量 DebugUIHandler*/VolumeProfile/PostProcess 类，
+    # 命名空间前缀匹配覆盖全部。
+    ClassEntry("Renderer2DData", "config", "urp_render"),
+    ClassEntry("UniversalRenderPipelineGlobalSettings", "config", "urp_render"),
+    ClassEntry("UniversalRenderPipelineAsset", "config", "urp_render"),
+    ClassEntry("VolumeProfile", "config", "urp_render"),
+    ClassEntry("PostProcessData", "config", "urp_render"),
     # FMODUnity 家族：只登记无歧义类名（Studio*/FMODEvent* 前缀是 FMOD
     # 专有词）。通用词类名（Settings/Platform/EventHandler/RuntimeManager
     # 等）不裸名登记——游戏自有同名类（设置界面 Settings）会被误杀；
@@ -175,5 +188,12 @@ def disposition(script_class: str) -> str | None:
         return "config"
     if script_class.startswith(_REWIRED_NAMESPACE_PREFIXES):
         # Rewired/InControl 命名空间内全部是输入插件配置类
+        return "config"
+    if script_class.startswith("UnityEngine.Rendering."):
+        # URP/HDRP 渲染管线命名空间（RenderPipelineAsset/VolumeProfile/
+        # Renderer2DData/DebugUIHandler* 等）：引擎渲染配置类——管线设置/
+        # 混合模式/后处理卷的字符串是引擎引用（hickory 实证 2026-09-02：
+        # Renderer2DData 'Multiply'/'Additive' 2D 光照混合枚举被当显示词放行），
+        # 翻译断渲染。命名空间前缀覆盖全部，无需逐一登记。
         return "config"
     return None
