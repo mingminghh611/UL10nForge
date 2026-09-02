@@ -198,3 +198,62 @@ def test_event_binding_field_blocked_even_in_value_evidence_object(
     assert not any(
         e.meta.get("role") == "display"
         and "Assembly-CSharp" in (e.original or "") for e in pf.entries)
+
+
+# ── 文本镜像/动画字段（B10b，doubleshake SuperTextMesh 实证 2026-09-02）──
+# SuperTextMesh 组件序列化：_text（权威显示文本）+ drawText/preParsedText/
+# hyphenedText（_text 的运行时镜像缓存，同值 ×118）+ drawAnimName/undrawAnimName
+# （'Appear'/'stamp' 文字进出场动画名 ×1166）。此前 typetree 全字段漏白名单 →
+# raw scan 兜底把 Appear/PAUSED 重复放行（word_list 100+single 大量）。修复：
+# 下划线私有字段归一化（_text→text 命中白名单）；镜像/动画字段登记结构跳过。
+
+def test_underscore_field_normalization():
+    """_text → text（私有序列化字段归一到白名单），__ 双下划线不剥。"""
+    assert extractor._normalized_field_name("_text") == "text"
+    assert extractor._normalized_field_name("_displayedText") == "displayedtext"
+    assert extractor._normalized_field_name("__text") == "__text"
+    assert extractor._normalized_field_name("_name") == "name"
+
+
+def test_supertextmesh_only_authoritative_text_field_pending(tmp_path, monkeypatch):
+    """SuperTextMesh：_text 是显示文本（可译）；drawText/preParsedText/
+    hyphenedText 镜像与 drawAnimName/undrawAnimName 动画键不得 pending。"""
+    tree = {
+        "m_Name": "",
+        "_text": "PAUSED",
+        "drawText": "PAUSED",
+        "preParsedText": "PAUSED",
+        "hyphenedText": "PAUSED",
+        "drawAnimName": "Appear",
+        "undrawAnimName": "Appear",
+    }
+    pf = _extract(tmp_path, [
+        _FakeObject(Path("level1"), tree, path_id=7369),
+    ], monkeypatch)
+    pend = [e for e in pf.entries if e.status == "pending"]
+    # 只 _text 一条 pending，镜像/动画字段跳过
+    assert len(pend) == 1, f"应只剩权威 _text 一条 pending，实际 {len(pend)}"
+    assert pend[0].original == "PAUSED"
+    fp = pend[0].meta.get("field_path") or []
+    assert fp and fp[-1] == "_text"
+
+
+def test_animname_field_skipped_even_when_display_evidence_present(
+        tmp_path, monkeypatch):
+    """动画状态名（drawAnimName='Appear'）字段名级跳过——即使同树有 _text
+    显示证据也不得升格（翻译断 SuperTextMesh 进出场动画）。"""
+    tree = {
+        "_text": "Use this item?",
+        "drawAnimName": "Appear",
+        "undrawAnimName": "Appear",
+    }
+    pf = _extract(tmp_path, [
+        _FakeObject(Path("level1"), tree, path_id=7401),
+    ], monkeypatch)
+    anim = [e for e in pf.entries
+            if (e.meta.get("field_path") or [""])[-1] in
+            ("drawAnimName", "undrawAnimName")]
+    assert all(e.status != "pending" for e in anim), "动画状态名不得 pending"
+    # 真 UI 文本保留
+    assert any(e.status == "pending" and e.original == "Use this item?"
+               for e in pf.entries)

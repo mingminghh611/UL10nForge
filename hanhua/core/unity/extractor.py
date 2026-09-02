@@ -89,6 +89,11 @@ _UNITY_CONTROL_STATE_NAMES = frozenset({
 _TYPETREE_ANIMATION_TRIGGER_FIELDS = frozenset({
     "normaltrigger", "highlightedtrigger", "pressedtrigger",
     "selectedtrigger", "disabledtrigger", "enabledtrigger",
+    # SuperTextMesh 文本动画状态字段（doubleshake 实证 2026-09-02：
+    # drawAnimName/undrawAnimName='Appear'/'stamp' 是文字进出场动画名——
+    # 运行时按名查找，翻译断 SuperTextMesh 动画 → 文本不显示/不消失）。
+    # 字段名级登记为结构（与 UGUI 动画触发器同语义：动画状态引用键）。
+    "drawanimname", "undrawanimname", "animname",
 })
 _INPUT_BINDING_NAMES = frozenset({
     "move", "wasd", "fire", "look", "dpad",
@@ -123,6 +128,16 @@ _INPUTSYSTEM_ASSEMBLY_SIGNALS = (
     "UnityEngine.InputSystem", "Unity.InputSystem")
 _TIMELINE_ASSEMBLY_SIGNALS = (
     "UnityEngine.Timeline", "UnityEngine.Playables", "Unity.Timeline")
+
+# 文本运行时镜像/中间字段（SuperTextMesh 实证 doubleshake 2026-09-02）：
+# drawText/preParsedText/hyphenedText 是 _text 的处理后缓存（动画预解析/
+# 连字符重排），与 _text 同值或仅形态差异，运行时重算——写回重复翻译 4
+# 份同值无意义且改缓存字段有风险。字段名级登记为结构（非显示）跳过，
+# 只让权威 _text（归一化 text）走白名单。
+_TEXT_MIRROR_FIELDS = frozenset({
+    "drawtext", "hyphenedtext", "preparsedtext", "parsedtext",
+    "undrawname", "rawname",
+})
 # Timeline 对象常见轨道/标记 displayName（不带编号的裸词形式）
 _TIMELINE_MARKER_NAMES = frozenset({"markers", "track"})
 
@@ -547,6 +562,12 @@ def _normalized_field_name(value: object) -> str:
     # 影响）。NGUI 游戏整类字段因此漏提取，此为通用修复。
     if len(name) > 1 and name[0] == "m" and name[1].isupper():
         return low[1:]
+    # 序列化私有字段下划线前缀（_text/_displayedText/_name，SuperTextMesh
+    # 等自定义组件私有字段实证 2026-09-02）：_text 语义 = text 显示字段。
+    # 只剥**单条前导下划线**（__text 双下划线是命名重整/特殊标记不剥），
+    # 归一到既有白名单（text/name/label…）判定。
+    if low.startswith("_") and not low.startswith("__"):
+        return low[1:]
     return low
 
 
@@ -630,12 +651,16 @@ def _typetree_string_entries(
                 # 命中字段名即该子树整枝跳过（不依赖值形态猜测）。
                 event_branch = structural or bool(
                     normalized in _EVENT_BINDING_FIELDS)
+                # 文本运行时镜像字段（drawText/preParsedText 等缓存，见文件头
+                # _TEXT_MIRROR_FIELDS）——只让权威 _text 进白名单，镜像跳过防
+                # 同值多份重复翻译写回。
+                mirror_branch = bool(normalized in _TEXT_MIRROR_FIELDS)
                 # m_Name 等 Unity 惯例对象标识字段（Inspector 标题/Find 查找
                 # 键/引用/地址）：翻译破坏对象查找与回写（immutable_field_
                 # protected 会拦截）——即使对象含值证据也不得升格 display
                 # （doubleshake 实证）。casefold 拦截 m_name/M_Name 变体；
                 # 裸 name 字段（对话角色名等）不受影响。
-                blocked = structural or event_branch or bool(
+                blocked = structural or event_branch or mirror_branch or bool(
                     _field_name_tokens(key) & _TYPETREE_STRUCTURAL_FIELDS) \
                     or key.casefold() in _TYPETREE_IMMUTABLE_FIELD_NAMES \
                     or _normalized_field_name(key) \
