@@ -22,21 +22,29 @@ from hanhua.core.placeholders import extract_placeholders
 # 运行时插件字体源（2026-08-18 单字体收敛，用户指令）：
 # - 只保留唯一字体 Noto Serif CJK SC Medium（宋体中等字重，与
 #   SDF_Font_Asset/NotoSerifCJKsc-Medium SDF.asset 同源同字重）；
+# - 2026-09-04 D1 复发根治：字体源从 .otf（CFF 轮廓）切换为 .ttf
+#   （真 TrueType glyf，scripts/convert_cff_to_ttf.py 确定性转换生成，
+#   cmap/度量与 OTF 逐字段一致）——插件 `new Font(fontPath)` 按
+#   TrueType 解析 CFF 会缺字（口口口），2026-08-18 收敛时把唯一字体
+#   源换成 CFF OTF 导致 D1 复发，现在白名单只接受真 TrueType；
 # - 历史 SourceHanSansSC（思源黑体）系列弃用，兼容别名映射到新字体。
 FONT_OPTIONS = {
-    "SimplifiedChinese/NotoSerifCJKsc-Medium.otf": "Noto Serif CJK SC",
+    "SimplifiedChinese/NotoSerifCJKsc-Medium.ttf": "Noto Serif CJK SC",
 }
 
 # 旧项目库兼容：历史 store 配置的 filename 指向已弃用/已替换字体
 # （Rendezvous 实证：默认值/旧项目一直部署过期字体）。安装前规范化到
-# 新字体——旧库自动更正线路，不再使用过期字体。
+# 新字体——旧库自动更正线路，不再使用过期字体。2026-09-04：旧 OTF
+# 默认路径也映射到 TTF（同族同字重，CFF 不得再作插件部署源）。
 _LEGACY_FONT_ALIASES = {
+    "SimplifiedChinese/NotoSerifCJKsc-Medium.otf":
+        "SimplifiedChinese/NotoSerifCJKsc-Medium.ttf",
     "SimplifiedChinese/SourceHanSansSC-Regular.otf":
-        "SimplifiedChinese/NotoSerifCJKsc-Medium.otf",
+        "SimplifiedChinese/NotoSerifCJKsc-Medium.ttf",
     "SimplifiedChinese/SourceHanSansSC-Medium.otf":
-        "SimplifiedChinese/NotoSerifCJKsc-Medium.otf",
+        "SimplifiedChinese/NotoSerifCJKsc-Medium.ttf",
     "SimplifiedChinese/SourceHanSansSC-Medium.ttf":
-        "SimplifiedChinese/NotoSerifCJKsc-Medium.otf",
+        "SimplifiedChinese/NotoSerifCJKsc-Medium.ttf",
 }
 
 
@@ -55,7 +63,7 @@ _WINDOWS_RESERVED_NAMES = {
 }
 
 _FONT_HEALTH_PROTOCOL_VERSION = 5
-_FONT_HEALTH_PLUGIN_VERSION = "1.4.0"
+_FONT_HEALTH_PLUGIN_VERSION = "1.5.0"
 _FONT_HEALTH_MAX_BYTES = 64 * 1024
 # Phase 3：逐 scalar 证明。health 文件超过该时长未刷新 → 陈旧 attestation
 # （STALE_RUNTIME_ATTESTATION 语义）：插件可能已退出/卡死/被删。
@@ -1110,6 +1118,17 @@ def install_font_override(
         runtime_payload = runtime_zip.read_bytes()
     except OSError as exc:
         raise FontInstallError(f"无法读取字体运行时载荷: {exc}") from exc
+    # D1 部署闸门（问题集 D1，2026-09-04）：插件 font.ttf 载荷必须是真
+    # TrueType（glyf，magic 00010000）——CFF（OTTO）被 Unity
+    # `new Font(fontPath)` 按 TTF 解析 → 缺字口口口。白名单已只收 TTF，
+    # 这是最后一道防线：即使白名单/别名将来配错成 OTF，也在部署前拒绝
+    # 而非静默部署坏字体。注意不缩窄 unity/font_replace._ttf_has_magic
+    # ——游戏 legacy Font 内嵌 CFF 是合法形态，只在部署端强制。
+    if font_payload[:4] not in (b"\x00\x01\x00\x00", b"true", b"ttcf"):
+        raise FontInstallError(
+            f"插件字体载荷必须是真 TrueType（glyf），拒绝部署: {filename} "
+            f"（magic={font_payload[:4]!r}，CFF/OTTO 会导致缺字口口口，"
+            "用 scripts/convert_cff_to_ttf.py 转换后再部署）")
     if (
         expected_runtime_size is not None
         and len(runtime_payload) != expected_runtime_size

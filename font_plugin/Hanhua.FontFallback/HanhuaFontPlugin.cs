@@ -67,7 +67,10 @@ namespace Hanhua.FontFallback
 
         public const string PluginGuid = "com.hanhua.fontfallback";
         public const string PluginName = "Hanhua Font Fallback";
-        public const string PluginVersion = "1.4.0";
+        // 1.5.0：性能根治（写回后场景卡顿）——诊断 dump 限次 + AllFontProps
+        // 全量大扫静默退避 + 扫描节奏放宽（Harmony set_text 钩子已是
+        // 动态文本主路径，周期扫描只做兜底）。
+        public const string PluginVersion = "1.5.0";
 
         // Phase 3 协议 v5：逐 scalar 证明（required-glyphs.json 每码点验证）
         private const int HealthProtocolVersion = 5;
@@ -227,7 +230,14 @@ namespace Hanhua.FontFallback
         // 每帧回调，主线程活着就一定执行）。每 1 秒扫描一次替换场景内
         // 后创建的 TMP/UGUI 文本字体。
         private float _lastUpdateScan = 0f;
+        // 1.5.0 性能：周期扫描空转计数（连续 0 应用 → 退避到长间隔；
+        // 场景加载/文本更新钩子仍然即时全扫）。
+        private int _scansWithNoApply = 0;
         private const float UpdateScanInterval = 1f;
+        // 退避后的 Update/periodic 间隔（空转 N 次后进入稳态：游戏正常
+        // 渲染期间不做重量级扫描，只靠 Harmony 钩子即时补丁新文本）。
+        private const float BackoffUpdateScanInterval = 6f;
+        private const float BackoffScanIntervalSeconds = 8f;
 
         private void Update()
         {
@@ -238,12 +248,25 @@ namespace Hanhua.FontFallback
             {
                 SetupHarmonyPatches();
             }
-            if (Time.realtimeSinceStartup - _lastUpdateScan < UpdateScanInterval)
+            if (Time.realtimeSinceStartup - _lastUpdateScan < UpdateInterval())
             {
                 return;
             }
             _lastUpdateScan = Time.realtimeSinceStartup;
             SafeApplyFonts("update");
+        }
+
+        // 1.5.0 性能：稳态退避间隔（连续空转扫描越多 → 间隔越长，
+        // 上限 BackoffUpdateScanInterval）。
+        private float UpdateInterval()
+        {
+            if (_scansWithNoApply <= 0)
+            {
+                return UpdateScanInterval;
+            }
+            return System.Math.Min(
+                UpdateScanInterval + _scansWithNoApply,
+                BackoffUpdateScanInterval);
         }
 
         // Rendezvous 实证 2026-08-17：IMGUI（OnGUI）文本用 GUI.skin 默认
@@ -2863,10 +2886,14 @@ namespace Hanhua.FontFallback
         private IEnumerator ScanLoop()
         {
             Logger.LogInfo("FONT_SCAN_LOOP_STARTED");
-            WaitForSecondsRealtime interval = new WaitForSecondsRealtime(ScanIntervalSeconds);
             while (true)
             {
-                yield return interval;
+                // 1.5.0 性能：退避间隔（连续空转 → 最长 8s 一扫；场景
+                // 加载即时触发全扫，set_text 钩子即时补丁新文本）。
+                yield return new WaitForSecondsRealtime(
+                    _scansWithNoApply > 0
+                        ? BackoffScanIntervalSeconds
+                        : ScanIntervalSeconds);
                 SafeApplyFonts("periodic");
             }
         }
@@ -2895,6 +2922,7 @@ namespace Hanhua.FontFallback
         // 类型）输出到日志，一次定位全部渲染路径。awake 场景未加载时
         // dump=0——改为每次扫描限频输出（场景加载后自动覆盖）。
         private float _lastDiagDump = -100f;
+        private int _diagDumpsDone = 0;
 
         private void DumpTextDiagnostics()
         {
@@ -2990,10 +3018,29 @@ namespace Hanhua.FontFallback
             {
                 EnsureUsableTmpFont();
             }
+            // 1.5.0 性能：AllFontProps 大扫排程——首次（awake 后第一次
+            // 扫描）与场景加载必跑；稳态周期扫描最长 30s 一跑。
+            if (_allPropsScans == 0
+                || reason.StartsWith("scene:", StringComparison.Ordinal))
+            {
+                _allPropsDue = true;
+            }
+            else if (Time.realtimeSinceStartup - _lastAllPropsSweep >= 30f)
+            {
+                _allPropsDue = true;
+            }
             if (Time.realtimeSinceStartup - _lastDiagDump >= 5f)
             {
                 _lastDiagDump = Time.realtimeSinceStartup;
-                DumpTextDiagnostics();
+                // 1.5.0 性能：诊断 dump 是全对象反射扫描，只跑 3 次
+                // （启动定位用）；之后仅场景加载时刷新。TEXT_DIAG_TOTAL
+                // dumped=0 连续出现即说明定位已完成。
+                if (_diagDumpsDone < 3 || reason.StartsWith(
+                        "scene:", StringComparison.Ordinal))
+                {
+                    _diagDumpsDone++;
+                    DumpTextDiagnostics();
+                }
             }
             int translatedCount = RunFontScan(
                 "ExactTranslations",
@@ -3009,7 +3056,24 @@ namespace Hanhua.FontFallback
             int textMeshCount = RunFontScan("TextMesh", PatchTextMeshes);
             // 暴力兜底：一切 Font 类型属性 → 工具字体（类型白名单漏网
             // 的 UGUI/NGUI 组件靠它覆盖，Rendezvous 实证 ui=0 场景）
+            // ——1.5.0 起该大扫自带退避（见 PatchAllFontProperties）。
             int allCount = RunFontScan("AllFontProps", PatchAllFontProperties);
+            // 1.5.0 性能：统计本次周期/Update 扫描的空转次数（全部路径
+            // 0 应用 → 计数累加用于退避；场景加载/awake 不计入，始终
+            // 全量扫描，稳态恢复即时）。
+            if (reason == "periodic" || reason == "update")
+            {
+                if (tmpCount + uiCount + uiToolkitCount
+                    + textMeshCount + translatedCount + allCount > 0)
+                {
+                    _scansWithNoApply = 0;
+                }
+                else
+                {
+                    _scansWithNoApply = System.Math.Min(
+                        _scansWithNoApply + 1, 16);
+                }
+            }
             uiCount += allCount;
             // IMGUI skin 只能在 OnGUI 生命周期内访问（GUI.skin 运行时
             // 检查），此处不能安全 patch（Rendezvous 实证：非 OnGUI
@@ -3726,12 +3790,27 @@ namespace Hanhua.FontFallback
         // 口口口）。兜底：遍历全部对象，反射替换一切 Font 类型属性——
         // 覆盖 UGUI/NGUI/旧 Text/TextMesh 等所有 legacy 字体路径。
         // 已替换为 dynamicFont 的对象跳过（首次大扫后为增量）。
+        // 1.5.0 性能：这是最重的扫描（全对象×全属性反射），从「每次
+        // ApplyFonts 必跑」改为——首次扫描 + 场景加载必跑；稳态周期
+        // 扫描最长 30s 一跑（Harmony set_text 钩子已覆盖动态文本的
+        // 主路径，此处只是类型白名单漏网的兜底，低频兜底即可）。
+        private int _allPropsScans = 0;
+        private float _lastAllPropsSweep = -1000f;
+        private bool _allPropsDue;
+
         private int PatchAllFontProperties()
         {
             if (dynamicFont == null)
             {
                 return 0;
             }
+            if (!_allPropsDue)
+            {
+                return 0;
+            }
+            _allPropsScans++;
+            _lastAllPropsSweep = Time.realtimeSinceStartup;
+            _allPropsDue = false;
             int applied = 0;
             UnityEngine.Object[] all;
             try

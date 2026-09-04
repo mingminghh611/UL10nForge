@@ -1,0 +1,74 @@
+invalid compressed int: leading byte: 0xe7
+invalid compressed int: leading byte: 0xe0
+invalid compressed int: leading byte: 0xfa
+invalid compressed int: leading byte: 0xe7
+invalid compressed int: leading byte: 0xe0
+invalid compressed int: leading byte: 0xfa
+invalid compressed int: leading byte: 0xe7
+invalid compressed int: leading byte: 0xe0
+invalid compressed int: leading byte: 0xfa
+语料 212 个游戏，反查已汉化库……
+65 个游戏有已汉化项目库
+
+===== 8morelives：金标准 9379 条 =====
+  进池率: 9223/9238 = 99.8%（陈旧键 40 条不计——游戏文件已更新）
+  可译率: 9185/9238 = 99.4%（disposition=translate 的可译条目口径）
+  遗漏 15 条（前 200 按来源文件分解）：
+    8 More Lives_Data/level2 ×6  例: 'Time: 2d'
+    8 More Lives_Data/Managed/Assembly-CSharp.dll ×3  例: 'WTF: Action parent is null: '
+    8 More Lives_Data/resources.assets ×3  例: 'Split'
+    8 More Lives_Data/Managed/Unity.Transforms.Hybrid.dll ×1  例: 'FATAL: Tried to call TypeManager.Equals() for a component ty'
+    8 More Lives_Data/Managed/Unity.Entities.Graphics.dll ×1  例: 'GUID: {0} section: {1}'
+    8 More Lives_Data/Managed/Unity.Mathematics.Extensions.dll ×1  例: 'AABB(Center:{0}, Extents:{1}'
+
+===== deepest-sword：金标准 145 条 =====
+  进池率: 136/145 = 93.8%
+  可译率: 135/145 = 93.1%（disposition=translate 的可译条目口径）
+  遗漏 9 条（前 200 按来源文件分解）：
+    Deepest Sword_Data/level0 ×6  例: 'Potions: {0}/{1}'
+    Deepest Sword_Data/Managed/Assembly-CSharp.dll ×2  例: 'ANIM: No frames in: {0}'
+    Deepest Sword_Data/app.info ×1  例: 'Deepest Sword'
+
+===== drova：金标准 2892 条 =====
+  进池率: 2719/2868 = 94.8%（陈旧键 6 条不计——游戏文件已更新）
+  可译率: 2681/2868 = 93.5%（disposition=translate 的可译条目口径）
+  遗漏 149 条（前 200 按来源文件分解）：
+    Drova_Data/sharedassets6.assets ×112  例: 'GNode(Inverter:EnemyTargetingMe)'
+    Drova_Data/sharedassets20.assets ×12  例: 'AI_Set Combat Music'
+    Drova_Data/sharedassets2.assets ×10  例: 'GNode(Attack:CurlUp)'
+    Drova_Data/resources.assets ×9  例: 'ABI_Regeneration _InstantHeal'
+    Drova_Data/Managed/Assembly-CSharp.dll ×2  例: 'Aether: {0}'
+    Drova_Data/sharedassets1.assets ×1  例: 'Progress: 37%'
+    Drova_Data/level2 ×1  例: 'Loot: Gladius'
+    Drova_Data/level5 ×1  例: 'Debug: Start'
+
+===== electric-trains：金标准 839 条 =====
+  进池率: 595/598 = 99.5%
+  可译率: 587/598 = 98.2%（disposition=translate 的可译条目口径）
+  遗漏 3 条（前 200 按来源文件分解）：
+    Electric Trains_Data/level0 ×3  例: '同意'
+
+===== forgeverse：金标准 695 条 =====
+  进池率: 682/694 = 98.3%
+  可译率: 660/694 = 95.1%（disposition=translate 的可译条目口径）
+  遗漏 12 条（前 200 按来源文件分解）：
+    Forgeverse_Data/Managed/SimpleWebTransport.dll ×5  例: 'INFO_EXCEPTION: <color=blue>'
+    Forgeverse_Data/Managed/Mirror.dll ×3  例: '<b>Host</b>: running via {0}'
+    Forgeverse_Data/level1 ×2  例: '<color=#1DFF00><b>GameJolt</b></color> Friends'
+    Forgeverse_Data/Managed/Assembly-CSharp.dll ×1  例: ' </b>Deaths: <b>'
+    Forgeverse_Data/Managed/Firebase.Database.dll ×1  例: 'FATAL: An earlier pending exception from unmanaged code was '
+
+===== hickory：金标准 120 条 =====
+  进池率: 119/120 = 99.2%
+  可译率: 99/120 = 82.5%（disposition=translate 的可译条目口径）
+  遗漏 1 条（前 200 按来源文件分解）：
+    Hickory_Data/data.unity3d ×1  例: 'XR'
+
+===== tiiny-ragdoll：金标准 89 条 =====
+  进池率: 87/89 = 97.8%
+  可译率: 87/89 = 97.8%（disposition=translate 的可译条目口径）
+  遗漏 2 条（前 200 按来源文件分解）：
+    Tiiny Sandbox_Data/app.info ×1  例: 'Tiiny Sandbox'
+    Tiiny Sandbox_Data/Managed/Assembly-CSharp.dll ×1  例: 'Hidden/Post FX/FXAA'
+
+===== 合计识别率: 13561/13752 = 98.6% =====

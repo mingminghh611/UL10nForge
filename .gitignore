@@ -25,9 +25,11 @@ logs/
 !.scratch/running-issues/*.md
 
 # 中文字体仅提交白名单引用的唯一字体（2026-08-18 单字体收敛：
-# Noto Serif CJK SC Medium），其余留磁盘不入库
+# Noto Serif CJK SC Medium；2026-09-04 D1 根治新增真 TrueType 版
+# .ttf——CFF OTF 禁止再作插件部署源，见问题集 D1），其余不入库
 fonts/SimplifiedChinese/*
 !fonts/SimplifiedChinese/NotoSerifCJKsc-Medium.otf
+!fonts/SimplifiedChinese/NotoSerifCJKsc-Medium.ttf
 
 # 每次汉化自动导出的失败记录（生成产物，不入库）
 docs/fail record/

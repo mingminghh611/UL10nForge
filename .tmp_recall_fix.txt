@@ -1,0 +1,41 @@
+invalid compressed int: leading byte: 0xe7
+invalid compressed int: leading byte: 0xe0
+invalid compressed int: leading byte: 0xfa
+invalid compressed int: leading byte: 0xe7
+invalid compressed int: leading byte: 0xe0
+invalid compressed int: leading byte: 0xfa
+invalid compressed int: leading byte: 0xe7
+invalid compressed int: leading byte: 0xe0
+invalid compressed int: leading byte: 0xfa
+语料 4 个游戏，反查已汉化库……
+5 个游戏有已汉化项目库
+
+===== 8morelives：金标准 9379 条 =====
+  进池率: 9235/9250 = 99.8%（陈旧键 40 条不计——游戏文件已更新）
+  可译率: 9197/9250 = 99.4%（disposition=translate 的可译条目口径）
+  遗漏 3 条（前 200 按来源文件分解）：
+    8 More Lives_Data/resources.assets ×3  例: 'Split'
+
+===== deepest-sword：金标准 145 条 =====
+  进池率: 144/153 = 94.1%
+  可译率: 143/153 = 93.5%（disposition=translate 的可译条目口径）
+  遗漏 1 条（前 200 按来源文件分解）：
+    Deepest Sword_Data/app.info ×1  例: 'Deepest Sword'
+
+===== drova：金标准 2892 条 =====
+  进池率: 2725/2885 = 94.5%（陈旧键 6 条不计——游戏文件已更新）
+  可译率: 2685/2885 = 93.1%（disposition=translate 的可译条目口径）
+  遗漏 143 条（前 200 按来源文件分解）：
+    Drova_Data/sharedassets6.assets ×111  例: 'AI_Set Combat Position'
+    Drova_Data/sharedassets20.assets ×12  例: 'AI_Set Combat Music'
+    Drova_Data/sharedassets2.assets ×10  例: 'GNode(AI_Global Range Check)'
+    Drova_Data/resources.assets ×9  例: 'ABI_Regeneration _InstantHeal'
+    Drova_Data/sharedassets0.assets ×1  例: 'SubQuest_FOA_HelpFrom NPC_Hunter'
+
+===== forgeverse：金标准 695 条 =====
+  进池率: 693/705 = 98.3%
+  可译率: 666/705 = 94.5%（disposition=translate 的可译条目口径）
+  遗漏 1 条（前 200 按来源文件分解）：
+    Forgeverse_Data/level1 ×1  例: 'No'
+
+===== 合计识别率: 12797/12993 = 98.5% =====

@@ -246,7 +246,8 @@ def test_copy_fields_layout_mismatch_fields():
 # ── 字体候选 ────────────────────────────────────────────────
 
 def test_font_ttf_candidate_whitelist():
-    # legacy TTF 白名单：文件不在 → None（TMP SDF 三档取代 legacy 路径）
+    # legacy 白名单：CFF OTF 已弃用（D1 根治 2026-09-04），走别名映射。
+    # _font_ttf_candidate 是 legacy Font 路径的候选解析，TMP SDF 路径不受影响。
     cfg = FontConfig(filename="SimplifiedChinese/NotoSerifCJKsc-Medium.otf")
     cand = _font_ttf_candidate(cfg)
     assert cand is None or cand.is_file()

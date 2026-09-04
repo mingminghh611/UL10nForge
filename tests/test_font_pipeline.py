@@ -295,7 +295,7 @@ def test_run_returns_unified_outcome(tmp_path, monkeypatch):
     monkeypatch.setattr(
         pipeline_module, "install_font_override",
         lambda *a, **k: FontInstallResult(
-            installed=True, filename="NotoSerifCJKsc-Medium.otf",
+            installed=True, filename="NotoSerifCJKsc-Medium.ttf",
             payload_deployed=True, provider_id="mono_font_plugin"))
 
     pipeline = FontCompatibilityPipeline(
@@ -306,6 +306,70 @@ def test_run_returns_unified_outcome(tmp_path, monkeypatch):
     assert outcome.font.installed is True
     assert outcome.coverage is not None
     assert outcome.gate["status"] == "PASS"
+
+
+def test_deploy_runtime_skips_plugin_when_static_covered(tmp_path,
+                                                         monkeypatch):
+    """卡顿根治回归：静态覆盖 COVERED 且无待认证 dynamic_tmp 消费者 →
+    不再部署 BepInEx 插件（插件常驻每秒全对象扫描拖垮帧率），返回
+    static_font_replace 结果 + 警告；publish 门仍 PASS（宁漏勿坏不破坏）。"""
+    from hanhua.core.font import FontConsumer, compute_coverage
+    from hanhua.core.font import pipeline as pipeline_module
+    from hanhua.core.unity.font_replace import FontReplaceResult
+
+    calls: list = []
+
+    def fake_install(*a, **k):
+        calls.append(a)
+        return FontInstallResult(installed=True, provider_supported=True)
+
+    monkeypatch.setattr(pipeline_module, "install_font_override", fake_install)
+    consumers = [FontConsumer(
+        "covered", "tmp_font", static_replaced=True,
+        font_scalars=frozenset(ord(c) for c in "设置"),
+        unity_version="2022.3")]
+    outcome = compute_coverage(consumers, _required())
+    static = FontReplaceResult(
+        replaced=1, consumers=consumers, coverage=outcome,
+        overall="COVERED", incomplete=False)
+
+    pipeline = FontCompatibilityPipeline(
+        _input(tmp_path, required=_required()))
+    font = pipeline.deploy_runtime(pipeline.plan(), static)
+
+    assert calls == []                       # 插件安装零调用
+    assert font.installed is True
+    assert font.provider_id == "static_font_replace"
+    assert font.runtime_verified is True
+    assert any("静态覆盖已完整证明" in w for w in pipeline._warnings)
+    gate = pipeline.evaluate_publish(static, font, outcome,
+                                     allow_unverified_font_candidate=False)
+    assert gate["status"] == "PASS"
+
+
+def test_deploy_runtime_installs_plugin_when_dynamic_tmp_pending(tmp_path,
+                                                                 monkeypatch):
+    """存在未认证 dynamic_tmp 消费者 → 插件兜底仍部署（不能因跳过
+    使动态字体回退 BLOCKED——run() 的 provider 翻转依赖插件在场）。"""
+    from hanhua.core.font import pipeline as pipeline_module
+
+    calls: list = []
+
+    def fake_install(*a, **k):
+        calls.append(a)
+        return FontInstallResult(
+            installed=True, filename="f.ttf", payload_deployed=True,
+            provider_supported=True, provider_id="bepinex5_mono_x64")
+
+    monkeypatch.setattr(pipeline_module, "install_font_override", fake_install)
+    pipeline = FontCompatibilityPipeline(
+        _input(tmp_path, required=_required()))
+    static = _dynamic_static(pipeline.plan())
+
+    font = pipeline.deploy_runtime(pipeline.plan(), static)
+
+    assert len(calls) == 1                   # 动态消费者在场必须装插件
+    assert font.provider_supported is True
 
 
 # ── Phase 5：位图字体注入（apply_bitmap） ───────────────────────

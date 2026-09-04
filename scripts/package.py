@@ -65,6 +65,20 @@ GLOBAL_EXCLUDE_FILES = {
 DIR_INCLUDE_ONLY = {
     "tools": ["bmfont", "Il2CppDumper"],
     "docs": None,               # None = 全部（all record 在下方按名排除）
+    # 字体链（2026-09-04 D1 复发根治收尾）：SDF_Font_Asset 与
+    # TMP_Font_AssetBundles 是静态替换/插件 bundle 源；SimplifiedChinese
+    # 只带 TTF 运行时字体源。CFF OTF（24MB）仅是 scripts/
+    # convert_cff_to_ttf.py 的开发机转换源，运行时不读、不入发行包
+    # （FONT_OPTIONS 白名单只认 TTF；部署闸门拒绝 OTTO 载荷）。
+    "fonts": ["SDF_Font_Asset", "SimplifiedChinese",
+              "TMP_Font_AssetBundles"],
+}
+
+# fonts 目录文件级白名单：SimplifiedChinese 下只带 TTF（OTF 是
+# CFF→TTF 转换器输入，运行时不需要）
+FONTS_KEEP = {
+    "NotoSerifCJKsc-Medium.ttf",
+    "NotoSerifCJKsc-Medium SDF.asset",
 }
 DOCS_EXCLUDE_DIRS = {"all record", "fail record"}
 
@@ -120,6 +134,10 @@ def _walk_include() -> list[Path]:
                 # scripts 文件级白名单：只带 headless 生产入口
                 if rel.parts and rel.parts[0] == "scripts" \
                         and name not in SCRIPTS_FILES_ONLY:
+                    continue
+                # fonts 文件级白名单：SimplifiedChinese 只带 TTF 运行时源
+                if rel.parts[:2] == ("fonts", "SimplifiedChinese") \
+                        and name not in FONTS_KEEP:
                     continue
                 # Il2CppDumper 白名单
                 if rel.parts[:2] == ("tools", "Il2CppDumper") \

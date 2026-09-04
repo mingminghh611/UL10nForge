@@ -1852,7 +1852,7 @@ class Project:
                     runner = IsolatedToolRunner(self.app_dir / "tooling")
                     font_file = (
                         app_root / "fonts" / "SimplifiedChinese"
-                        / "NotoSerifCJKsc-Medium.otf")
+                        / "NotoSerifCJKsc-Medium.ttf")
                     if font_file.is_file():
                         def _bmfont_executor(provider, staging_fnt, plan):
                             return inject_bitmap_font(

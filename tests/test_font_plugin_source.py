@@ -57,7 +57,7 @@ def test_phase3_protocol_v5_per_scalar_verification_mechanisms():
 
     # 协议 v5：逐 scalar 证明 + 会话 + 消费者统计
     assert "private const int HealthProtocolVersion = 5;" in source
-    assert 'PluginVersion = "1.4.0"' in source
+    assert 'PluginVersion = "1.5.0"' in source
     assert 'sessionNonce = Guid.NewGuid().ToString("N")' in source
     assert "LoadRequiredGlyphs" in source
     assert "required-glyphs.json" in source

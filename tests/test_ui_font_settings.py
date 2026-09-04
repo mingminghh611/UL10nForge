@@ -95,7 +95,7 @@ def test_font_settings_ui_removed_and_default_config_intact(
     loaded.load()
     assert loaded.font.enabled is True
     assert loaded.font.filename == \
-        "SimplifiedChinese/NotoSerifCJKsc-Medium.otf"
+        "SimplifiedChinese/NotoSerifCJKsc-Medium.ttf"
 
 
 def test_advanced_local_settings_visible_only_in_local_mode_and_refresh_vram(

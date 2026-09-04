@@ -189,6 +189,23 @@ class FontCompatibilityPipeline:
             # 静态替换成功后部署运行时插件兜底（覆盖动态加载字体）——
             # 插件失败不阻断（静态已生效），记 warning 由调用方附加
             if inputs.capability.provider_supported:
+                # 静态覆盖已完整证明且无动态 TMP 消费者待运行时认证时，
+                # 插件兜底非必需——直接跳过部署（卡顿根治 P0：插件常驻
+                # 每秒全对象扫描拖垮帧率；overall==COVERED 已隐含所有
+                # dynamic_tmp 消费者已认证，跳过不会使任何消费者回退，
+                # 此处 any 判断是防御性显式守卫）。
+                skip_plugin = (
+                    static.coverage is not None
+                    and static.coverage.overall == CoverageState.COVERED
+                    and not any(
+                        c.kind == "dynamic_tmp"
+                        and not c.runtime_provider_available
+                        for c in static.consumers))
+                if skip_plugin:
+                    self._warnings.append(
+                        "运行时字体插件未部署（静态覆盖已完整证明，"
+                        "插件兜底非必需）")
+                    return self._static_font_result(plan, static)
                 try:
                     return install_font_override(
                         inputs.game_dir, inputs.staging, inputs.font_config,

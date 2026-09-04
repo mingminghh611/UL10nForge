@@ -35,7 +35,7 @@ from hanhua.core.models import FontConfig  # noqa: E402
 from hanhua.core.project import Project  # noqa: E402
 
 OUT_BASE = Path(r"D:\游戏")
-_FONT_NAME = "SimplifiedChinese/NotoSerifCJKsc-Medium.otf"
+_FONT_NAME = "SimplifiedChinese/NotoSerifCJKsc-Medium.ttf"
 
 
 def _fake_translate(project) -> int:

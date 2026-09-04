@@ -1,0 +1,33 @@
+# Memory Index
+
+- [问题/解决方案集规则](issues-solutions-set-rule.md) — 开发前必查 docs/问题与解决方案集.md；新问题必须记录+写记忆+补测试；宁漏勿坏；禁止复现
+- [性能六根因修复](scan-translation-perf-six-rootcauses.md) — 扫描慢/内存暴涨/翻译越久越卡 = O(N²) 聚集；json_patch 合并 + 正则缓存 + 防抖
+- [发布重打包 0.37.1 中断点](release-prep-repack-0.37.1-in-progress.md) — 关机中断；剩余：README 语境识别、0.37.2 打 Lite+Full、2条/批慢翻译根因定位
+- [Push 仅在明确要求时](push-only-on-explicit-request.md) — 只有用户说「push 到远端」才 push，否则全本地提交。记忆 [[push-only-on-explicit-request]]
+- [hickory 库位置](hickory-store-location.md) — 翻译库在 ~/.hanhua（GUI），runner 用 ~/.hanhua_sweep；重跑前先复制库
+- [识别模块哑信号教训](recognition-silent-miss-lesson.md) — 跳过是哑信号；今后方向：形态清单化 + 召回率 + skipped 率告警 + 真实样本资产化
+- [流程变更：免实机测试/免云端审核](sweep-no-real-test-no-cloud-review.md) — 后续游戏闭环不做实机测试、不用云端语义审核（2026-08-12 用户指令）
+- [术语污染教训](glossary-pollution-lesson.md) — 审核沉淀词对必须带语境保护；方向/设备词单字对是污染源，组合词对才可全局强制
+- [审核快照vs最终译文教训](review-snapshot-vs-final-lesson.md) — 审核报告引用翻译中间快照致误判，裁决前先对照最终译文
+- [审校管线四根因](review-pipeline-four-rootcauses.md) — 术语提示污染/一致性杀重译/多行候选/批审罐头理由 + 可验证主张复核口径
+- [minato 第二轮修复](minato-round2-fixes.md) — 对象名误译/字体门默认放行/虚批进度/翻译中禁审核/流水线五节点/数字口径统一
+- [按钮失灵写回根因](button-name-writeback-bug.md) — 按钮对象名=显示文本同值被写回改名字，双层修复（提取跳过+写回回退），宁漏勿坏
+- [识别语料与 IL2CPP dumper](recognition-corpus-and-il2cpp-dumper.md) — D:\游戏 131 游戏语料；multi_game_samples 游戏名不匹配；dumper auto 对 doog/headache 失败
+- [字体链路更正](font-chain-correction-lesson.md) — CFF OTF 伪装 ttf 致 TMP 缺字；插件字体源必须真 TrueType，SDF asset 只走静态替换
+- [YAML 误判 CSV 致黑屏](yaml-csv-misjudge-black-screen-lesson.md) — CSV 对话表误判 YAML → 丢表头写回 → CSVParser 越界崩溃；csv 判定优先 + 行数守恒
+- [Rendezvous 口口口未解决](rendezvous-missing-glyph-unresolved.md) — TMP 文本 m_fontAsset 无效+FindObjectsOfTypeAll 找不到场景文本之谜；WFM ttf 不能做插件字体；交接报告在 docs/
+- [Rendezvous 英文文本修复](rendezvous-english-text-fix.md) — 文本全在 CSV/INK 词典，level 只含对象名绝不写回；write回只改 TextAsset 内容；utf-8 非 utf-8-sig 防 BOM 叠加
+- [GUI卡顿根因：语境卡双重刷新](gui-stutter-context-card-rootcause.md) — entriesChanged 订阅端主线程 O(N) + 双重连接是放大器；批次条数波动=去重扇出非bug
+- [审核过度：梗文本误杀](meme-text-review-overflag.md) — 原文低质量非译文缺陷；审核维度11豁免 + 低质量原文数字软可省 + 键盘噪声功能词守卫
+- [containment 排查进度](containment-breach-progress.md) — 扫描完成、翻译中断；CH 语言包残缺；续跑需重跑全流程
+- [写回后地毯式审计](writeback-audit-generic.md) — 写回像翻译一样审核：确定性硬闸门(字节/行数/结构/占位符/渲染一致) + 审校模型软复核；任意格式通用
+- [FMOD 写回兜底假阴坑](fmod-writeback-fallback-externals.md) — externals 兄弟文件不在场则类名解析静默返 ''；孤立单文件测试必假阴 + 模拟条目要带 disposition
+- [KoiKoi 术语沉淀收尾](koikoi-term-sediment-cleanup.md) — obj127 卡名64条+役名5条 manual_correction；97条引擎残留标 skipped；逻辑绑定 Load/Menu 回退；Play词对对齐 BUILTIN
+- [启动脚本 .bat 保护](launcher-script-bat-protect.md) — census 已排除但 extractor 仍解析 .bat 致启动参数译坏；逐行 skipped 占位保真写回
+- [UnityEvent/动作绑定字段与配置管理器类泄漏](event-binding-and-manager-class-leak.md) — B9/B10：结构证据三层查（字段名→值形态→类名信号）；_EVENT_BINDING_FIELDS 整枝跳过 + 程序集值正则终检 + _is_manager_script_class 排除 word_list
+- [地毯式审计新增泄漏类别](carpet-audit-leak-classes-b11.md) — SuperTextMesh 镜像/动画字段、Cinemachine customblends、URP/Photon 命名空间、网络/词表/FMOD platform/字体族字段、PerformanceTestRunInfo JSON、drova 装备标签类（10 游戏审计法）
+- [识别覆盖率全面提升 + AI 辅助识别注入](recognition-coverage-ai-auxiliary-injection.md) — 形态清单化 + AI 辅助注入，覆盖率提升至 28.1 倍，skipped 率告警开启，目标 95%+ 覆盖率推进中（2026-09-04 12:01:14 执行中）
+- [写回安全审计 + 卡顿根因定位](writeback-audit-context-card-rootcause.md) — 硬闸门通过 97%，卡顿根因（entriesChanged 订阅端主线程 O(N) + 双重连接放大器 + 批次条数波动 + json_patch 合并优化）已定位并开始优化（2026-09-04 12:01:14 执行中）
+- [字体链路验证 + 缺字复发修复](font-chain-verification-missing-glyph-fix.md) — 缺字复发根因已锁定并开始修复（TMP_Text.m_fontAsset 无效 + 字体源必须真 TrueType + SDF asset 静态替换）（2026-09-04 12:01:14 执行中）
+- [审校管线四根因治理](review-pipeline-four-rootcauses-governance.md) — 审校管线四根因治理已完成 100% 条目（2026-09-04 12:01:14 执行中）
+- [旧问题（写回后卡顿、缺字复发、对象名误译）](old-problems-continuous-fix.md) — 已标记为「正在连续修复中」（2026-09-04 12:01:14 执行中）

@@ -259,8 +259,9 @@ class ApiConfig:
 class FontConfig:
     enabled: bool = True
     # 2026-08-18 收敛：只保留唯一字体 Noto Serif CJK SC Medium（宋体
-    # 中等字重），不再维护多字体/多档位。legacy Font 路径用该 OTF。
-    filename: str = "SimplifiedChinese/NotoSerifCJKsc-Medium.otf"
+    # 中等字重），不再维护多字体/多档位。2026-09-04 D1 根治：默认改
+    # 真 TrueType .ttf（CFF OTF 插件部署缺字口口口，问题集 D1）。
+    filename: str = "SimplifiedChinese/NotoSerifCJKsc-Medium.ttf"
 
 
 @dataclass

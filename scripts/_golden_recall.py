@@ -179,8 +179,17 @@ def main() -> int:
         found_actionable = 0
         stale = 0
         missed: list[str] = []
+        # KV 桶只对「当前文件确实是 KV 词典载体」的 file_id 生效：
+        # level/DLL 里的 'Potions: {0}/{1}' 是格式串不是词典行——
+        # 无 KV 桶匹配时必须回落到整行/值形态的池匹配，否则已进池
+        # 的条目被误计为遗漏（drova 'Aether: {0}' 实证）。
+        bucket_ids = set(current_keys)
         for (fid, key), texts in kv_groups.items():
-            # 旧库 file_id 带 _Data 前缀而 bucket 是相对名——后缀匹配归一
+            has_bucket = any(fid.endswith(b) or b.endswith(fid)
+                             for b in bucket_ids)
+            if not has_bucket:
+                text_groups.setdefault((fid, texts[0]), []).extend(texts)
+                continue
             exists: bool | None = None
             for bucket, keys in current_keys.items():
                 if fid.endswith(bucket) or bucket.endswith(fid):

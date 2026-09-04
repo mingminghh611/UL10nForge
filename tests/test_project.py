@@ -38,7 +38,7 @@ def test_settings_without_font_section_defaults_to_lenovo():
     settings.load()
 
     assert settings.font.enabled is True
-    assert settings.font.filename == "SimplifiedChinese/NotoSerifCJKsc-Medium.otf"
+    assert settings.font.filename == "SimplifiedChinese/NotoSerifCJKsc-Medium.ttf"
 
 
 def test_settings_font_roundtrip():
