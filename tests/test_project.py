@@ -1056,6 +1056,64 @@ def test_scan_all_keeps_native_results_when_required_tool_fails(tmp_path, monkey
     assert metadata.read_bytes() == before
 
 
+def test_scan_all_reports_recognition_coverage_gaps(tmp_path, monkeypatch):
+    """覆盖率接线（0.38.0）：scan_all 末尾跑轻量 census 差集——census
+    看到但提取池没有的文本按 _string_disposition 归因聚合进
+    report.recognition_gaps，未解释缺口是识别盲区的工作队列（哑信号
+    可观测）。池内文本不产生缺口。"""
+    game = _make_mono_unity_game(tmp_path)
+    # census 载体：.bin 不在已覆盖后缀清单，字节文本会被普查命中；
+    # "Player dead" 进不了任何提取池（无 KV/JSON 结构）→ unexplained；
+    # "Localized Name Here" 同时写进 JSON（scan 会提取）→ 不成缺口
+    probe = game / "Fixture Game_Data" / "strings_probe.bin"
+    probe.write_bytes(b"Player dead here\x00")
+    json_path = game / "Localization" / "en.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text('{"title":"Visible Naming"}', encoding="utf-8")
+    project = Project.open_game_dir(game, tmp_path / "app")
+    monkeypatch.setattr(project, "scan", lambda: 1)
+    monkeypatch.setattr(
+        project, "scan_v2",
+        lambda progress_cb=None, csv_overwrite_source=False: 0)
+
+    report = project.scan_all()
+
+    gaps = report.recognition_gaps
+    assert gaps, "census 载体存在时缺口摘要不得为空"
+    assert gaps["gap_total"] >= 1
+    assert gaps["unexplained"] >= 1
+    assert any("Player dead" in sample
+               for sample in gaps["unexplained_samples"])
+    # 池内文本（JSON 已提取）不应成为缺口
+    assert all("Visible Naming" not in sample
+               for sample in gaps["unexplained_samples"])
+    # 持久化 + resume 恢复（与 il2cpp_cross_check 同模式）
+    assert project.store.get_profile_value("recognition_coverage") == gaps
+    reopened = Project.open_game_dir(game, tmp_path / "app")
+    assert reopened._last_scan_gaps == gaps
+
+
+def test_scan_all_coverage_gap_failure_degrades_silently(tmp_path, monkeypatch):
+    """覆盖率是观测通道不是闸门：census 抛异常时静默降级（空摘要），
+    scan_all 正常完成、报告其余字段不受影响（宁漏勿坏）。"""
+    game = _make_mono_unity_game(tmp_path)
+    project = Project.open_game_dir(game, tmp_path / "app")
+    monkeypatch.setattr(project, "scan", lambda: 1)
+    monkeypatch.setattr(
+        project, "scan_v2",
+        lambda progress_cb=None, csv_overwrite_source=False: 0)
+
+    import hanhua.core.recognition_report as rr
+    def broken_gaps(*args, **kwargs):
+        raise RuntimeError("census boom")
+
+    monkeypatch.setattr(rr, "coverage_gaps", broken_gaps)
+    report = project.scan_all()
+
+    assert report.recognition_gaps == {}
+    assert report.unblocked is True
+
+
 def test_scan_all_degrades_tool_analysis_on_dumper_version_gap(tmp_path, monkeypatch):
     """Il2CppDumper 二进制不支持 metadata v39，而 native 解析器已验证支持时，
     tool_analysis 降级为 skipped（审计保留 failed 记录），不阻断流水线。#183"""

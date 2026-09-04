@@ -967,6 +967,31 @@ def find_asset_files(
 
 _MAX_RAW_STRING_BYTES = 4096
 
+# CJK 表意文字区（2 字符显示词豁免用）：统一表意 + 扩展 A + 兼容区。
+# 假名/谚文不含——纯假名 2 字符串与噪声形态区分度低，保持拒绝。
+_CJK_IDEO_RANGES = (
+    (0x3400, 0x4DBF),
+    (0x4E00, 0x9FFF),
+    (0xF900, 0xFAFF),
+)
+
+
+def _is_cjk_display_pair(text: str) -> bool:
+    """恰好 2 字符且全部是 CJK 表意文字（'同意'/'返回'/'設定' 类 UI 词）。
+
+    min_len 按字符数计，但 CJK 每字 3 字节——2 字符 CJK 串 6 字节，与
+    3 字符 ASCII 同量级，按字符数拒绝会整类漏掉真 UI 文本（electric-
+    trains obj1558 '同意' 实锤：typetree 失败文件 raw 扫描是唯一通道，
+    合法长度头被 min_len=3 拒绝 → 整对象零条目）。混合 ASCII 的 2 字符
+    串（'ok'/'a汉'）仍拒。65 游戏普查：2 字符 CJK 对齐串 134 处/23 词
+    全部是真显示文本，二进制噪声不会撞出「合法长度头 + 全表意字符 +
+    零填充」形态。
+    """
+    if len(text) != 2:
+        return False
+    return all(any(lo <= ord(char) <= hi for lo, hi in _CJK_IDEO_RANGES)
+               for char in text)
+
 
 def scan_strings(raw: bytes, min_len: int = 3,
                  max_len: int = _MAX_RAW_STRING_BYTES) -> list[tuple[int, str]]:
@@ -986,7 +1011,10 @@ def scan_strings(raw: bytes, min_len: int = 3,
             text = chunk.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        if "\x00" in text or len(text.strip()) < min_len:
+        if "\x00" in text:
+            continue
+        stripped = text.strip()
+        if len(stripped) < min_len and not _is_cjk_display_pair(stripped):
             continue
         if not all(char.isprintable() or char in "\n\r\t" for char in text):
             continue

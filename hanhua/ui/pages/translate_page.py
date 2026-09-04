@@ -765,6 +765,22 @@ class TranslatePage(QWidget):
             # references 的 terms 机制带出译例
             knowledge = KnowledgeBase(self.state.app_dir / "knowledge.db")
             knowledge_pairs = knowledge.format_reference_pairs()
+            # AI 辅助识别（0.38.0 任务二④）：候选层二次分类在翻译前
+            # 执行——升格条目（typetree_candidate/prefilter 经模型判
+            # display）必须在本函数后文 entries 构建前落库，才能进本次
+            # run_scope。fail-closed：模型缺失/请求失败只留日志，
+            # 绝不阻断翻译主链（识别是增益环节，宁漏勿坏）。
+            try:
+                from hanhua.core.ai_recognition import run_ai_recognition
+                ai_report = run_ai_recognition(
+                    store, self.state.resource_dir, on_log=on_log)
+                if ai_report.upgraded:
+                    signals.note.emit(
+                        "running",
+                        f"AI 辅助识别：新升格 {ai_report.upgraded} 条候选文本"
+                        f"进入本次翻译")
+            except Exception as exc:  # noqa: BLE001 增益环节不阻断主链
+                on_log(f"AI 辅助识别跳过：{exc}")
             # 专名收集仅用于翻译后术语库学习（learn_proper_names）
             entries0 = [self._entry_from_row(r) for r in store.get_entries()]
             collected_names = collect_known_names(

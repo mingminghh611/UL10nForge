@@ -20,7 +20,7 @@ from __future__ import annotations
 import functools
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 
 from hanhua.core.census import CensusResult, sweep_game
 from hanhua.core.models import STATUS_SKIPPED, TextEntry
@@ -116,6 +116,68 @@ def _string_disposition(text: str) -> str:
     if _is_script_code_line(text):
         return "explained:code_line"
     return "unexplained"
+
+
+# 覆盖率接线（0.38.0）：scan_all 末尾的轻量 census 差集上限——
+# census 全树扫描本身有预算（_MAX_RUNS_TOTAL=200k），差集逐条归因
+# 也受此上限约束；超限截断并如实计数，报告不假装扫完。
+_MAX_COVERAGE_GAPS = 20_000
+
+
+def coverage_gaps(game_dir: str | Path, pool_originals: Iterable[str],
+                  *, exclude_roots: Iterable[str | Path] = ()
+                  ) -> CensusResult:
+    """轻量覆盖率缺口：census 全树普查 − 提取池 = 未覆盖文本。
+
+    scan_all 专用（build_report 已内置同口径差集，不要重复调用）：
+    提取池直接复用 store 已落库条目原文（零额外提取开销），census
+    沿用独立字节级双通道。返回的 CensusResult.hits 已剔除进池命中，
+    每个残差带 _string_disposition 归因（disposition 属性；hit 是
+    frozen dataclass，归因在残差构造时计算并挂在扩展字段上）。
+    """
+    from hanhua.core.census import sweep_game as _sweep
+    pool = frozenset(pool_originals)
+    result = _sweep(game_dir, exclude_roots=exclude_roots)
+    gaps: list[GapItem] = []
+    for hit in result.hits:
+        if hit.text in pool:
+            continue
+        gaps.append(GapItem(hit.rel_path, hit.offset, hit.encoding,
+                            hit.text, _string_disposition(hit.text)))
+        if len(gaps) >= _MAX_COVERAGE_GAPS:
+            result.runs_truncated_total += max(
+                0, len(result.hits) - len(pool) - len(gaps))
+            break
+    result.hits = gaps  # CensusResult.hits 是可变 list
+    return result
+
+
+def coverage_summary(gaps: Iterable[GapItem]) -> dict:
+    """缺口归因聚合 → AnalysisReport 字段可序列化摘要。
+
+    unexplained 是盲区工作队列（等待新载体登记或新规则），单列
+    而非折算进覆盖率（归因规则宽严不应影响覆盖率口径）；samples
+    按可疑度排序（含空格长句优先）供 UI/日志展示。"""
+    gaps = list(gaps)
+    explained: dict[str, int] = {}
+    unexplained: list[GapItem] = []
+    for gap in gaps:
+        if gap.disposition.startswith("explained:"):
+            reason = gap.disposition.split(":", 1)[1]
+            explained[reason] = explained.get(reason, 0) + 1
+        else:
+            unexplained.append(gap)
+    return {
+        "gap_total": len(gaps),
+        "explained": explained,
+        "unexplained": len(unexplained),
+        "unexplained_samples": [
+            g.text for g in sorted(
+                unexplained,
+                key=lambda g: (" " in g.text and len(g.text) >= 8,
+                               len(g.text)),
+                reverse=True)[:20]],
+    }
 
 
 def _run_extractor(fn: Callable, path: Path, rel: str,

@@ -701,6 +701,11 @@ class AnalysisReport:
     # R5 提取侧静默跳过留档：{跳过形态: 计数}——continue 不产生条目的
     # 串聚合可见（哑识别可观测，召回率审查数据源）
     skipped_reasons: dict[str, int] = field(default_factory=dict)
+    # 覆盖率缺口摘要（0.38.0）：census 全树普查 − 提取池的残差归因
+    # 聚合（gap_total/explained/unexplained/unexplained_samples）——
+    # 「census 看到的文本有多少被识别链路覆盖」的链路级哑信号，
+    # unexplained 大即识别盲区（工作队列，见 recognition_report）
+    recognition_gaps: dict = field(default_factory=dict)
 
 
 class Project:
@@ -746,6 +751,8 @@ class Project:
         self._last_analysis_report: AnalysisReport | None = None
         self._last_scan_morphology: tuple[tuple[str, int, int], ...] = ()
         self._last_scan_morph_warnings: tuple[str, ...] = ()
+        # 覆盖率缺口摘要（scan_all 末尾计算并持久化；resume 恢复）
+        self._last_scan_gaps: dict = {}
         # R5：提取侧静默跳过聚合（scan + scan_v2 合并；scan_all 开始时清零）
         self._last_scan_skipped: dict[str, int] = {}
         self._last_il2cpp_input_hashes: tuple[str, str] | None = None
@@ -764,6 +771,9 @@ class Project:
             "source_manifest")
         self._last_text_scan_manifest = self.store.get_profile_value(
             "text_scan_manifest")
+        _gaps = self.store.get_profile_value("recognition_coverage")
+        if isinstance(_gaps, dict):
+            self._last_scan_gaps = _gaps
         # IL2CPP 交叉验证证据持久化恢复：write_all 闸门要求 report 携带
         # il2cpp_dumper 交叉验证结果（native_total/agreement 等）——resume
         # 跳过扫描时从库恢复轻量 report（ffs 续跑实证 2026-08-12：写回被拒
@@ -814,6 +824,21 @@ class Project:
             "il2cpp_input_hashes", self._last_il2cpp_input_hashes)
         self.store.set_profile_value(
             "text_scan_manifest", self._last_text_scan_manifest)
+
+    def _coverage_gap_report(self, pool_originals) -> dict:
+        """覆盖率缺口摘要（0.38.0）：轻量 census 差集 + 归因聚合。
+
+        失败静默降级（{}）：覆盖率是观测信号不是闸门，census 在畸形
+        文件上抛异常不应阻断扫描完成（宁漏勿坏同样适用于诊断通道）。"""
+        try:
+            from hanhua.core.recognition_report import (coverage_gaps,
+                                                        coverage_summary)
+            gaps = coverage_gaps(
+                self.game_dir, pool_originals,
+                exclude_roots=(self.out_dir,))
+            return coverage_summary(gaps.hits)
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _fingerprint(self) -> GameFingerprint:
         return fingerprint_game(
@@ -1054,6 +1079,10 @@ class Project:
         completable = input_protected and plan_is_completable(route)
         emit("complete", "succeeded" if unblocked else "blocked",
              "分析可继续" if unblocked else "存在必需能力阻断")
+        # 覆盖率缺口（0.38.0）：census 全树普查 − 提取池（复用已落库
+        # 条目，零额外提取开销）。观测通道：失败/超预算静默降级，不阻断。
+        self._last_scan_gaps = self._coverage_gap_report(
+            row["original"] for row in rows)
         report = AnalysisReport(
             fingerprint=fingerprint,
             tool_statuses=base.tool_statuses,
@@ -1071,6 +1100,7 @@ class Project:
             warnings=tuple(warnings),
             morphology_stats=self._last_scan_morphology,
             skipped_reasons=dict(self._last_scan_skipped),
+            recognition_gaps=dict(self._last_scan_gaps),
         )
         self._last_analysis_report = report
         if report.input_protected and report.unblocked:
@@ -1115,6 +1145,10 @@ class Project:
             })
         else:
             self.store.set_profile_value("il2cpp_cross_check", None)
+        # 覆盖率摘要持久化（resume 恢复用；与三清单同一模式）
+        self.store.set_profile_value(
+            "recognition_coverage",
+            self._last_scan_gaps or None)
         self._store_scan_state()
         return report
 

@@ -626,6 +626,7 @@ class HomePage(QWidget):
             Toast.show(self, f"分析通过：{summary}", "success")
             self.window.navigate("review")
             self._warn_skip_rate(report)
+            self._warn_unexplained_gaps(report)
         else:
             self.drop_zone.set_state("blocked")
             fingerprint = getattr(report, "fingerprint", None)
@@ -667,6 +668,25 @@ class HomePage(QWidget):
             f"注意：本作有 {skipped} 条候选文本被识别器跳过（{detail}）。\n"
             f"这些文本不会被翻译——如发现游戏内文本未汉化，"
             f"可能是跳过策略过严导致，请在 Issue 中反馈。",
+            "warning")
+
+    def _warn_unexplained_gaps(self, report) -> None:
+        """覆盖率盲区告警（0.38.0 覆盖率接线）：census 全树普查 − 提取
+        池的未解释残差 = 识别链路盲区（既没有载体覆盖、也没有规则归因
+        的文本）。阈值：unexplained ≥ 50 且 ≥ census 缺口总量 10% 时弹
+        warning（top 样本展示），不阻断。"""
+        gaps = getattr(report, "recognition_gaps", None) or {}
+        total = gaps.get("gap_total", 0)
+        unexplained = gaps.get("unexplained", 0)
+        if unexplained < 50 or total == 0 or unexplained < total * 0.1:
+            return
+        samples = gaps.get("unexplained_samples") or []
+        sample_text = "\n".join(
+            f"· {s[:40]}" for s in samples[:3])
+        Toast.show(
+            self,
+            f"注意：普查发现 {unexplained} 条文本未进入识别池且无法归因"
+            f"（共 {total} 条缺口）——可能是识别盲区。\n{sample_text}",
             "warning")
 
     def _set_busy(self, busy: bool):

@@ -513,6 +513,39 @@ def test_scan_strings_filters_garbage():
     assert all(s != "ok" for s in texts)      # 过短不采
 
 
+def test_scan_strings_keeps_two_char_cjk_display_pair():
+    # electric-trains obj1558 真实字节（问题集 B12）：typetree 失败文件的
+    # raw 扫描是唯一提取通道，2 字符 CJK '同意'（6 字节）有合法长度头
+    # （int32=6 @144，数据 @148-154，2B 零填充），曾被 min_len=3（按字符
+    # 数计）整类拒绝 → 整对象零条目。
+    raw = bytes.fromhex(
+        "0000000017000000000000000100000001000000eb0000000000000000000000"
+        "0000000000000000000000000000803ff5f4743fb2b1313f0000803f00000000"
+        "0000000000000000000000000000000001000000000000000200000060000000"
+        "000000002d000000000000000000000000000000100100000400000000000000"
+        "000000000000000000000000cdcc4c3f06000000e5908ce6848f0000")
+    assert scan_strings(raw) == [(148, "同意")]
+
+
+def test_scan_strings_two_char_relaxation_is_cjk_only():
+    # 豁免只给纯 CJK 表意 2 字符：ASCII/混合/假名 2 字符串仍拒
+    # （与二进制噪声形态区分度不足，宁漏勿坏）。
+    assert scan_strings(b"\x00\x01\x02\x03" + _with_len("ok")) == []
+    assert scan_strings(b"\x00\x01\x02\x03" + _with_len("a汉")) == []
+    assert scan_strings(b"\x00\x01\x02\x03" + _with_len("ああ")) == []
+
+
+def test_raw_scan_keeps_two_char_cjk_single_visible_object():
+    # electric-trains obj1558 全链路：'同意' 是对象唯一字符串
+    # （is_single_visible 通道）——修复前该对象产出零条目。
+    entries = _raw_string_entries("f1", 1558, _with_len("同意"), {})
+
+    assert len(entries) == 1
+    assert entries[0].original == "同意"
+    assert entries[0].status == "pending"
+    assert entries[0].meta["role"] == "display"
+
+
 def test_scan_strings_requires_aligned_header_and_zero_padding():
     valid = struct.pack("<I", 5) + b"Hello" + b"\x00\x00\x00"
     unaligned_false_positive = b"X" + struct.pack("<I", 3) + b"`\tB"
