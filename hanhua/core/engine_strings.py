@@ -119,7 +119,12 @@ _ENGINE_NAMING_PATTERNS = [
 
 _ENGINE_PATTERNS = [
     re.compile(r"^;"),                                              # ;Gamepad
-    re.compile(r"[;&].*[;&]"),                                      # Keyboard&Mouse;Gamepad 组合绑定
+    # 组合绑定 = **单 token 内** ≥2 分隔符（Keyboard&Mouse;Gamepad）。
+    # 分隔符间禁空白（[;&]\S*[;&]）：跨 token 的 ;/& 是句子标点——
+    # 菜单热键 '&137 Save & Quit'（&后字母=快捷键标记，wicked 实证）与
+    # ink 对话 'Cooking Oil; Sold!'（Rendezvous 实证）是真显示文本，
+    # 旧的无空白约束缺失把它们当绑定误杀（B20）。
+    re.compile(r"[;&]\S*[;&]"),                                     # Keyboard&Mouse;Gamepad 组合绑定
     re.compile(r"^[0-9a-fA-F]{32}$"),                               # 32 位哈希
     re.compile(r"^[0-9a-fA-F]{40}$"),                               # 40 位哈希
     re.compile(r"\bto\b.*[-–—]\s*(vertical|horizontal|diagonal|radial)$", re.I),

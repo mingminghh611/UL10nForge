@@ -720,6 +720,15 @@ def test_is_engine_string():
     assert is_engine_string_gated("Skull")
     assert not is_engine_string_gated("monologuetable")
     assert _is_engine_string("Keyboard&Mouse")   # 组合绑定形态仍在 core
+    # B20（wicked/Rendezvous 实证 2026-09-05）：组合绑定 pattern 只拦
+    # **单 token 内** ≥2 分隔符（Keyboard&Mouse;Gamepad）；跨 token 的 ;/& 是
+    # 句子标点——菜单热键 '&137 Save & Quit'（&后字母=快捷键标记）与
+    # ink 对话 'Cooking Oil; Sold!' 是真显示文本，不得按绑定误杀
+    assert not _is_engine_string("&137 Save & Quit")
+    assert not _is_engine_string(
+        "^Man: Cooking Oil; Sold! Standard Rice; Sold! Only low quality rice, oil, and sugar left!")
+    assert _is_engine_string("Keyboard&Mouse;Gamepad")
+    assert _is_engine_string("Keyboard&&Mouse")
     assert not _is_engine_string("Hello player")
     assert not _is_engine_string("要活下去")
 
