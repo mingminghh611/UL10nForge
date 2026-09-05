@@ -1282,6 +1282,7 @@ def run_game(game_dir: Path, *, batch: int | None = None,
             project.store, project.game_dir, project.out_dir,
             run_model=True, app_dir=PROJECT_ROOT,
             font_enabled=bool(getattr(settings.font, "enabled", False)),
+            v2_result=writeback_result.get("v2") if writeback_result else None,
             on_note=lambda s: print(f"  {s}"))
         try:
             (out_writeback / "audit.txt").write_text(

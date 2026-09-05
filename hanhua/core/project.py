@@ -1851,8 +1851,23 @@ class Project:
             # typetree_unavailable 全拒）。字体管线复用同一实例
             # （load_dll 122 个程序集代价高，构建两次翻倍启动耗时）。
             tt_generator = self._build_typetree_generator(fingerprint)
+            # AI 写回分诊（0.39.0 M2）：仅在模型真实在场时启用（缺席 →
+            # 分诊层不参与，写回行为与 0.38.0 一致——Lite 通道/模型未装
+            # 环境零变化）。在场但批内失败由分诊层内部 fail-closed
+            # （review 保守跳过），不在此处预先吞掉。
+            triage_service = None
+            triage_app_dir = None
+            try:
+                from hanhua.core.review_server import ReviewModelService
+                _triage_spec = ReviewModelService(self.app_dir)._spec()
+                if _triage_spec.is_available:
+                    triage_app_dir = self.app_dir
+            except Exception:  # noqa: BLE001 模型探测失败 = 不启用分诊
+                triage_app_dir = None
             v2 = write_back_v2(self.store, self.game_dir, staging,
-                               typetree_generator=tt_generator)
+                               typetree_generator=tt_generator,
+                               triage_app_dir=triage_app_dir,
+                               triage_service=triage_service)
             writer_outcome = v2.outcome
             # W3 运行时排除表：静态写回被回退（保留原文防断链）的逻辑键
             # 原文——插件翻译表必须剔除，否则游戏运行时被插件换成中文 →

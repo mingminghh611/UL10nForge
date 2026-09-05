@@ -157,6 +157,8 @@ class TranslatePage(QWidget):
         self._active_run: _TranslationRun | None = None
         self._running = False
         self._write_running = False
+        # 写回预演（0.39.0 M4，Dry Run）在跑标志——与正式写回/翻译互斥
+        self._dry_run_running = False
         self._write_terminal_message = ""
         self._last_stats = None
         self._stream_last_done = 0
@@ -390,6 +392,16 @@ class TranslatePage(QWidget):
         self.partial_check.setToolTip(
             "存在拒绝/截断条目时强制发布（默认阻断，不勾选）")
         self.partial_check.setAccessibleName("允许部分写入并发布")
+        # 写回预演按钮（0.39.0 M4，设计文档 §62「分析写回但不修改游戏」）：
+        # 走 Worker 后台跑 build_writeback_plan（与正式写回同一分类链、
+        # 零磁盘零 store 副作用），报告四类计数进日志面板。预演不替代
+        # 写回守卫——按钮常亮可先看风险面，确认后仍点「写回游戏」。
+        self.dry_run_btn = QPushButton("写回预演")
+        self.dry_run_btn.setMinimumHeight(44)
+        self.dry_run_btn.setAccessibleName("写回预演（只分析不修改游戏）")
+        self.dry_run_btn.setToolTip(
+            "只分析不写盘：预计写回/需要人工/拒绝/高风险四类计数，"
+            "与正式写回同一套判定规则")
         # 2026-08-22 用户指令：checkbox 旁加几个字的小说明
         self.partial_hint = QLabel("有拒绝/截断时仍可发布")
         self.partial_hint.setProperty("class", "subtitle")
@@ -403,6 +415,7 @@ class TranslatePage(QWidget):
         ctl.addStretch(1)
         ctl.addWidget(self.partial_check)
         ctl.addWidget(self.partial_hint)
+        ctl.addWidget(self.dry_run_btn)
         ctl.addWidget(self.reveal_btn)
         ctl.addWidget(self.play_btn)
         lay.addLayout(ctl)
@@ -420,6 +433,7 @@ class TranslatePage(QWidget):
         self.stop_btn.clicked.connect(self.stop)
         self.retry_btn.clicked.connect(self.retry_failed)
         self.write_btn.clicked.connect(self.write_back)
+        self.dry_run_btn.clicked.connect(self.dry_run_writeback)
         self.play_btn.clicked.connect(self.launch_game)
         self.reveal_btn.clicked.connect(self.reveal_output)
         self.copy_log_btn.clicked.connect(self._copy_log)
@@ -625,6 +639,9 @@ class TranslatePage(QWidget):
             return
         if self._write_running:
             Toast.show(self, "正在写回文件，请稍候再开始翻译", "warning")
+            return
+        if self._dry_run_running:
+            Toast.show(self, "写回预演进行中，请稍候", "warning")
             return
         api = replace(self.state.api)
         if (api.mode != "local"
@@ -1481,9 +1498,88 @@ class TranslatePage(QWidget):
         self.start()
 
     # ── 写回 ──
+    def dry_run_writeback(self):
+        """写回预演（0.39.0 M4，§62）：只分析不落盘——后台跑
+        build_writeback_plan（与 write_back_v2 / write_back_text 同一
+        分类链、零磁盘零 store 副作用），报告进日志面板。不替代正式
+        写回守卫（unblocked/质量门仍由 write_back() 把关），只是把
+        正式写回的分类结果提前完整呈现。"""
+        if self.state.project is None:
+            Toast.show(self, "请先在首页打开游戏文件夹", "warning")
+            return
+        if self._write_running:
+            Toast.show(self, "正在写回文件，预演请等写回完成", "warning")
+            return
+        if self._dry_run_running:
+            Toast.show(self, "预演正在进行，请稍候", "warning")
+            return
+        project = self.state.project
+        generation = self.state.project_generation
+        self._dry_run_running = True
+        self.dry_run_btn.setEnabled(False)
+        self.log_view.appendPlainText("正在生成写回预演（不修改游戏）…")
+
+        def run_dry_run():
+            with self.state.project_lease(project, generation) as acquired:
+                if not acquired:
+                    return None
+                from hanhua.core.unity.writeback_plan import (
+                    build_writeback_plan)
+                # 分诊服务与正式写回同源探测（write_all 1860-1866 同款）：
+                # 模型在场才启用，缺席 → 分诊层不参与（预演口径 = 正式
+                # 写回口径）。store=None 由 build_writeback_plan 内部保证
+                # （判定缓存不落库，预演零副作用）。
+                triage_app_dir = None
+                try:
+                    from hanhua.core.review_server import (
+                        ReviewModelService)
+                    _spec = ReviewModelService(
+                        self.state.resource_dir)._spec()
+                    if _spec.is_available:
+                        triage_app_dir = self.state.resource_dir
+                except Exception:  # noqa: BLE001 模型探测失败 = 不启用
+                    triage_app_dir = None
+                return build_writeback_plan(
+                    project.store, project.game_dir,
+                    triage_app_dir=triage_app_dir)
+
+        worker = Worker(run_dry_run)
+        worker.signals.finished.connect(
+            lambda plan, p=project, g=generation:
+            self._on_dry_run_done(plan)
+            if plan is not None and self.state.is_current_project(p, g)
+            else None)
+        worker.signals.error.connect(
+            lambda err, p=project, g=generation:
+            (self.log_view.appendPlainText(f"写回预演失败：{err}"),
+             Toast.show(self, f"写回预演失败：{err}", "error"))
+            if self.state.is_current_project(p, g) else None)
+        # 无论结果如何（含项目已切换被丢弃的 plan=None）都要复位按钮
+        worker.signals.finished.connect(self._on_dry_run_drained)
+        worker.signals.error.connect(self._on_dry_run_drained)
+        self._pool.start(worker)
+
+    def _on_dry_run_drained(self, *_args):
+        self._dry_run_running = False
+        self.dry_run_btn.setEnabled(True)
+
+    def _on_dry_run_done(self, plan):
+        self.log_view.appendPlainText(plan.summary())
+        if plan.planned_total == 0 and plan.rejected == 0 \
+                and plan.high_risk == 0 and plan.auto_revert == 0:
+            Toast.show(self, "预演完成：没有可写的译文条目", "warning")
+        else:
+            Toast.show(
+                self,
+                f"预演完成：预计写回 {plan.planned_total} 条"
+                f"（高风险 {plan.high_risk + plan.auto_revert}）", "success")
+
     def write_back(self):
         if self._write_running:
             self.log_view.appendPlainText("写回正在进行，请等待当前任务完成")
+            return
+        if self._dry_run_running:
+            self.log_view.appendPlainText("写回预演正在进行，请等待完成")
             return
         report = self.state.analysis_report
         if report is None or not report.unblocked:
@@ -1593,9 +1689,10 @@ class TranslatePage(QWidget):
             # 与 runner all_record_runner.py 同源：第 1 层确定性结构审计
             # （字节/行数/结构/占位符/渲染一致，任何 FAIL → needs_rewrite
             # 阻断本轮闭环）+ 第 2 层审校模型软复核（Qwen3.5-4B，只审计
-            # 第 1 层 PASS 且有差异的文件，FLAG 不硬拦）。审计只读对比
-            # 源目录 vs 发布目录，不修改任何文件；模型不可用优雅降级为
-            # 只确定性审计（GUI 场景不阻断发布，审计报告留档）。
+            # 第 1 层 PASS 且有差异的文件，FLAG 不硬拦）+ 第 2 层 b 二进制
+            # 对象证据卡复核（0.39.0 M3，v2_result 由 write_all 返回值带出）。
+            # 审计只读对比源目录 vs 发布目录，不修改任何文件；模型不可用
+            # 标记 model_unavailable 阻断发布（与 runner 同口径）。
             try:
                 if signals.audit:
                     signals.audit.emit(
@@ -1607,6 +1704,7 @@ class TranslatePage(QWidget):
                     project.store, project.game_dir, project.out_dir,
                     run_model=True, app_dir=self.state.resource_dir,
                     font_enabled=bool(getattr(font_config, "enabled", False)),
+                    v2_result=result.get("v2") if result else None,
                     on_note=lambda s: signals.audit.emit("info", s)
                     if signals.audit else None)
                 report_text = render_audit_report(

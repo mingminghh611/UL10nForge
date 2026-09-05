@@ -22,6 +22,7 @@ from hanhua.core.paths import resolve_relative_under
 from hanhua.core.placeholders import (_IDENTIFIER, is_code_identifier,
                                       is_key_style_identifier)
 from hanhua.core.unity import il2cpp, mono_dll
+from hanhua.core.unity import structural_fields
 
 
 def _asset_file_name(obj) -> str:
@@ -69,25 +70,15 @@ def _entries_for_object_identity(
     return items
 
 
-# ── 不可变字段集合（写回安全闸门 P0-4） ──
+# ── 不可变字段集合（写回安全闸门 P0-4）──
+# M1（2026-09-05 0.39.0）：单一源迁移——清单本体移至 structural_fields.py，
+# 与 extractor 扫描端拦截、logic_audit 语义回退三处共用同一权威源，
+# 杜绝手工同步漏加（B15 三处分别补的教训）。
 # 这些字段是 key/标识符/引用/地址/脚本绑定，永远不能被文本写回改动。
 # 只保护带 m_ 的 Unity 惯例字段：裸字段名（如 "name"）在自定义对象里
 # 可能是真实显示文本，误拦截会造成漏写而不是误写。
-_IMMUTABLE_FIELD_NAMES = frozenset({
-    "m_Name",                          # Object 名
-    "m_Key", "m_Id", "m_EntryID",      # StringTable Entry / 各类稳定 ID
-    "m_GUID",                          # 资产 GUID
-    "m_FileID", "m_PathID",            # PPtr 引用
-    "m_Path", "m_Address",             # 资源/文件地址
-    "m_ControlPath", "m_Action", "m_ActionMap",   # Input System 绑定
-    "m_ExpectedControlType", "m_Groups",           # B15：InputActionAsset
-                                       # 控件类型/控制方案组（snowday 实证
-                                       # 'Button'→'按钮' 全部按键失灵）
-    "m_Script",                        # MonoBehaviour 脚本引用
-    "m_ClassName", "m_Namespace",      # 脚本类名
-    "m_LocaleIdentifier", "m_LocaleCode",          # Localization locale
-    "m_SharedData",                    # StringTable 表级共享引用
-})
+_IMMUTABLE_FIELD_NAMES = structural_fields.IMMUTABLE_FIELD_NAMES
+
 
 
 def _is_immutable_field_name(name: str) -> bool:
@@ -181,6 +172,12 @@ class WriteResult:
     # 串）。与 logic_reverted_sources 一起进运行时排除表；拒绝本身仍走
     # rejected 闸门（P0-2 阻断默认发布），这里只补排除语义。
     rejected_sources: set[str] = field(default_factory=set)
+    # M3（0.39.0）：二进制对象写回证据卡——每个被成功写回的对象一张卡
+    # （文件/对象/类型/逐处改动 原文→译文），供写后审计第 2 层模型软
+    # 复核（writeback_audit 二进制证据卡审计）。确定性层（重开验证/字节
+    # 守恒/占位符守恒）已在写回现场完成，证据卡只承担语义复核输入；
+    # 只记成功落盘（note_written 同口径）的改动，拒绝/回退不产生卡。
+    object_evidence: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
         if self.entries and not self.attempted:
@@ -261,6 +258,36 @@ class WriteResult:
             self.logic_reverted_items.append(
                 f"{reason}:「{original[:36]}」"
                 f"→「{str(entry.get('translation', ''))[:36]}」({locator})")
+
+
+# M3（0.39.0）：二进制对象写回证据卡上限——每个 bundle 几百对象 ×
+# 每对象几处改动，上万卡全量送模型既慢又贵；审计层按批抽样复核，
+# 卡本身只是审计输入不是写回依据，截断不影响写回安全（确定性层
+# 已在写回现场完成全量验证）。
+_EVIDENCE_CARD_LIMIT = 20000
+
+
+def _note_object_evidence(result: WriteResult, *, rel_path: str,
+                          asset_file: str, path_id: int, type_name: str,
+                          changes: list[tuple[str, str, str]]) -> None:
+    """记一张二进制对象写回证据卡（M3，写后审计第 2 层输入）。
+
+    changes：[(定位描述, 原文, 译文)]——typetree 用字段路径、rawstr 用
+    偏移、DLL/metadata 用记录定位。只记真实发生的改动（调用点在
+    verify 通过 + note_written 之前/同口径），拒绝/回退不产生卡。
+    """
+    if not changes or len(result.object_evidence) >= _EVIDENCE_CARD_LIMIT:
+        return
+    result.object_evidence.append({
+        "rel_path": rel_path or str(asset_file or ""),
+        "asset_file": str(asset_file or ""),
+        "path_id": int(path_id),
+        "type": str(type_name or ""),
+        "changes": [
+            (str(where), str(orig), str(trans))
+            for where, orig, trans in changes
+            if str(trans) != str(orig)],
+    })
 
 
 # 截断提示符：TMP 动态字体可能缺「…」字形（A-主题5-2 递归报错实证），
@@ -996,13 +1023,24 @@ def _select_write_items(items: list[tuple[dict, dict]], result: WriteResult,
 
 def write_back_v2(store: ProjectStore, game_dir: Path, out_dir: Path,
                   progress_cb: Callable | None = None,
-                  typetree_generator=None) -> WriteResult:
+                  typetree_generator=None,
+                  triage_service=None, triage_app_dir=None) -> WriteResult:
     """写回全部 v2 类条目（资源/DLL/metadata）到 out_dir 副本。
 
     typetree_generator：扫描同源生成器（Mono 游戏无内嵌 typetree 的
     typeless bundle，写回侧必须与扫描侧一致地生成脚本 typetree，否则
     read_typetree 失败 → 整组 typetree_unavailable 拒绝；hickory 实证
     261 条全拒，扫描 350 条全部可读却写不回）。
+
+    triage_service / triage_app_dir（0.39.0 M2 AI 写回分诊层）：均 None
+    （默认）→ 分诊层完全不参与，行为与 0.38.0 字节级一致（§70 回归
+    条款 + Lite 无模型通道）。triage_service 注入（测试/外部编排）或
+    triage_app_dir 提供模型目录时启用：写回前对「标识符形态但未落入
+    键环境」的规则不确定候选做本地 AI 分诊，review/reject 判定等价于
+    保守回退保留原文（note_logic_reverted 记账）——AI 只能降级跳过，
+    永远不能启用一条写回（宁漏勿坏）。模型不可用 → 分诊层整体不参与
+    （零跳过照写，Safe Mode）；模型在场但批内失败 → 该批 review 跳过
+    （fail-closed）。详见 writeback_ai_triage 模块 docstring。
     """
     result = WriteResult()
     files = store.get_files()
@@ -1030,8 +1068,37 @@ def write_back_v2(store: ProjectStore, game_dir: Path, out_dir: Path,
         result.logic_audit.extend(audit_entries_before_writeback(
             e for e in entries_by_file.get(f["id"], ())
             if _should_write_entry(e) and e["translation"] != e["original"]))
+    # ── AI 写回分诊（0.39.0 M2，可选）：规则不确定候选 → 本地模型
+    # 判定 → review/reject 移出 patch 流 + note_logic_reverted 记账。
+    # 注意必须同时从 entries 与 candidates 两个列表移除：_patch_asset
+    # 吃 entries 无过滤，只记账不过滤会出现「文件里写了译文、账上记
+    # 了回退」的表里不一（排除表与文件不一致 = 按名比较断链隐患）。
+    triage_skip: dict[tuple[str, str], str] = {}
+    if triage_service is not None or triage_app_dir is not None:
+        from hanhua.core.unity.writeback_ai_triage import run_writeback_triage
+        pool = [
+            e for f in v2_files
+            for e in entries_by_file.get(f["id"], ())
+            if _should_write_entry(e) and e["translation"] != e["original"]
+        ]
+        try:
+            triage_skip, triage_report = run_writeback_triage(
+                pool, store, service=triage_service,
+                app_dir=triage_app_dir)
+            result.warnings.append(triage_report.summary())
+        except Exception as exc:  # noqa: BLE001 分诊层任何异常不阻断写回
+            triage_skip = {}
+            result.warnings.append(
+                f"AI 写回分诊异常（已跳过分诊，全部照写）：{str(exc)[:160]}")
+        if triage_skip:
+            result.warnings.append(
+                f"AI 写回分诊保守回退 {len(triage_skip)} 条"
+                f"（保留原文防逻辑断链）")
     for f in v2_files:
-        entries = entries_by_file.get(f["id"], ())
+        entries = [
+            e for e in entries_by_file.get(f["id"], ())
+            if (str(e.get("file_id") or ""), str(e.get("key_path") or ""))
+            not in triage_skip]
         candidates = [e for e in entries if e["translation"] != e["original"]]
         for entry in candidates:
             result.note_attempt(entry)
@@ -1047,11 +1114,12 @@ def write_back_v2(store: ProjectStore, game_dir: Path, out_dir: Path,
         entries_before = result.entries
         if f["format"] == "v2_asset":
             _patch_asset(dst, entries, result,
-                         typetree_generator=typetree_generator)
+                         typetree_generator=typetree_generator,
+                         rel_path=f["rel_path"])
         elif f["format"] == "v2_mono":
-            _patch_dll(dst, entries, result)
+            _patch_dll(dst, entries, result, rel_path=f["rel_path"])
         elif f["format"] == "v2_il2cpp":
-            _patch_metadata(dst, entries, result)
+            _patch_metadata(dst, entries, result, rel_path=f["rel_path"])
         for entry in candidates:
             if not result.is_resolved(entry):
                 reason = (_write_rejection_reason(entry)
@@ -1061,11 +1129,26 @@ def write_back_v2(store: ProjectStore, game_dir: Path, out_dir: Path,
         if result.entries > entries_before:
             result.files += 1
     _update_addressables_catalogs(game_dir, out_dir, v2_files)
+    if triage_skip:
+        # 分诊跳过记账必须在 per-file 循环后：note_logic_reverted 标
+        # resolved（阻断尾部 note_rejected 双记 rejected 触发发布误阻）
+        # + 原文进 logic_reverted_sources（W3 运行时排除表防按名断链）
+        # + C10 reverted_locators（发布后状态同步）。
+        by_locator_key: dict[tuple[str, str], dict] = {}
+        for f in v2_files:
+            for e in entries_by_file.get(f["id"], ()):
+                by_locator_key.setdefault(
+                    (str(e.get("file_id") or ""),
+                     str(e.get("key_path") or "")), e)
+        for key, reason in triage_skip.items():
+            entry = by_locator_key.get(key)
+            if entry is not None:
+                result.note_logic_reverted(entry, reason)
     return result
 
 
 def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
-                 typetree_generator=None):
+                 typetree_generator=None, rel_path: str = ""):
     import gc
     import time as _time
     from UnityPy import Environment
@@ -1188,6 +1271,12 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                         continue
                     expected_raw_by_path_id[object_key] = expected
                     changed_any = True
+                    _note_object_evidence(
+                        result, rel_path=rel_path,
+                        asset_file=object_key[0], path_id=object_key[1],
+                        type_name=tname,
+                        changes=[("m_Script", e["original"], e["translation"])
+                                 for e in patched_entries[prev_len:]])
                 # m_Script 是内容字段（有意修改），只快照 m_Name 等
                 # Object 级字段；m_Script 若按不可变字段快照，重开比对会
                 # 把内容修改误判为脚本绑定被破坏（MarioVsLuigi 28 对象实测）
@@ -1234,6 +1323,14 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                         patched_entries.extend(
                             entry for entry, meta in selected_localization
                             if int(meta["entry_id"]) in changed_ids)
+                        _note_object_evidence(
+                            result, rel_path=rel_path,
+                            asset_file=object_key[0], path_id=object_key[1],
+                            type_name=tname,
+                            changes=[("m_Localized", e["original"],
+                                      e["translation"])
+                                     for e, meta in selected_localization
+                                     if int(meta["entry_id"]) in changed_ids])
                     immutable = _collect_immutable_values(tree)
                     if immutable:
                         expected_immutable_values[object_key] = immutable
@@ -1336,6 +1433,15 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                             expected_raw_by_path_id[object_key] = expected
                             expected_typetree_values[object_key] = changed_paths
                             changed_any = True
+                            _note_object_evidence(
+                                result, rel_path=rel_path,
+                                asset_file=object_key[0],
+                                path_id=object_key[1], type_name=tname,
+                                changes=[("/".join(str(p) for p in fp),
+                                          str(_typetree_value_at_path(
+                                              tree, fp) or ""),
+                                          str(trans))
+                                         for fp, trans in changed_paths])
                         immutable = _collect_immutable_values(tree)
                         if immutable:
                             expected_immutable_values[object_key] = immutable
@@ -1511,6 +1617,13 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                     expected_string_sequences[object_key] = (
                         string_sequence, string_translations)
                     changed_any = True
+                    _note_object_evidence(
+                        result, rel_path=rel_path,
+                        asset_file=object_key[0], path_id=object_key[1],
+                        type_name=_writeback_script_class or tname,
+                        changes=[(f"@{meta['offset']}",
+                                  e["original"], e["translation"])
+                                 for e, meta in write_items])
         if not changed_any:
             return
 
@@ -1861,7 +1974,8 @@ def _us_record_offset(meta: dict) -> int | None:
     return None
 
 
-def _patch_dll(path: Path, entries: list[dict], result: WriteResult):
+def _patch_dll(path: Path, entries: list[dict], result: WriteResult,
+               rel_path: str = ""):
     blob = bytearray(path.read_bytes())
     expected: list[tuple[int, bytes, int, dict]] = []
     seen_offsets: set[int] = set()
@@ -1959,9 +2073,17 @@ def _patch_dll(path: Path, entries: list[dict], result: WriteResult):
         if raw_bytes != payload + bytes((flag,)):
             raise ValueError(f"DLL 译文重开验证失败：offset={offset}, expected={payload!r}")
         result.note_written(entry)
+    _note_object_evidence(
+        result, rel_path=rel_path, asset_file="", path_id=-1,
+        type_name="Mono #US",
+        changes=[(f"us@{offset}",
+                  entry["original"],
+                  payload.decode("utf-16-le", errors="replace"))
+                 for offset, payload, _flag, entry in expected])
 
 
-def _patch_metadata(path: Path, entries: list[dict], result: WriteResult):
+def _patch_metadata(path: Path, entries: list[dict], result: WriteResult,
+                    rel_path: str = ""):
     raw = path.read_bytes()
     layout = il2cpp.metadata_data_layout(raw)
     if layout is None:
@@ -2078,3 +2200,11 @@ def _patch_metadata(path: Path, entries: list[dict], result: WriteResult):
     for data_index, _payload, entry in expected:
         if data_index in changes:
             result.note_written(entry)
+    _note_object_evidence(
+        result, rel_path=rel_path, asset_file="", path_id=-1,
+        type_name="IL2CPP metadata",
+        changes=[(f"data[{data_index}]",
+                  entry["original"],
+                  payload.decode("utf-8", errors="replace"))
+                 for data_index, payload, entry in expected
+                 if data_index in changes])

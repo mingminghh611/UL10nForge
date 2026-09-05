@@ -360,7 +360,8 @@ def test_write_all_v1_skips_v2_files(monkeypatch):
 
     v2_result = WriteResult(files=1, entries=1)
 
-    def capture_v2(store, game_dir, staging, typetree_generator=None):
+    def capture_v2(store, game_dir, staging, typetree_generator=None,
+                   triage_service=None, triage_app_dir=None):
         entries = [e for e in store.get_entries() if e["file_id"] == "v2fake"]
         assert game_dir == proj.game_dir
         assert entries[0]["translation"] == "你好世界"
@@ -1198,7 +1199,8 @@ def test_write_all_merges_rejected_sources_into_exclude(monkeypatch):
         {"original": "Settings", "translation": "设置", "meta": "{}"},
         "immutable_field_protected")                       # 写回侧拒绝
 
-    def capture_v2(store, game_dir, staging, typetree_generator=None):
+    def capture_v2(store, game_dir, staging, typetree_generator=None,
+                   triage_service=None, triage_app_dir=None):
         return v2_result
 
     seen_exclude = None

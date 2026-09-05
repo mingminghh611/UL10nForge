@@ -279,7 +279,8 @@ def test_write_all_blocks_default_publish_on_rejected(
         files=1, entries=1, attempted=2,
         rejected=[WriteRejection("fake:key", "test_reject")])
 
-    def capture_v2(store, game_dir, staging, typetree_generator=None):
+    def capture_v2(store, game_dir, staging, typetree_generator=None,
+                   triage_service=None, triage_app_dir=None):
         return fake_outcome
 
     monkeypatch.setattr("hanhua.core.project.write_back_v2", capture_v2)
@@ -298,7 +299,8 @@ def test_write_all_publishes_with_warn_on_truncated_entries(tmp_path, monkeypatc
         files=1, entries=2, attempted=2, truncated=2,
         truncated_items=["「长文本」→「长文本…」"])
 
-    def capture_v2(store, game_dir, staging, typetree_generator=None):
+    def capture_v2(store, game_dir, staging, typetree_generator=None,
+                   triage_service=None, triage_app_dir=None):
         return fake_outcome
 
     monkeypatch.setattr("hanhua.core.project.write_back_v2", capture_v2)
@@ -326,7 +328,8 @@ def test_write_all_persists_reverted_locators_to_store(
         files=1, entries=1, attempted=1,
         reverted_locators={locator})
 
-    def capture_v2(store, game_dir, staging, typetree_generator=None):
+    def capture_v2(store, game_dir, staging, typetree_generator=None,
+                   triage_service=None, triage_app_dir=None):
         return fake_outcome
 
     monkeypatch.setattr("hanhua.core.project.write_back_v2", capture_v2)
@@ -347,7 +350,8 @@ def test_write_all_persists_reverted_locators_to_store(
         rejected=[WriteRejection("fake:key", "test_reject")],
         reverted_locators={f"{entry2['file_id']}:{entry2['key_path']}"})
 
-    def capture_blocked(store, game_dir, staging, typetree_generator=None):
+    def capture_blocked(store, game_dir, staging, typetree_generator=None,
+                        triage_service=None, triage_app_dir=None):
         return blocked_outcome
 
     monkeypatch.setattr("hanhua.core.project.write_back_v2", capture_blocked)
@@ -378,7 +382,8 @@ def test_write_all_purges_reverted_originals_from_translation_memory(
         logic_reverted_sources={bad_original},
         logic_reverted=1)
 
-    def capture_v2(store, game_dir, staging, typetree_generator=None):
+    def capture_v2(store, game_dir, staging, typetree_generator=None,
+                   triage_service=None, triage_app_dir=None):
         return fake_outcome
 
     monkeypatch.setattr("hanhua.core.project.write_back_v2", capture_v2)
@@ -508,7 +513,8 @@ def test_write_all_publishes_with_warn_when_allow_partial(
         rejected=[WriteRejection("fake:key", "test_reject")],
         truncated=1, truncated_items=["「a」→「a…」"])
 
-    def capture_v2(store, game_dir, staging, typetree_generator=None):
+    def capture_v2(store, game_dir, staging, typetree_generator=None,
+                   triage_service=None, triage_app_dir=None):
         return fake_outcome
 
     monkeypatch.setattr("hanhua.core.project.write_back_v2", capture_v2)

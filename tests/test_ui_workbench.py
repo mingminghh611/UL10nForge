@@ -1975,3 +1975,79 @@ def test_home_scan_done_ambiguous_fallback_hint_is_actionable(
     page._on_scan_done((object(), report))
 
     assert any("多个 Unity 游戏" in t for t in toasts)
+
+
+def test_dry_run_button_runs_plan_and_reports_summary(
+        qapp, tmp_path, monkeypatch):
+    """0.39.0 M4 写回预演（§62）：按钮触发后台 build_writeback_plan，
+    摘要四类计数进日志面板；预演零副作用标志复位，按钮恢复可用。"""
+    from hanhua.core.unity.writeback_plan import WritebackPlan
+
+    state = _state(tmp_path)
+    page = TranslatePage(state, _Window())
+    assert page.dry_run_btn.text() == "写回预演"
+    assert not page._dry_run_running
+
+    plan = WritebackPlan(text_planned=3, v2_planned=7, rejected=1,
+                         high_risk=2, auto_revert=1)
+
+    started = []
+
+    def _fake_worker(fn, *_a, **_k):
+        started.append(True)
+        worker = type("W", (), {})()
+        worker.signals = type("S", (), {})()
+        # 模拟 Worker.run：同步走 finished 路径（plan 由闭包带入）
+        class _Sig:
+            def __init__(self):
+                self._finished, self._error = [], []
+
+            def connect(self, slot):
+                self._slots = getattr(self, "_slots", [])
+                self._slots.append(slot)
+
+            def emit(self, value):
+                for s in self._slots:
+                    s(value)
+
+        worker.signals.finished = _Sig()
+        worker.signals.error = _Sig()
+        page._pool.start  # 存在即可
+        # 直接同步执行：先跑 fn 再 emit finished——与 Worker.run 同序
+        def _run():
+            result = fn()
+            worker.signals.finished.emit(result)
+        monkeypatch.setattr(
+            page, "_pool", type("P", (), {"start": staticmethod(
+                lambda w: _run())})())
+        return worker
+
+    import hanhua.ui.pages.translate_page as tp
+    monkeypatch.setattr(tp, "Worker", _fake_worker)
+    # 预演函数体内 `from ... import build_writeback_plan` 是函数级导入，
+    # monkeypatch 目标是源模块属性
+    import hanhua.core.unity.writeback_plan as wp
+    monkeypatch.setattr(wp, "build_writeback_plan", lambda *a, **k: plan)
+    # 最小 project：store 是真实空库（函数体内先跑 store.get_files）
+    store = ProjectStore(tmp_path / "p.db")
+    store.init_schema()
+    fake_project = type("P", (), {
+        "store": store, "game_dir": tmp_path})()
+    state.project = fake_project  # AppState.project 是普通属性
+    state._project_generation = 1
+    # resource_dir：AppState 属性，路径存在即可
+    monkeypatch.setattr(
+        state, "resource_dir", tmp_path, raising=False)
+
+    # state.project_lease / is_current_project 真实实现要求
+    # state.project 属性可设——AppState 允许直接赋值
+    page.dry_run_writeback()
+
+    assert started
+    assert not page._dry_run_running  # drained 已复位
+    assert page.dry_run_btn.isEnabled()
+    log = page.log_view.toPlainText()
+    assert "写回预演（不修改游戏）" in log
+    assert "预计写回：10" in log
+    assert "拒绝：1" in log
+    assert "高风险：3" in log

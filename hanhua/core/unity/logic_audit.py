@@ -24,6 +24,8 @@
 from __future__ import annotations
 
 import re
+
+from hanhua.core.unity import structural_fields
 from collections.abc import Callable
 
 # ── 逻辑敏感形态清单 ────────────────────────────────────────────────
@@ -75,12 +77,14 @@ UNITYEVENT_FIELD_SIGNALS = re.compile(
 # m_Groups（XR/Joystick/Touch 控制方案组）是 Input System 按名解析的
 # 机器标识，翻译即绑定解析失败 → 全部按键失灵。与 UnityEvent 同形态
 # 的「字段名即结构证据」。
-INPUT_BINDING_FIELD_PATHS = frozenset({
-    "m_expectedcontroltype", "mexpectedcontroltype", "expectedcontroltype",
-    "m_groups", "mgroups", "groups",
-    "m_controlpath", "mcontrolpath", "controlpath",
-    "m_action", "maction", "action", "m_actionmap", "mactionmap",
-})
+# M1（2026-09-05 0.39.0）单一源迁移：输入绑定字段路径 = 不可变字段清单中
+# Input System 绑定相关字段的全部 casefold 变体（含无 m 前缀裸变体，
+# 历史行为保留）。本体见 structural_fields.py。
+INPUT_BINDING_FIELD_PATHS = frozenset(
+    variant
+    for leaf in structural_fields.INPUT_BINDING_FIELD_PATH_LEAVES
+    for variant in ("m_" + leaf, "m" + leaf, leaf)
+) - {"actionmap"}   # 历史成员不含裸 actionmap（防误拦普通字段名），保留
 # UnityEvent 序列化字符串本体（方法名形态）：OnClick / OnValueChanged /
 # DoSomething 等——但方法名也可能是普通单词，须与对象信号联合判定。
 _UNITYEVENT_METHOD = re.compile(r"^[A-Z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*$")

@@ -28,6 +28,7 @@ from hanhua.core.placeholders import (DISPLAY_WORDS, is_credit_like,
 from hanhua.core.scanner import (_has_unity_bundle_magic, _is_runtime_file,
                                  _walk_files)
 from hanhua.core.unity.class_registry import disposition as _class_disposition
+from hanhua.core.unity import structural_fields
 from hanhua.core.tmp_tags import (is_pure_tags, is_tag_composed,
                                   referenced_names)
 import re as _re
@@ -555,31 +556,14 @@ _TYPETREE_DISPLAY_FIELDS = frozenset(
     f.name for f in _TYPETREE_DISPLAY_FIELD_ROWS)
 _TYPETREE_STRUCTURAL_FIELDS = frozenset(
     {"key", "keys", "id", "method", "binding", "path", "property", "code"})
-# Unity 惯例不可变字段（镜像 writer._IMMUTABLE_FIELD_NAMES，casefold 化以
+# Unity 惯例不可变字段（M1 单一源：structural_fields.IMMUTABLE_FIELD_NAMES_FOLDED，casefold 化以
 # 拦截 m_name/M_Name 等变体；裸 name 字段不受影响）。写回闸门同样拦截，
 # 扫描端先拦避免 UI 展示不可写条目（review 实证）。
 # TextAsset 数据文件判定：行内 ≥3 字母单词（fp_level_* 数据行实证）
 _WORD_TOKEN = _re.compile(r"[A-Za-z]{3,}")
-_TYPETREE_IMMUTABLE_FIELD_NAMES = frozenset(
-    name.casefold() for name in {
-        "m_Name", "m_Key", "m_Id", "m_EntryID", "m_GUID",
-        "m_FileID", "m_PathID", "m_Path", "m_Address",
-        "m_ControlPath", "m_Action", "m_ActionMap", "m_Script",
-        "m_ClassName", "m_Namespace",
-        "m_LocaleIdentifier", "m_LocaleCode", "m_SharedData",
-        # B15（snowday 按键失灵根因 2026-09-05）：InputActionAsset 输入
-        # 绑定机器标识——m_ExpectedControlType 是控件类型（Button/Axis/
-        # Key），m_Groups 是控制方案组名（XR/Joystick/Touch）；翻译后
-        # Input System 绑定解析失败 → 全部按键失灵。
-        "m_ExpectedControlType", "m_Groups",
-        # camelCase m 前缀变体（NGUI/旧序列化：mName/mGUID/mScript 等，
-        # 与 _normalized_field_name 的 m+大写 strip 同源缺口）
-        "mName", "mKey", "mId", "mEntryID", "mGUID",
-        "mFileID", "mPathID", "mPath", "mAddress",
-        "mControlPath", "mAction", "mActionMap", "mScript",
-        "mClassName", "mNamespace", "mSharedData",
-        "mExpectedControlType", "mGroups",
-    })
+_TYPETREE_IMMUTABLE_FIELD_NAMES = (
+    structural_fields.IMMUTABLE_FIELD_NAMES_FOLDED)
+
 # 每对象候选条目上限：VisualTreeAsset 等深层结构可能含数千叶子，
 # 防止「低置信证据层」膨胀数据库（识别 ≠ 全入库）。
 _MAX_CANDIDATES_PER_OBJECT = 200

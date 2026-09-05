@@ -34,7 +34,19 @@
     - 把 (源行, 写回行) 有差异的对批量送审，组批 ≤ batch_size
     - 模型判定 PASS / STRUCTURE_BROKEN / VALUE_INVERTED / PLACEHOLDER_LOST
     - 任何非 PASS → 记录 model_flags（软复核，需人工确认）
-    - 模型服务不可用 → 优雅跳过（不阻断写回，on_note 告警）
+    - 模型服务不可用 → 覆盖有缺口，标记 model_unavailable 阻断发布
+
+  第 2 层 b 二进制对象证据卡审计（0.39.0 M3）——二进制（v2_）文件无
+         「行」概念，第 2 层行对审计天然不覆盖（audit_deterministic/
+         audit_model 均跳过 v2_）。但二进制写回现场已有确定性重开验证
+         （writer._verify_saved_bundle / #US 单记录重读 / metadata 全池
+         比对——字节层已零漏洞），缺的只是语义复核：writer 在写回现场
+         记录每个成功对象的证据卡（文件/对象/类型/逐处 原文→译文），
+         本层把证据卡批量送模型判定同一四值结论（PASS/STRUCTURE_BROKEN/
+         VALUE_INVERTED/PLACEHOLDER_LOST），非 PASS 记 model_flags 软复核。
+         证据卡为空（无 v2 写回或 v2_result 未传入）→ 本层零行为，
+         不产生任何模型调用（不误报 model_unavailable）；有卡但模型不可用
+         → 覆盖缺口，与文本文件同口径阻断发布。
 
 审计结果写入 writeback/audit.txt（与 writeback.txt 并列），runner 在
 写回完成后调用。第 1 层任何文件 FAIL → needs_rewrite=True（结构破坏
@@ -104,7 +116,10 @@ class AuditResult:
     files: list[FileAudit] = field(default_factory=list)
     needs_rewrite: bool = False
     model_flags: list[tuple[str, str, str]] = field(default_factory=list)
-    model_unavailable: bool = False      # 模型服务不可用（软复核优雅跳过）
+    model_unavailable: bool = False      # 模型服务不可用（覆盖缺口，阻断发布）
+    # M3（0.39.0）：二进制证据卡复核统计（report 渲染用）
+    v2_cards_audited: int = 0            # 送模型复核的证据卡数（去重后）
+    v2_cards_sampled: int = 0            # 抽样上限截断掉的卡数
 
     @property
     def failed_files(self) -> list[FileAudit]:
@@ -778,19 +793,145 @@ def _issue_already_deterministic(f: dict, entries_by_file: dict,
     return False
 
 
+# ── 第 2 层 b：二进制对象证据卡审计（0.39.0 M3）────────────────────
+
+# 证据卡 prompt（§65：短/固定/结构化）：与 _MODEL_SYSTEM_PROMPT 同一
+# 四值结论词表，但对象是「同一对象同一处的 原文→译文 改动」而非行对。
+_V2_CARD_SYSTEM_PROMPT = """你是游戏本地化写回结构审计员。用户会给你若干条
+二进制资源对象的写回改动记录（每条含：文件、对象类型、定位、原文、译文）。
+程序的确定性层已完成字节层验证（重开读回、字节守恒、占位符守恒），不要
+评估编码或字节问题，只核对每条改动是否：
+
+1. 语义正确：译文与原文含义一致（如 Walk right 译成 行走对 是语义颠倒）
+2. 值合适：译文是对应原文的翻译，而不是错位到别的字段/整段无关文本
+3. 位置语义安全：该改动确实像在翻译显示文本，而非改写了关键标识
+
+判定标准（严格，宁严勿松）：
+- PASS：译文是原文的合理翻译
+- VALUE_INVERTED：译文与原文含义相反或完全错位
+- PLACEHOLDER_LOST：原文中的占位符（{0}、%s 等）或关键标记在译文中丢失
+- STRUCTURE_BROKEN：译文明显不是针对该原文的翻译（值错位/串行）
+
+只输出 JSON 数组，每条一个对象：
+{"index": N, "verdict": "PASS|STRUCTURE_BROKEN|VALUE_INVERTED|PLACEHOLDER_LOST", "issue": "原因（无则空串）"}
+不要输出任何解释文字。"""
+
+
+def _v2_evidence_cards(v2_result) -> list[dict]:
+    """从 WriteResult 安全提取证据卡列表（None/属性缺失 → 空）。"""
+    cards = getattr(v2_result, "object_evidence", None)
+    if not isinstance(cards, list):
+        return []
+    # 只留有真实改动的卡（changes 非空且每项 译文 != 原文——writer 侧已
+    # 过滤，这里二次防御防脏数据进 prompt）
+    out: list[dict] = []
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        changes = [
+            (str(w), str(o), str(t))
+            for w, o, t in card.get("changes") or []
+            if str(t) != str(o)]
+        if changes:
+            clean = dict(card)
+            clean["changes"] = changes
+            out.append(clean)
+    return out
+
+
+def _build_v2_card_prompt(batch: list[dict]) -> str:
+    """证据卡批量 prompt：每卡一行定位 + 逐处 原文→译文 改动。"""
+    lines = ["请审核以下二进制对象写回改动（index 对应输出 index）："]
+    for index, card in enumerate(batch):
+        lines.append(
+            f"[{index}] 文件 {str(card.get('rel_path') or '')[:80]} "
+            f"类型 {str(card.get('type') or '')[:40]} "
+            f"对象 path_id={card.get('path_id')}")
+        for where, orig, trans in card.get("changes") or []:
+            lines.append(f"  {where[:60]}: {orig[:80]!r} → {trans[:80]!r}")
+    return "\n".join(lines)
+
+
+def _audit_v2_model(v2_result, service, *, cards_per_batch: int = 12,
+                    max_cards: int = 400,
+                    on_note: Callable[[str], None] | None = None
+                    ) -> AuditResult:
+    """第 2 层 b：二进制对象证据卡模型语义复核（软复核）。
+
+    输入是 writer 写回现场记录的证据卡（每个成功落盘对象一张，确定性
+    重开验证已通过），本层只补语义复核。非 PASS 记 model_flags（软复核，
+    人工确认后发布）；模型请求失败 → model_unavailable=True（覆盖缺口，
+    与文本层同口径由上层阻断发布）。证据卡为空 → 零行为零模型调用。
+    """
+    result = AuditResult()
+    cards = _v2_evidence_cards(v2_result)
+    if not cards or service is None:
+        if cards and service is None:
+            result.model_unavailable = True
+            result.v2_cards_sampled = len(cards)
+        return result
+    # 抽样上限：超限均匀截断（保首尾），审计层按批复核控制模型成本；
+    # 截断的卡仍计数在 v2_cards_sampled（报告如实呈现覆盖缺口）。
+    if len(cards) > max_cards:
+        if max_cards <= 20:
+            kept = cards[:max_cards]
+        else:
+            step = max(1, (len(cards) - 20) // (max_cards - 20))
+            kept = cards[:10] + cards[::step][10:-10] + cards[-10:]
+            kept = kept[:max_cards]
+        result.v2_cards_sampled = len(cards) - len(kept)
+        cards = kept
+    if on_note:
+        on_note(f"[写回审计] 二进制证据卡 {len(cards)} 张送模型语义复核")
+    result.v2_cards_audited = len(cards)
+    groups = [cards[i:i + cards_per_batch]
+              for i in range(0, len(cards), cards_per_batch)]
+    for group in groups:
+        prompt = _V2_CARD_SYSTEM_PROMPT + "\n\n" + \
+            _build_v2_card_prompt(group)
+        try:
+            content = service.chat(prompt, max_tokens=512, timeout=120)
+        except Exception as exc:  # noqa: BLE001
+            # 该批未审 → 覆盖缺口，与文本层同口径标记阻断
+            result.model_unavailable = True
+            result.model_flags.append(
+                ("(binary)", "MODEL_UNAVAILABLE", str(exc)[:120]))
+            continue
+        verdicts = _parse_model_verdicts(content)
+        for index, card in enumerate(group):
+            verdict, issue = verdicts.get(index, ("PASS", ""))
+            if verdict == "PASS":
+                continue
+            changes = card.get("changes") or []
+            sample = "；".join(
+                f"{o[:40]}→{t[:40]}" for _w, o, t in changes[:2])
+            result.model_flags.append(
+                (str(card.get("rel_path") or "(binary)"), verdict,
+                 f"path_id={card.get('path_id')} {issue[:80]} | {sample}"))
+    return result
+
+
 def audit_writeback(store, game_dir: Path, out_dir: Path,
                     service=None, *, run_model: bool = True,
                     app_dir: str | Path | None = None,
                     batch_size: int = 12,
                     max_pairs_per_file: int = 400,
                     font_enabled: bool = False,
+                    v2_result=None,
+                    v2_cards_per_batch: int = 12,
+                    max_v2_cards: int = 400,
                     on_note: Callable[[str], None] | None = None,
                     ) -> AuditResult:
     """完整写回审计（第 1 层确定性 + 第 2 层模型）。
 
     service 为空且 run_model=True 时，若给了 app_dir 则尝试从
-    ReviewModelService 按需构建（模型可用才跑模型层；不可用优雅跳过，
-    不阻断写回）。第 1 层任何文件 FAIL → needs_rewrite=True。
+    ReviewModelService 按需构建（模型可用才跑模型层；不可用 → 覆盖
+    缺口，阻断发布）。第 1 层任何文件 FAIL → needs_rewrite=True。
+
+    v2_result（0.39.0 M3）：write_back_v2 的 WriteResult——非 None 且
+    object_evidence 非空时，第 2 层 b 对二进制对象证据卡做模型语义
+    复核（详见模块 docstring）。None / 空证据 → 该层零行为（兼容
+    0.38.0 调用方与纯文本游戏）。
     """
     # 按 file_id 分组条目（O(1) 查表）
     entries_by_file: dict[str, list[dict]] = {}
@@ -822,12 +963,29 @@ def audit_writeback(store, game_dir: Path, out_dir: Path,
                 on_note=on_note)
             result.model_flags.extend(model_res.model_flags)
             result.model_unavailable = model_res.model_unavailable
+            # 第 2 层 b：二进制对象证据卡（M3）——与文本行对同模型、
+            # 同四值结论、同软复核语义；模型不可用与文本层同口径阻断。
+            if v2_result is not None:
+                v2_res = _audit_v2_model(
+                    v2_result, service,
+                    cards_per_batch=v2_cards_per_batch,
+                    max_cards=max_v2_cards, on_note=on_note)
+                result.model_flags.extend(v2_res.model_flags)
+                result.model_unavailable = (
+                    result.model_unavailable or v2_res.model_unavailable)
+                result.v2_cards_audited = v2_res.v2_cards_audited
+                result.v2_cards_sampled = v2_res.v2_cards_sampled
         else:
             # 模型层是写回审计的第二道防线（专补确定性层无法判的语义/结构
             # 漏洞）。用户要求「写回审核不需要用户参与、不允许任何错误」：
             # 模型请求了却不可用 → 无法保证完整覆盖 → 视为审计不完整，
             # 阻断发布（否则一个未审的写回可能带着未发现的破坏发布）。
+            # 二进制证据卡同口径：有卡未审 = 覆盖缺口，同样阻断。
             result.model_unavailable = True
+            cards = _v2_evidence_cards(v2_result)
+            if cards:
+                result.v2_cards_audited = 0
+                result.v2_cards_sampled = len(cards)
             if on_note:
                 on_note("[写回审计] 模型服务不可用——审计不完整，阻断发布")
     return result
@@ -887,8 +1045,14 @@ def render_audit_report(result: AuditResult, game_name: str = "") -> str:
                   "（软复核，需人工确认，不阻断）"]
         for rel, verdict, issue in result.model_flags:
             lines.append(f"- {rel} [{verdict}] {issue}")
-    elif result.model_unavailable:
-        lines += ["", "审校模型复核：模型服务不可用，已优雅跳过（不阻断）"]
+    if result.v2_cards_audited or result.v2_cards_sampled:
+        lines += ["",
+                  f"二进制对象证据卡复核：送审 {result.v2_cards_audited} 张"
+                  + (f"（超上限截断 {result.v2_cards_sampled} 张）"
+                     if result.v2_cards_sampled else "")]
+    if result.model_unavailable:
+        lines += ["", "审校模型复核：模型服务不可用——审计覆盖有缺口，"
+                  "已阻断发布（model_unavailable）"]
     lines += ["",
               f"结论：{'需重新写回' if result.needs_rewrite else '结构完整'}"]
     return "\n".join(lines)
