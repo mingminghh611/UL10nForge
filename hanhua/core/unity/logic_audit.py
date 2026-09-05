@@ -70,6 +70,17 @@ LOGIC_KEYS_COMMON = frozenset({
 UNITYEVENT_FIELD_SIGNALS = re.compile(
     r"m_(PersistentCalls|PersistentListener|MethodName|Target|TargetAssembly)"
     r"|persistentCalls|m_Listener")
+# B15（snowday 按键失灵根因 2026-09-05）：输入绑定字段路径信号——
+# InputActionAsset 的 m_ExpectedControlType（Button/Axis 控件类型）与
+# m_Groups（XR/Joystick/Touch 控制方案组）是 Input System 按名解析的
+# 机器标识，翻译即绑定解析失败 → 全部按键失灵。与 UnityEvent 同形态
+# 的「字段名即结构证据」。
+INPUT_BINDING_FIELD_PATHS = frozenset({
+    "m_expectedcontroltype", "mexpectedcontroltype", "expectedcontroltype",
+    "m_groups", "mgroups", "groups",
+    "m_controlpath", "mcontrolpath", "controlpath",
+    "m_action", "maction", "action", "m_actionmap", "mactionmap",
+})
 # UnityEvent 序列化字符串本体（方法名形态）：OnClick / OnValueChanged /
 # DoSomething 等——但方法名也可能是普通单词，须与对象信号联合判定。
 _UNITYEVENT_METHOD = re.compile(r"^[A-Z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*$")
@@ -236,6 +247,14 @@ def typetree_logic_key_evidence(
                for sig in _UNITYEVENT_SIGNALS)
            for name in path_names):
         return "revert", "unityevent_binding"
+    # B15（snowday 按键失灵根因 2026-09-05）：输入绑定字段——与
+    # UnityEvent 同形态的字段路径证据（字段名即结构证据，与值形态无关）。
+    # m_ExpectedControlType（Button/Axis…）与 m_Groups（XR/Joystick/Touch…）
+    # 是 Input System 按名解析的机器标识，翻译即绑定解析失败 → 按键失灵。
+    # 提取端字段黑名单与 writer L2 不可变清单之外的最后兜底（老库存量
+    # 条目 meta 无新字段标记时由此回退）。
+    if any(name in INPUT_BINDING_FIELD_PATHS for name in path_names):
+        return "revert", "input_binding_field"
     # 对象级事件绑定/输入轴信号（与 logic_key_evidence 2b 同规则）。
     if meta.get("obj_is_unityevent"):
         return "revert", "unityevent_binding"

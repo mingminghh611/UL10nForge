@@ -275,6 +275,21 @@ _SHELL_COMMAND = re.compile(
 # 游戏 jam 署名（roots 真实样本："made in 48h\nfor Ludum Dare 48"，
 # 允许前导空白/换行：" \nmade in 48h"）
 _JAM_CREDIT = re.compile(r"^[\s]*made in \d+\s*h\b", re.I)
+# 对话拟声/感叹词（hickory 实证 2026-09-05：对话行 'tck – er… everything
+# is broken.' 被 _KEYBOARD_NOISE 分支 b 误杀——'tck' 是纯辅音 3 连
+# （tutting 拟声），'er…' 同理，导致整句真实对话按键盘乱打跳过。拟声词
+# （tck/tsk/shh/brr/psst/hmm…）在真实英语里合法存在且常带辅音簇，是
+# 内容信号而非噪声信号。出现任一拟声词 → 真实文本语境，不判噪声
+# （宁漏勿坏：漏判只多翻一条，误判会漏整条对话）。
+_INTERJECTION_WORDS = frozenset({
+    "tck", "tsk", "tsktsk", "hmm", "hmmm", "hmmmm", "mmh", "mhm",
+    "uhh", "uhm", "uhhuh", "shh", "shhh", "brr", "brrr", "psst", "pss",
+    "hss", "tut", "tuttut", "ugh", "ughh", "erm", "err", "huh", "phew",
+    "ahh", "ahhh", "hnn", "grr", "grrr", "meow", "woof", "oink", "moo",
+    "cluck", "hiss", "zzz", "achoo", "ahem", "aww", "eww", "eek", "oof",
+    "yikes", "haha", "hehe", "hihi", "hoho", "mmm", "gah", "argh",
+    "aargh", "bleh", "meh", "nyeh", "hng", "hnng", "geez", "whew",
+})
 # 键盘噪音/乱打文本（开发者测试占位符，真实样本：
 # panzershoot "asdasdasd\nasda sdasd"、the-keeper "fdji ijsdijn j jnf oij..."）
 # ——无真实单词，模型必然回显，跳过。
@@ -1193,6 +1208,10 @@ def is_hard_structural(text: str) -> bool:
         # （asdasdasd / fdji ijsdijn）一个功能词都没有。≥2 个功能词 →
         # 真实句子，不是噪声（宁漏勿坏：漏判只多翻一条，误判会漏整条对话）。
         elif sum(1 for w in s.split() if w.casefold() in FUNCTION_WORDS) >= 2:
+            pass
+        # hickory 实证：对话拟声词（tck/shh/psst…）是内容词不是噪声
+        elif any(w in _INTERJECTION_WORDS for w in
+                 re.findall(r"[a-z]+", s.casefold())):
             pass
         else:
             return True

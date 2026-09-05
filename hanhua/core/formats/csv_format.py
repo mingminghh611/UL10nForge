@@ -13,6 +13,26 @@ TARGET_LANG_ALIASES = {
 
 NON_LANG_HEADERS = {"key", "id", "type", "category", "comment", "notes"}
 
+# 自动覆盖源列判据（snowday 实证 2026-09-05）：表 ID|Notes|ActionEvents|
+# Name|ChoicesLink|Spanish 唯一语言列是 Spanish（内容是英语），游戏运行时
+# 只读这一列；target_col=None 时默认走「追加 ChineseSimplified 列」游戏不读
+# → 汉化白写。检测「单语言源列形态」自动置 overwrite_source。
+# 安全边界（宁漏勿坏）：
+# - 表内命中中文目标列（CHN/ChineseSimplified/…）→ 不触发（写中文列更安全）
+# - 数据行 < 8 → 不触发（样本不足防误判）
+# - 句子态列必须唯一且 == source_col：Notes/ChoicesLink 这类低填充注释列
+#   即便句子态 100% 也不算（非空值数须 ≥ 数据行数一半）
+_SENTENCE_LIKE = re.compile(r"[a-z]{2,}[\s,.'’\-][a-z]{2,}", re.IGNORECASE)
+_IDENTIFIER_LIKE = re.compile(r"^[A-Za-z0-9_*\[\]:.\-]+$")
+
+
+def _sentence_ratio(values: list[str]) -> float:
+    if not values:
+        return 0.0
+    hits = sum(1 for v in values
+               if _SENTENCE_LIKE.search(v) and not _IDENTIFIER_LIKE.match(v))
+    return hits / len(values)
+
 # 对话框消息脚本命令值（fromivan 实证 2026-09-01：TextAsset 是
 # 'RECEIVED_MSG|Hey, kiddo!' 式逐行消息脚本，被 CSV 判定误当 2 列表——
 # 命令列（RECEIVED_MSG/DELAY/TYPING/SENT_MSG/WAIT_FOR_PRESS）是引擎
@@ -91,7 +111,8 @@ def extract_csv_text(text: str, file_id: str | None = None, suffix: str = "",
     = 官方中文，runner 搬运优先于模型译文）。
     """
     fid = file_id or "csv"
-    rows = _read_rows(text, _detect_delimiter(text, suffix))
+    delimiter = _detect_delimiter(text, suffix)
+    rows = _read_rows(text, delimiter)
     if not rows:
         return [], None
     header = [h.strip() for h in rows[0]]
@@ -107,6 +128,27 @@ def extract_csv_text(text: str, file_id: str | None = None, suffix: str = "",
                               if len(rows[r]) > c and rows[r][c].strip()))
     else:
         source_col = 1
+    # 自动覆盖源列（B16b）：无中文目标列 + 单一句子态源列 + 样本充足 →
+    # 游戏运行时只读源列本身，追加新列玩家永远看不到（snowday 实证
+    # 2026-09-05：Spanish 列内容是英语，追加 ChineseSimplified 游戏不读）
+    # 句子态列唯一时它本身就是源列：source_col 若因「非空行数并列取
+    # 首个」落在人名列（Name 列全标识符态与 Spanish 并列实证），以句
+    # 子态列为准改选（人名/短标签不是对话文本，译文落对话列才有效）。
+    if not overwrite_source and target_col is None:
+        data_rows = [r for r in rows[1:] if any(c.strip() for c in r)]
+        if len(data_rows) >= 8:
+            filled = [
+                (c, [row[c].strip() for row in data_rows
+                     if len(row) > c and row[c].strip()])
+                for c in lang_cols
+            ]
+            filled = [(c, vals) for c, vals in filled
+                      if len(vals) >= len(data_rows) / 2]
+            sentence_cols = [c for c, vals in filled
+                             if _sentence_ratio(vals) >= 0.5]
+            if len(sentence_cols) == 1:
+                source_col = sentence_cols[0]
+                overwrite_source = True
     # 覆盖源列模式：写回列=源列（ENG）；目标语言列（CHN）作官方译文参考
     write_col = source_col if overwrite_source else target_col
     official_col = target_col if overwrite_source else None
@@ -116,8 +158,11 @@ def extract_csv_text(text: str, file_id: str | None = None, suffix: str = "",
         if len(row) <= source_col or not row[source_col].strip():
             continue
         key = row[0].strip() if row and row[0].strip() else f"row{r}"
+        # delimiter 留档（B16c）：写回端 apply_format_text 的 delimiter
+        # 只看 file 级 meta，TextAsset 内嵌表缺省按 ',' 重建——'|' 表会被
+        # 整行当单字段，译文追加成 ',,,,' 尾巴破坏行结构（snowday 实证）
         meta = {"row": r, "key": key, "source_col": source_col,
-                "target_col": write_col}
+                "target_col": write_col, "delimiter": delimiter}
         if overwrite_source:
             meta["overwrite_source"] = True
             # 官方中文参考（目标语言列已填）——搬运优先，模型不译

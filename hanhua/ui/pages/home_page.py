@@ -523,6 +523,8 @@ class HomePage(QWidget):
         proj = Project.open_game_dir(
             path_str, app_dir,
             player_root=player_root, player_executable=player_executable)
+        # B16b：csv 覆盖源列走 extract_csv_text 内自动判据（默认开）——
+        # 此处传 True 会强制覆盖并绕过中文目标列在场/小表护栏（宁漏勿坏）
         report = proj.scan_all(event_cb=event_cb)
         return proj, report
 

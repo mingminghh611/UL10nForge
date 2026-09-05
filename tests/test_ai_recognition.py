@@ -15,6 +15,8 @@ import pytest
 
 from hanhua.core.ai_recognition import (
     _apply_verdicts,
+    _build_batch_prompt,
+    _item_context,
     _parse_verdicts,
     _PendingWrites,
     _verify_upgradeable,
@@ -122,12 +124,23 @@ def test_collect_candidates_respects_limit():
 
 def test_parse_verdicts_plain_and_fenced_and_regex_fallback():
     plain = '[{"i": 0, "v": "display"}, {"i": 1, "v": "structural"}]'
-    assert _parse_verdicts(plain) == {0: "display", 1: "structural"}
+    assert _parse_verdicts(plain) == {
+        0: {"v": "display"}, 1: {"v": "structural"}}
     fenced = "```json\n" + plain + "\n```"
-    assert _parse_verdicts(fenced) == {0: "display", 1: "structural"}
+    assert _parse_verdicts(fenced) == {
+        0: {"v": "display"}, 1: {"v": "structural"}}
+    # N3：t 类型合法则保留，非法/缺失则省略
+    typed = '[{"i": 0, "v": "display", "t": "dialogue"}, ' \
+            '{"i": 1, "v": "display", "t": "bogus_kind"}]'
+    assert _parse_verdicts(typed) == {
+        0: {"v": "display", "t": "dialogue"}, 1: {"v": "display"}}
     # 截断/夹带说明文字 → 逐项正则兜底
     broken = '结果如下 [{"i": 0, "v": "display"}, {"i": 1, "v'
-    assert _parse_verdicts(broken) == {0: "display"}
+    assert _parse_verdicts(broken) == {0: {"v": "display"}}
+    # 正则兜底也解析 N3 的 t 字段
+    broken_typed = '[{"i": 2, "v": "display", "t": "item"}'
+    assert _parse_verdicts(broken_typed) == {
+        2: {"v": "display", "t": "item"}}
     # 完全不可解析 → 空（fail-closed）
     assert _parse_verdicts("complete garbage") == {}
     # 非法 verdict 值丢弃
@@ -183,7 +196,9 @@ def test_apply_verdicts_upgrade_and_confirm_and_precheck():
                   meta={"kind": "typetree_candidate", "role": "candidate"}),
     ]
     pending = _PendingWrites()
-    _apply_verdicts(items, {0: "display", 1: "display", 2: "structural"},
+    _apply_verdicts(items, {0: {"v": "display", "t": "ui"},
+                            1: {"v": "display"},
+                            2: {"v": "structural"}},
                     pending)
     # k1 升格缓冲：meta 含 role=display/disposition=translate，status→pending
     assert ("f", "k1") in [(fid, kp) for fid, kp, _ in pending.meta_rows]
@@ -191,6 +206,8 @@ def test_apply_verdicts_upgrade_and_confirm_and_precheck():
     assert upgrade_row[2]["role"] == "display"
     assert upgrade_row[2]["disposition"] == "translate"
     assert upgrade_row[2]["confidence_promoted"] is True
+    # N3：模型标注的文本类型落库到 ai_note（翻译端语境参考）
+    assert upgrade_row[2]["ai_note"]["ai_text_type"] == "ui"
     assert ("f", "k1", "pending") in pending.status_rows
     # k2 键风格被预校验拦下（状态不动 + muted 留档）
     assert pending.precheck_blocked == 1
@@ -212,6 +229,48 @@ def test_apply_verdicts_missing_index_keeps_silent():
     _apply_verdicts(items, {}, pending)
     assert not pending.meta_rows and not pending.status_rows
     assert pending.upgraded == 0
+
+
+# ── N1 语境注入 ──────────────────────────────────────────────────────────
+
+def test_item_context_renders_deterministic_evidence():
+    """语境只含确定性事实：字段叶子名/对象显示证据/类名/文件名。"""
+    entry = TextEntry(
+        file_id="f", key_path="k", original="2F", status=STATUS_SKIPPED,
+        meta={"kind": "typetree_candidate", "role": "candidate",
+              "field_path": ["rooms", 2, "roomName"],
+              "obj_has_values": False,
+              "script_class": "RoomInfo", "asset_file": "sharedassets2.assets"})
+    context = _item_context(entry)
+    assert "字段 roomName" in context
+    assert "对象无其他显示文本" in context
+    assert "类 RoomInfo" in context
+    assert "文件 sharedassets2.assets" in context
+
+
+def test_item_context_empty_meta_renders_nothing():
+    entry = TextEntry(file_id="f", key_path="k", original="Combat Music",
+                      status=STATUS_SKIPPED,
+                      meta={"kind": "typetree_candidate",
+                            "role": "candidate"})
+    # 无 field_path/类名/文件名时只剩 obj_has_values 布尔证据
+    assert _item_context(entry) == "对象无其他显示文本"
+
+
+def test_batch_prompt_includes_context_lines():
+    """prompt 每条带语境；无 field_path/类名/文件名的条目保持裸行。"""
+    with_ctx = TextEntry(
+        file_id="f", key_path="k1", original="2F", status=STATUS_SKIPPED,
+        meta={"kind": "typetree_candidate", "role": "candidate",
+              "field_path": ["roomName"], "obj_has_values": False})
+    without_ctx = TextEntry(
+        file_id="f", key_path="k2", original="Combat Music",
+        status=STATUS_SKIPPED,
+        meta={"kind": "typetree_candidate", "role": "candidate"})
+    prompt = _build_batch_prompt([with_ctx, without_ctx])
+    assert "0. '2F'（字段 roomName；对象无其他显示文本）" in prompt
+    # 无语境元素 → 裸行（obj_has_values 布尔缺省不渲染，向后兼容旧 meta）
+    assert "1. 'Combat Music'（对象无其他显示文本）" in prompt
 
 
 # ── 主入口端到端 ────────────────────────────────────────────────────────

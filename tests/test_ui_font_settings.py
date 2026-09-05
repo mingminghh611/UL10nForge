@@ -447,7 +447,7 @@ def test_home_scan_does_not_freeze_font_settings_before_write(
     report = SimpleNamespace(text_files=4, v2_files=7)
     monkeypatch.setattr(
         Project, "scan_all",
-        lambda _self, event_cb=None: report)
+        lambda _self, event_cb=None, csv_overwrite_source=False: report)
 
     game_dir = tmp_path / "game"
     game_dir.mkdir()

@@ -80,6 +80,9 @@ _IMMUTABLE_FIELD_NAMES = frozenset({
     "m_FileID", "m_PathID",            # PPtr 引用
     "m_Path", "m_Address",             # 资源/文件地址
     "m_ControlPath", "m_Action", "m_ActionMap",   # Input System 绑定
+    "m_ExpectedControlType", "m_Groups",           # B15：InputActionAsset
+                                       # 控件类型/控制方案组（snowday 实证
+                                       # 'Button'→'按钮' 全部按键失灵）
     "m_Script",                        # MonoBehaviour 脚本引用
     "m_ClassName", "m_Namespace",      # 脚本类名
     "m_LocaleIdentifier", "m_LocaleCode",          # Localization locale
@@ -1610,8 +1613,56 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
 
     行级条目按行替换（换行保留）；结构化条目（textasset_format）按格式
     （json/xml/yaml/csv）整体重建——BOM 保留。
+
+    B16 对称支持：UTF-16 TextAsset（snowday DialogueStructure 实证，双
+    BOM 头 b'\xef\xbb\xbf\xff\xfe'）解码 → 既有处理链 → 按原 BOM 形态
+    重编码；解码失败走既有 strict 拒绝（宁漏勿坏）。
     """
     # 调用方已统一 str→bytes（老 Unity m_Script），此处纯 bytes 处理
+    # B16：UTF-16 BOM 探测（与 extractor._textasset_entries 同口径）
+    utf16_encoding = ""
+    _head = script[:5]
+    if _head.startswith(b"\xef\xbb\xbf\xff\xfe"):
+        utf16_encoding = "utf-16-le-bom8"
+    elif _head.startswith(b"\xef\xbb\xbf\xfe\xff"):
+        utf16_encoding = "utf-16-be-bom8"
+    elif _head.startswith(b"\xff\xfe\x00\x00") or _head.startswith(b"\x00\x00\xfe\xff"):
+        pass  # UTF-32：不在提取支持范围（提取端按二进制跳过），落 strict 拒绝
+    elif _head.startswith(b"\xff\xfe"):
+        utf16_encoding = "utf-16-le"
+    elif _head.startswith(b"\xfe\xff"):
+        utf16_encoding = "utf-16-be"
+    if utf16_encoding:
+        _payload = script
+        if utf16_encoding.endswith("bom8"):
+            _payload = script[3:]  # 剥 UTF-8 BOM 前缀
+        try:
+            _decoded = _payload.decode("utf-16")
+        except (UnicodeDecodeError, UnicodeError):
+            for e, _meta in items:
+                result.note_rejected(e, "TextAsset 非 UTF-8 编码，拒绝写回")
+            for e, _meta in structured_items:
+                result.note_rejected(e, "TextAsset 非 UTF-8 编码，拒绝写回")
+            return script
+        if not items and not structured_items:
+            return script
+        # UTF-16 文本 → UTF-8 字节走既有处理链，之后整体重编码回 UTF-16
+        _utf8 = _decoded.encode("utf-8")
+        _patched = _patch_textasset(
+            _utf8, items, structured_items, result)
+        if _patched == _utf8:
+            return script  # 未发生任何替换 → 原样返回（含原 BOM）
+        _patched_text = _patched.decode("utf-8")
+        _out = _patched_text.encode("utf-16")
+        # encode("utf-16") 恒加 LE BOM：按原形态重排/补前缀
+        if utf16_encoding == "utf-16-be":
+            _out = b"\xfe\xff" + _patched_text.encode("utf-16-be")
+        elif utf16_encoding == "utf-16-le-bom8":
+            _out = b"\xef\xbb\xbf" + _out
+        elif utf16_encoding == "utf-16-be-bom8":
+            _out = b"\xef\xbb\xbf" + b"\xfe\xff" \
+                + _patched_text.encode("utf-16-be")
+        return _out
     bom = script.startswith(b"\xef\xbb\xbf")
     try:
         text = script.decode("utf-8-sig")

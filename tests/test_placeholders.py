@@ -452,6 +452,16 @@ def test_keyboard_noise_and_jam_credit_are_skipped(text):
     "flex sand is perfect for holes sniffing like cocane and making hills",
     "and recreated it with only flex sand",
     "but it creates a superstrong climable and water tight seal",
+    # hickory 实证（2026-09-05）：对话拟声词 tck/shh/psst 是纯辅音簇，
+    # 命中键盘噪声分支 b（纯辅音词），但拟声词是内容信号——含拟声词的
+    # 真实对话必须保持可翻译（此前整句被跳过，对话漏翻）
+    "tck – er… everything is broken.",
+    "shh – it's fine.",
+    "psst – over here!",
+    "tsk tsk, shame.",
+    "tck tck",
+    "brr – cold out here.",
+    "shh! listen…",
 ])
 def test_normal_text_is_not_mistaken_for_noise(text):
     assert not should_skip(text)

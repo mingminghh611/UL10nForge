@@ -27,6 +27,7 @@ from hanhua.core.placeholders import (DISPLAY_WORDS, is_credit_like,
                                       _QUALIFIED, _IDENTIFIER, _WORD_CASE)
 from hanhua.core.scanner import (_has_unity_bundle_magic, _is_runtime_file,
                                  _walk_files)
+from hanhua.core.unity.class_registry import disposition as _class_disposition
 from hanhua.core.tmp_tags import (is_pure_tags, is_tag_composed,
                                   referenced_names)
 import re as _re
@@ -566,12 +567,18 @@ _TYPETREE_IMMUTABLE_FIELD_NAMES = frozenset(
         "m_ControlPath", "m_Action", "m_ActionMap", "m_Script",
         "m_ClassName", "m_Namespace",
         "m_LocaleIdentifier", "m_LocaleCode", "m_SharedData",
+        # B15（snowday 按键失灵根因 2026-09-05）：InputActionAsset 输入
+        # 绑定机器标识——m_ExpectedControlType 是控件类型（Button/Axis/
+        # Key），m_Groups 是控制方案组名（XR/Joystick/Touch）；翻译后
+        # Input System 绑定解析失败 → 全部按键失灵。
+        "m_ExpectedControlType", "m_Groups",
         # camelCase m 前缀变体（NGUI/旧序列化：mName/mGUID/mScript 等，
         # 与 _normalized_field_name 的 m+大写 strip 同源缺口）
         "mName", "mKey", "mId", "mEntryID", "mGUID",
         "mFileID", "mPathID", "mPath", "mAddress",
         "mControlPath", "mAction", "mActionMap", "mScript",
         "mClassName", "mNamespace", "mSharedData",
+        "mExpectedControlType", "mGroups",
     })
 # 每对象候选条目上限：VisualTreeAsset 等深层结构可能含数千叶子，
 # 防止「低置信证据层」膨胀数据库（识别 ≠ 全入库）。
@@ -648,7 +655,8 @@ def _looks_like_type_descriptor(text: str) -> bool:
 def _typetree_string_entries(
         file_id: str, obj_path_id: int, tree: dict,
         asset_file_name: str = "",
-        skipped: dict[str, int] | None = None
+        skipped: dict[str, int] | None = None,
+        script_class: str = ""
 ) -> tuple[list[TextEntry], list[TextEntry]]:
     """全叶子字符串分类：返回 (display 条目, 低置信候选条目)。
 
@@ -660,6 +668,10 @@ def _typetree_string_entries(
       写回与质量门禁（is_actionable_translation 要求 role=display 且
       confidence≠low）天然排除——「过滤不是删除」（指南 §2.4）。
     键风格标识符（should_skip）不产生条目——它们在各处已是键。
+
+    script_class：对象脚本类名（m_Script PPtr 解析）透传入 meta——写回端
+    logic_audit._config_class_of 兜底依赖它（B15：rawstr 路径一直写入，
+    typetree 路径此前缺失，配置类对象写回无兜底）。
     """
     display: list[TextEntry] = []
     candidates: list[TextEntry] = []
@@ -723,6 +735,9 @@ def _typetree_string_entries(
             "reason": reason,
             "obj_has_values": has_value_evidence,
         }
+        if script_class:
+            # B15：写回端 logic_audit._config_class_of 兜底的证据源
+            meta["script_class"] = script_class
         if extra_meta:
             meta.update(extra_meta)
         if asset_file_name:
@@ -2479,18 +2494,56 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
         if skipped is not None:
             skipped[morph] = skipped.get(morph, 0) + 1
 
-    if raw and sum(1 for b in raw if b < 0x20 and b not in (0x09, 0x0a, 0x0d)) / len(raw) > 0.05:
+    # B16（snowday 对话表漏提根因 2026-09-05）：UTF-16 TextAsset 整文件
+    # 被 textasset_binary 吞掉——UTF-16LE/BE 每隔一字节一个 \x00，NUL
+    # 占比 ~0.5 > 0.05 阈值，下面的二进制过滤在 decode 之前先命中。
+    # 实证：DialogueStructure（resources.assets#46，UTF-8 BOM + UTF-16LE
+    # 双 BOM 头 b'\xef\xbb\xbf\xff\xfe'），134 条西班牙语对话全部漏提。
+    # 修复：二进制过滤**之前**探测 UTF-16 BOM（含 UTF-8 BOM 前缀的双
+    # BOM 形态），命中则剥 BOM 按 UTF-16 解码进既有 JSON/XML/YAML/CSV
+    # 格式链；解码失败/替换字符过多保持既有安全跳过（宁漏勿坏——写回
+    # 侧 _patch_textasset 对称支持，BOM 形态留档 meta 供审计）。
+    utf16_encoding = ""
+    head = raw[:5]
+    if head.startswith(b"\xef\xbb\xbf\xff\xfe"):
+        utf16_encoding = "utf-16-le-bom8"   # 双 BOM：UTF-8 BOM + UTF-16LE
+    elif head.startswith(b"\xef\xbb\xbf\xfe\xff"):
+        utf16_encoding = "utf-16-be-bom8"   # 双 BOM：UTF-8 BOM + UTF-16BE
+    elif head.startswith(b"\xff\xfe\x00\x00") or head.startswith(b"\x00\x00\xfe\xff"):
+        pass                                # UTF-32 BOM：Unity 不产，走二进制
+    elif head.startswith(b"\xff\xfe"):
+        utf16_encoding = "utf-16-le"
+    elif head.startswith(b"\xfe\xff"):
+        utf16_encoding = "utf-16-be"
+    if utf16_encoding:
+        payload = raw
+        if utf16_encoding.endswith("bom8"):
+            payload = raw[3:]               # 剥 UTF-8 BOM 前缀再解码
+        try:
+            text = payload.decode("utf-16")  # BOM 由解码器自动识别移除
+        except (UnicodeDecodeError, UnicodeError):
+            _skip("textasset_utf16_decode_failed")
+            return []
+        replacement_chars = sum(1 for ch in text if ch == "�")
+        if replacement_chars > len(text) * 0.02:
+            # 替换字符过多 → 不是真 UTF-16 文本（BOM 巧合），按二进制跳过
+            _skip("textasset_binary")
+            return []
+        base_meta["textasset_encoding"] = utf16_encoding
+        _skip("textasset_utf16_detected")   # 形态计数留档（报告可见）
+    elif raw and sum(1 for b in raw if b < 0x20 and b not in (0x09, 0x0a, 0x0d)) / len(raw) > 0.05:
         _skip("textasset_binary")
         return []
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        # F3：非 UTF-8 文本（GBK/Latin-1 等编码误判）。errors="replace"
-        # 会把非法字节变成 U+FFFD，提取出的条目是 mojibake，翻译写回
-        # 必然损坏原始字节——整文件不产生条目（过滤不是删除，写回侧
-        # 同样 strict 拒绝，闭环安全）。
-        _skip("textasset_decode_failed")
-        return []
+    else:
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            # F3：非 UTF-8 文本（GBK/Latin-1 等编码误判）。errors="replace"
+            # 会把非法字节变成 U+FFFD，提取出的条目是 mojibake，翻译写回
+            # 必然损坏原始字节——整文件不产生条目（过滤不是删除，写回侧
+            # 同样 strict 拒绝，闭环安全）。
+            _skip("textasset_decode_failed")
+            return []
     # 双重 BOM 处理（a-catfiends obj70 实证）：UnityPy 读出的 str 已含
     # U+FEFF，调用方 encode("utf-8-sig") 又加一个 → decode 只移除一个，
     # 残留 BOM 卡住 JSON 分支（startswith("{") False），类型注册表 JSON
@@ -2498,7 +2551,6 @@ def _textasset_entries(file_id: str, obj_path_id: int, raw: bytes,
     if text.startswith("﻿"):
         text = text[len("﻿"):]
     stripped = text.lstrip()
-
     def _stamp(out: list, fmt: str) -> list:
         # 结构化格式（JSON/XML/YAML/CSV）提取的条目统一过单行代码判定：
         # .NET 类型注册表（registerTypes 数组）里的类型全名经 JSON 提取后
@@ -3535,33 +3587,56 @@ def extract_asset_file(path: str | Path, file_id: str | None = None,
                     script_class = _script_class_of(tree, obj) or script_class
                     if script_class:
                         script_classes.add(script_class)
-                    if _is_string_table_tree(tree):
-                        entries.extend(_localization_entries_from_tree(
-                            fid, obj.path_id, tree, asset_name))
-                        continue
-                    if _is_i2_language_source_tree(tree):
-                        # I2 Localization 语言源：整游戏文本全集，
-                        # 确定性提取（键/资产引用术语跳过）
-                        entries.extend(_i2_localization_entries_from_tree(
-                            fid, obj.path_id, tree, asset_name))
-                        continue
-                    shared_rows = tree.get("m_Entries")
-                    if isinstance(shared_rows, list) and any(
-                            isinstance(row, dict) and "m_Key" in row for row in shared_rows):
-                        continue
-                    display, candidates = _typetree_string_entries(
-                        fid, obj.path_id, tree, asset_name, skipped)
-                    entries.extend(display)
-                    if display:
-                        # typetree 已覆盖全部叶子，display 存在时不跑 raw scan；
-                        # 候选同时入库（低置信证据层，写回自动排除）
-                        entries.extend(candidates)
-                        continue
-                    # 无 display 条目：候选暂存，待 raw scan 后取补集
-                    # （raw scan 的对象级值特征/UI 证据分类更准确）
-                    if candidates:
-                        deferred_candidates.append(
-                            (asset_name, int(obj.path_id), candidates))
+                    # B15（snowday 按键失灵根因 2026-09-05）：配置类对象
+                    # （InputActionAsset/FMOD.Settings 等）不进 typetree
+                    # 字段提取——其字符串全是机器标识（绑定键/控件类型/参数
+                    # 名/总线名），字段级白名单无法穷尽（m_ExpectedControlType
+                    # 'Button'→'按钮'、m_Groups 'Joystick'→'操纵杆' 均曾
+                    # 漏网写回）。与 rawstr 分类链 is_config_class 分支
+                    # （~1930）同规则：宁漏勿坏，对象级确定性整跳。注意
+                    # 只禁 typetree 路径，对象照常回落 raw scan——rawstr
+                    # 分类链按类名证据产生 per-string skipped 留档条目
+                    # （legacy reason 词汇 input_system_object/
+                    # timeline_object 保持，审计连续性），typetree display
+                    # 泄漏面归零。
+                    _skip_typetree = (
+                        _class_disposition(script_class) == "config")
+                    if _skip_typetree:
+                        _reason = ("input_system_object"
+                                   if script_class in _INPUT_SYSTEM_SCRIPT_CLASSES
+                                   else "timeline_object"
+                                   if script_class in _TIMELINE_SCRIPT_CLASSES
+                                   else "script_class_config")
+                        skipped[_reason] = skipped.get(_reason, 0) + 1
+                    if not _skip_typetree:
+                        if _is_string_table_tree(tree):
+                            entries.extend(_localization_entries_from_tree(
+                                fid, obj.path_id, tree, asset_name))
+                            continue
+                        if _is_i2_language_source_tree(tree):
+                            # I2 Localization 语言源：整游戏文本全集，
+                            # 确定性提取（键/资产引用术语跳过）
+                            entries.extend(_i2_localization_entries_from_tree(
+                                fid, obj.path_id, tree, asset_name))
+                            continue
+                        shared_rows = tree.get("m_Entries")
+                        if isinstance(shared_rows, list) and any(
+                                isinstance(row, dict) and "m_Key" in row for row in shared_rows):
+                            continue
+                        display, candidates = _typetree_string_entries(
+                            fid, obj.path_id, tree, asset_name, skipped,
+                            script_class=script_class)
+                        entries.extend(display)
+                        if display:
+                            # typetree 已覆盖全部叶子，display 存在时不跑 raw scan；
+                            # 候选同时入库（低置信证据层，写回自动排除）
+                            entries.extend(candidates)
+                            continue
+                        # 无 display 条目：候选暂存，待 raw scan 后取补集
+                        # （raw scan 的对象级值特征/UI 证据分类更准确）
+                        if candidates:
+                            deferred_candidates.append(
+                                (asset_name, int(obj.path_id), candidates))
                 if tname not in _NATIVE_TEXT_TYPES:
                     try:
                         raw = obj.get_raw_data()

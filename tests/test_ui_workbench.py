@@ -1909,7 +1909,7 @@ def test_home_ambiguous_dir_prompts_selection_and_scans_selected_player(
     assert len(captured["candidates"]) == 2   # A、B 两个玩家候选
     assert len(started) == 1
     # 扫描闭包必须携带选择器（player A）
-    fake_project = type("P", (), {"scan_all": lambda self, event_cb=None: None})()
+    fake_project = type("P", (), {"scan_all": lambda self, event_cb=None, csv_overwrite_source=False: None})()
     monkeypatch.setattr(
         home_mod.Project, "open_game_dir", staticmethod(
             lambda gd, ad, player_root=None, player_executable=None:

@@ -57,9 +57,19 @@ def apply_format_text(fmt: str, entries, text: str, meta: dict) -> str:
         return json_format.apply_json(entries, text)
     if fmt == "csv":
         suffix = meta.get("source_suffix")
-        delimiter = meta.get("delimiter") or {
-            ".tsv": "\t", ".psv": "|", None: ",", "": ",",
-        }.get(suffix, ",")
+        # delimiter 三级取值：file 级 meta → 条目级 meta（B16c 实证
+        # 2026-09-05：TextAsset 内嵌 '|' 表 writer 只传 {"kind":"textasset"}，
+        # 缺省按 ',' 重建 → 译文追加成 ',,,,' 尾巴破坏行结构）→ 按后缀缺省
+        delimiter = meta.get("delimiter")
+        if not delimiter:
+            for e in entries:
+                d = getattr(e, "meta", {}).get("delimiter")
+                if d:
+                    delimiter = d
+                    break
+        if not delimiter:
+            delimiter = {".tsv": "\t", ".psv": "|", None: ",", "": ",",
+                         }.get(suffix, ",")
         # 写回列优先取条目级 meta 的 target_col（Rendezvous 实证 2026-08
         # -17：writer 传参 meta 只有 {"kind": "textasset"}，target_col 缺失
         # → apply_csv 走 new_col 追加列——译文写进第 14 列（Chinese

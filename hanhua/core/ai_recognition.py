@@ -46,6 +46,12 @@ from hanhua.core.placeholders import is_key_style_identifier
 # 候选层 kind 白名单：只有这两个 kind 是提取器标记的「低置信候选」。
 # 其他 skipped（引擎串 il2cpp_sentence、prefilter 键样本等）是确定性
 # 判定，AI 无权推翻（不误识别 > 不漏识别的底线）。
+# N2 结论（hickory 全量普查实证）：rawstr skipped 中带显示证据的表面
+# （script_class_config / prefilter_engine_string / prefilter_key_
+# identifier 且 obj_has_values）几乎全是正确跳过的确定性证据——输入绑定
+# '<Gamepad>/leftStick'、URP 混合模式、TMP 样式表名、GUID、版本号；唯一
+# 真漏网是对话拟声词 'tck – er…'（B17，已在确定性闸门用 _INTERJECTION_
+# WORDS 根治）。扩大 AI 收集面只会引入噪声，白名单保持收窄。
 _CANDIDATE_KINDS = frozenset({"typetree_candidate", "typetree_prefilter"})
 
 # 单次批量分类条数上限：Qwen3.5-4B ctx 8192 预算——识别 prompt 固定
@@ -69,6 +75,15 @@ _MUTED = "ai_verdict"
 # verdict 常量
 VERDICT_DISPLAY = "display"
 VERDICT_STRUCTURAL = "structural"
+
+# N3：文本类型维度——模型在判定 display 时顺带标注文本用途，落库到
+# meta.ai_text_type，供翻译端语境注入（对话/任务文本用叙事语气提示）
+# 与审计端复核口径使用。判不出/structural 时缺省。
+VERDICT_TYPES = ("dialogue", "ui", "quest", "item", "menu", "system")
+
+# N1：单条语境元素进 prompt 的最大长度（field_path 叶子名/类名/文件名
+# 都是短 token，40 字符截断只是防御性上限）
+_CONTEXT_LIMIT = 40
 
 
 @dataclass
@@ -142,13 +157,49 @@ def collect_candidates(rows: list[dict], *, limit: int = _MAX_CANDIDATES_PER_RUN
 
 # ── 模型判定 ─────────────────────────────────────────────────────────────
 
+def _item_context(entry: TextEntry) -> str:
+    """N1：从 meta 提取确定性语境描述（提取器已留档的证据，零模型成本）。
+
+    语境来源（只取确定性事实，不做推断）：
+    - field_path 叶子名（'roomName' → 字段 roomName）——对象字段名是
+      最强信号：hickory '2F' 在 roomName 字段下是楼层名，在 m_text 下
+      就是显示文本；
+    - obj_has_values（对象内是否有其他 display 证据）——真 UI 文本所在
+      对象通常有其他 display 叶子；
+    - script_class / asset_file（类名/资产文件名）——InputActionAsset
+      下的串大概率是输入绑定，CombatMusic.asset 下大概率是音频事件名。
+    """
+    parts: list[str] = []
+    field_path = entry.meta.get("field_path") or []
+    if isinstance(field_path, list):
+        leaf = next((str(p) for p in reversed(field_path)
+                     if isinstance(p, str) and not str(p).isdigit()), "")
+        if leaf:
+            parts.append(f"字段 {leaf[:_CONTEXT_LIMIT]}")
+    if entry.meta.get("obj_has_values"):
+        parts.append("对象含其他显示文本")
+    else:
+        parts.append("对象无其他显示文本")
+    script_class = str(entry.meta.get("script_class") or "").strip()
+    if script_class:
+        parts.append(f"类 {script_class[:_CONTEXT_LIMIT]}")
+    asset_file = str(entry.meta.get("asset_file") or "").strip()
+    if asset_file:
+        parts.append(f"文件 {asset_file[:_CONTEXT_LIMIT]}")
+    return "；".join(parts)
+
+
 def _build_batch_prompt(items: list[TextEntry]) -> str:
-    """批量分类 prompt：JSON 数组输出（索引对应），两级判定。
+    """批量分类 prompt：JSON 数组输出（索引对应），两级判定 + 类型标注。
 
     判定标准写给 4B 模型要具体：显示文本 = 玩家在界面/对话/物品栏能
     看到的词句；结构 = 键名/路径/ID/代码/引擎内部串。宁可判 structural
     也不要把键判成 display（宁漏勿坏方向性引导——错误升级会写坏游戏，
     错误跳过只是漏翻一条）。
+
+    N1：每条附确定性语境（字段名/对象内显示证据/类名/资产文件——见
+    _item_context）。语境只是证据提示，判定权仍在模型，且本地预校验
+    （is_key_style_identifier + is_actionable_translation）继续兜底。
     """
     lines = [
         "你是 Unity 游戏文本识别器。判断下列字符串是「显示文本」还是「结构串」。",
@@ -157,8 +208,13 @@ def _build_batch_prompt(items: list[TextEntry]) -> str:
         "结构串(structural)：键名、对象名、资源路径、ID、代码标识符、"
         "枚举值、类名、文件名、格式串、引擎内部串"
         "（如 ui_newGame、MENU_PLAY、Player prefab、Canvas/HUD、icon_sword_01）。",
+        "每条附有提取现场的语境（字段名/对象内显示证据/类名/文件名），"
+        "只作参考证据：字段名像文本字段（text/label/roomName/dialogue 等）"
+        "倾向 display，像技术字段（path/id/key/GUID 等）倾向 structural。",
+        "若判 display，再标注文本类型 t（dialogue=对话/ui=界面文字/"
+        "quest=任务/item=物品/menu=菜单项/system=系统提示），判不出省略 t。",
         "拿不准时判 structural。只输出 JSON 数组，每项 {\"i\": 索引, \"v\": "
-        "\"display\" 或 \"structural\"}，不要输出其他内容。",
+        "\"display\" 或 \"structural\", \"t\": 类型(可选)}，不要输出其他内容。",
         "",
         "字符串列表：",
     ]
@@ -166,16 +222,23 @@ def _build_batch_prompt(items: list[TextEntry]) -> str:
         text = (entry.original or "").strip()
         if len(text) > _PROMPT_TEXT_LIMIT:
             text = text[:_PROMPT_TEXT_LIMIT] + "…"
-        lines.append(f"{index}. {text!r}")
+        context = _item_context(entry)
+        if context:
+            lines.append(f"{index}. {text!r}（{context}）")
+        else:
+            lines.append(f"{index}. {text!r}")
     return "\n".join(lines)
 
 
+# N3：verdict 项解析——v 必有，t 可选（模型省略/乱写时忽略）
 _VERDICT_ITEM = re.compile(r"\{\s*\"i\"\s*:\s*(\d+)\s*,\s*\"v\"\s*:\s*"
-                           r"\"(display|structural)\"\s*\}")
+                           r"\"(display|structural)\""
+                           r"(?:\s*,\s*\"t\"\s*:\s*\"([a-z_]{1,20})\")?"
+                           r"\s*\}")
 
 
-def _parse_verdicts(raw: str) -> dict[int, str]:
-    """解析模型 JSON 数组输出 → {索引: verdict}。
+def _parse_verdicts(raw: str) -> dict[int, dict]:
+    """解析模型 JSON 数组输出 → {索引: {"v": verdict, "t": 类型(可选)}}。
 
     容错同 _parse_result：剥 ``` 围栏；JSON 整体失败时退化为逐项正则
     抽取（4B 模型偶发截断/夹带说明文字，逐项抽取能保住已判条目）。
@@ -190,7 +253,14 @@ def _parse_verdicts(raw: str) -> dict[int, str]:
         if body.startswith("json"):
             body = body[4:].strip()
         text = body
-    verdicts: dict[int, str] = {}
+    verdicts: dict[int, dict] = {}
+
+    def _accept(index: int, verdict: str, text_type: str | None) -> None:
+        item: dict = {"v": verdict}
+        if (text_type and text_type in VERDICT_TYPES):
+            item["t"] = text_type
+        verdicts[index] = item
+
     try:
         data = json.loads(text)
         if isinstance(data, list):
@@ -199,12 +269,14 @@ def _parse_verdicts(raw: str) -> dict[int, str]:
                         and isinstance(item.get("i"), int)
                         and item.get("v") in (VERDICT_DISPLAY,
                                               VERDICT_STRUCTURAL)):
-                    verdicts[item["i"]] = item["v"]
+                    t = item.get("t")
+                    _accept(item["i"], item["v"],
+                            t if isinstance(t, str) else None)
             return verdicts
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
     for match in _VERDICT_ITEM.finditer(text):
-        verdicts[int(match.group(1))] = match.group(2)
+        _accept(int(match.group(1)), match.group(2), match.group(3))
     return verdicts
 
 
@@ -279,13 +351,14 @@ class _PendingWrites:
     precheck_blocked: int = 0
 
 
-def _apply_verdicts(items: list[TextEntry], verdicts: dict[int, str],
+def _apply_verdicts(items: list[TextEntry], verdicts: dict[int, dict],
                     pending: _PendingWrites) -> None:
     """把一批 verdict 转成落库缓冲（只缓冲，不直接写——单 commit 批量）。"""
     for index, entry in enumerate(items):
-        verdict = verdicts.get(index)
-        if verdict is None:
+        verdict_item = verdicts.get(index)
+        if verdict_item is None:
             continue  # 模型漏判：维持原状（宁漏勿坏）
+        verdict = verdict_item.get("v")
         if verdict == VERDICT_DISPLAY:
             if not _verify_upgradeable(entry):
                 # 键风格/结构终检拦下：记录 muted 防重复询问，状态不动
@@ -295,9 +368,11 @@ def _apply_verdicts(items: list[TextEntry], verdicts: dict[int, str],
                 }))
                 pending.precheck_blocked += 1
                 continue
-            pending.meta_rows.append(
-                (entry.file_id, entry.key_path,
-                 _upgrade_meta(entry, {"ai_model_verdict": VERDICT_DISPLAY})))
+            pending.meta_rows.append((
+                entry.file_id, entry.key_path,
+                _upgrade_meta(entry, {"ai_model_verdict": VERDICT_DISPLAY,
+                                      "ai_text_type":
+                                          verdict_item.get("t") or ""})))
             pending.status_rows.append((entry.file_id, entry.key_path,
                                         STATUS_PENDING))
             pending.upgraded += 1
