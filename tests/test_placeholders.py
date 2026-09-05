@@ -579,6 +579,17 @@ def test_mixed_symbol_token_is_structural():
     assert is_hard_structural("n۶?")
     assert not is_hard_structural("ab50%")
     assert not is_hard_structural("a b % c")
+    # F50（hickory/dcdb50a165/a61ae49375 实证 2026-09-05）：单字母数字碎片
+    # 形态与玩家可读 UI 短语重叠——'2F'（楼层，m_text/roomName 双证）、
+    # 'x2'/'2x'（倍数）、'2H'（时长）、'1P'（人数）是真实 UI 短语，被 F49
+    # 误杀漏提。白名单词放行（is_hard_structural=False）。
+    for w in ("2F", "1F", "3F", "x2", "2x", "1x", "0x", "2H", "12H", "1P", "2P"):
+        assert not is_hard_structural(w), w
+    # F49 原始拦截面守恒：二进制残留/无语义键仍拦（不在白名单的形态）
+    assert is_hard_structural("F1")
+    assert is_hard_structural("A1")
+    assert is_hard_structural("x7")
+    assert is_hard_structural("n۶?")
 
 
 # ── butterflies 修复：§ 键码 / 语言代码 / 键位映射 / 占位名 / credit 名单 ──

@@ -793,6 +793,17 @@ DISPLAY_WORDS = {
     "energy", "ammo", "money", "gold", "coins", "online", "offline",
     "singleplayer", "multiplayer", "coop", "pvp", "chat", "friend", "party",
     "guild", "lobby", "2d", "3d",
+    # F50（hickory/dcdb50a165/a61ae49375 实证 2026-09-05）：UI 碎片词——
+    # '2F'（楼层，m_text/roomName 双证）、'x2'/'2x'（倍数标记，m_Text 4 游戏实证）、
+    # '2H'（时长标签 12 连）、'1P'/'2P'（人数）。F49 单字母规则把它们当
+    # 「无成词内容」拦截，但它们是玩家可读的 UI 短语。写回安全层独立于
+    # 识别（immutable/回退不受影响），下游仍有 is_key_style_identifier +
+    # actionable 终检 + AI 候选层兜底，白名单放行不破宁漏勿坏。
+    "1f", "2f", "3f", "4f", "5f", "6f", "7f", "8f", "9f",
+    "0x", "1x", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "9x",
+    "x1", "x2", "x3", "x4", "x5",
+    "1h", "2h", "3h", "4h", "6h", "8h", "12h",
+    "1p", "2p", "3p", "4p",
 }
 
 # JSON 字段名视为键字段（值不翻译）：Key/ID/GUID/Hash/Ref/语言代码等
