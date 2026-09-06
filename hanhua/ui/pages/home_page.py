@@ -157,6 +157,9 @@ class HomePage(QWidget):
         self._scanning = False
         # 合并节点「识别」的当前状态（扫描子阶段合并，2026-08-15）
         self._scan_node_state = ""
+        # 全量运行日志（任务七）：当前扫描的拖入目录（None=不在扫描期，
+        # _runlog_event 据此短路；必须在 __init__ 初始化防 AttributeError）
+        self._scan_game_dir = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 22, 28, 18)
@@ -477,6 +480,15 @@ class HomePage(QWidget):
         player_root, player_executable = (
             selection if selection is not None else (None, None))
         self._set_busy(True)
+        # 全量运行日志（任务七）：扫描会话分节（_scan_game_dir 同时是
+        # 扫描事件的落盘键）
+        self._scan_game_dir = path
+        try:
+            from hanhua.core.run_log import get_run_log
+            get_run_log(self.state.app_dir, path).begin_session(
+                f"开始扫描 · {path.name}")
+        except Exception:  # noqa: BLE001 日志失败绝不阻断扫描主流程
+            pass
         # 扫描事件经 Worker 信号转发（M1：event_cb 此前未接线，rail 的
         # 检测/扫描/工具分析节点全程卡在首个 running）
         signals_holder = {}
@@ -528,6 +540,23 @@ class HomePage(QWidget):
         report = proj.scan_all(event_cb=event_cb)
         return proj, report
 
+    def _runlog_event(self, category: str, text: str, status: str = "") -> None:
+        """扫描阶段事件落盘到全量运行日志（0.41.0 任务七）。
+
+        扫描期项目还没建（project=None），translate_page 的 _runlog 拿
+        不到 game_dir——所以 home_page 持有本次拖入目录，扫描事件的
+        键即游戏目录身份，与后续翻译/写回（project.game_dir 同源）落
+        到同一日志文件，全链路一份时间线。
+        """
+        if self._scan_game_dir is None:
+            return
+        try:
+            from hanhua.core.run_log import get_run_log
+            get_run_log(self.state.app_dir, self._scan_game_dir
+                        ).event(category, text, status)
+        except Exception:  # noqa: BLE001 日志失败绝不阻断扫描主流程
+            pass
+
     def _on_scan_progress(self, event) -> None:
         """扫描阶段事件 → rail 实时更新 + 进度条百分比（#14）。
 
@@ -549,6 +578,17 @@ class HomePage(QWidget):
         if phase not in {"detection", "text_scan", "tool_analysis",
                          "binary_scan"}:
             return
+        # 全量运行日志（任务七）：扫描事件此前只进 rail 进度条，
+        # 磁盘上不留痕——事后无法复盘扫描期间发生过什么。
+        detail = ""
+        if phase == "binary_scan" and status == "running":
+            current = getattr(event, "current", 0) or 0
+            total = getattr(event, "total", 0) or 0
+            if total:
+                detail = f"（{current}/{total}）"
+        self._runlog_event(
+            "scan", f"识别阶段 {phase}：{status} {detail}{message}".rstrip(),
+            status if status in {"succeeded", "failed", "running"} else "")
         self._scan_node_state = self._merge_scan_state(
             self._scan_node_state, status)
         self.pipeline_rail.set_node_state(
@@ -614,6 +654,23 @@ class HomePage(QWidget):
         proj, report = result
         self._set_busy(False)
         self.state.switch_project(proj, report)
+        # 全量运行日志（任务七）：扫描终态汇总（统计 + 跳过率告警）。
+        # game_dir 从 _scan_game_dir（拖入目录）取——项目已切换但扫描
+        # 事件用同一键，保持会话时间线连续。
+        summary = ""
+        try:
+            counts = dict(getattr(report, "status_counts", ()) or {})
+            recognized = getattr(report, "recognized_entries", 0) or 0
+            summary = (
+                f"扫描完成：{getattr(report, 'text_files', 0)} 个文本文件"
+                f" · {getattr(report, 'v2_files', 0)} 个二进制资源"
+                f" · 识别 {recognized} 条 · 状态分布 {counts}")
+            unblocked = bool(getattr(report, "unblocked", False))
+            self._runlog_event(
+                "scan", summary, "success" if unblocked else "warning")
+        except Exception:  # noqa: BLE001 日志失败不阻断
+            pass
+        self._scan_game_dir = None
         self._render_report(report)
         self._refresh_profile_card()
         self._refresh_context_card()
@@ -650,6 +707,8 @@ class HomePage(QWidget):
         self._set_busy(False)
         self.pipeline_rail.set_node_state(
             "scan", "failed", err[:80], "置信度 low")
+        self._runlog_event("scan", f"扫描失败：{err}", "error")
+        self._scan_game_dir = None
         Toast.show(self, f"扫描失败：{err}", "error")
 
     def _warn_skip_rate(self, report) -> None:

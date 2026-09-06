@@ -30,6 +30,7 @@ from hanhua.core.prompts import build_system_prompt, collect_known_names
 from hanhua.core.quality import is_write_ready
 from hanhua.core.reviewer import review_entries
 from hanhua.core.translator import create_client
+from hanhua.core.run_log import get_run_log
 from hanhua.ui.app_state import AppState
 from hanhua.ui.design_system import motion_enabled
 from hanhua.ui.widgets import (ActivityFeed, PageHeader,
@@ -157,8 +158,6 @@ class TranslatePage(QWidget):
         self._active_run: _TranslationRun | None = None
         self._running = False
         self._write_running = False
-        # 写回预演（0.39.0 M4，Dry Run）在跑标志——与正式写回/翻译互斥
-        self._dry_run_running = False
         self._write_terminal_message = ""
         self._last_stats = None
         # P4（2026-09-06 fromivan）：本轮语义审核的完整汇总 dict（
@@ -397,16 +396,6 @@ class TranslatePage(QWidget):
         self.partial_check.setToolTip(
             "存在拒绝/截断条目时强制发布（默认阻断，不勾选）")
         self.partial_check.setAccessibleName("允许部分写入并发布")
-        # 写回预演按钮（0.39.0 M4，设计文档 §62「分析写回但不修改游戏」）：
-        # 走 Worker 后台跑 build_writeback_plan（与正式写回同一分类链、
-        # 零磁盘零 store 副作用），报告四类计数进日志面板。预演不替代
-        # 写回守卫——按钮常亮可先看风险面，确认后仍点「写回游戏」。
-        self.dry_run_btn = QPushButton("写回预演")
-        self.dry_run_btn.setMinimumHeight(44)
-        self.dry_run_btn.setAccessibleName("写回预演（只分析不修改游戏）")
-        self.dry_run_btn.setToolTip(
-            "只分析不写盘：预计写回/需要人工/拒绝/高风险四类计数，"
-            "与正式写回同一套判定规则")
         # 2026-08-22 用户指令：checkbox 旁加几个字的小说明
         self.partial_hint = QLabel("有拒绝/截断时仍可发布")
         self.partial_hint.setProperty("class", "subtitle")
@@ -420,7 +409,6 @@ class TranslatePage(QWidget):
         ctl.addStretch(1)
         ctl.addWidget(self.partial_check)
         ctl.addWidget(self.partial_hint)
-        ctl.addWidget(self.dry_run_btn)
         ctl.addWidget(self.reveal_btn)
         ctl.addWidget(self.play_btn)
         lay.addLayout(ctl)
@@ -438,7 +426,6 @@ class TranslatePage(QWidget):
         self.stop_btn.clicked.connect(self.stop)
         self.retry_btn.clicked.connect(self.retry_failed)
         self.write_btn.clicked.connect(self.write_back)
-        self.dry_run_btn.clicked.connect(self.dry_run_writeback)
         self.play_btn.clicked.connect(self.launch_game)
         self.reveal_btn.clicked.connect(self.reveal_output)
         self.copy_log_btn.clicked.connect(self._copy_log)
@@ -633,6 +620,51 @@ class TranslatePage(QWidget):
 
     def _clear_log(self):
         self.log_view.clear()
+        self._runlog("control", "用户清空了运行记录（界面视图；全量日志仍在 run-logs/）")
+
+    # ── 全量运行日志（0.41.0 任务七）──
+    # 界面两块视图（ActivityFeed 120 条 / log_view 2000 行）都是有界
+    # 缓冲，长跑必然丢历史。RunLog 落盘全量：以下两个方法分别是
+    # log_view 与 activity_feed 的单一持久化伴写出口，所有新增 UI
+    # 日志点只调这两者之一即自动全量记录。
+    def _runlog(self, category: str, text: str, status: str = "") -> None:
+        """运行记录行落盘（log_view 的持久化伴写）。"""
+        try:
+            project = self.state.project
+            if project is None:
+                return
+            get_run_log(self.state.app_dir,
+                        getattr(project, "game_dir", None)
+                        ).event(category, text, status)
+        except Exception:  # noqa: BLE001 日志失败绝不阻断主流程
+            pass
+
+    def _log_line(self, line: str, category: str = "run") -> None:
+        """log_view.appendPlainText 的全量替身：界面（有界）+ 落盘（全量）。
+
+        category 允许调用方标记专属落盘类别（如写回审计用 "audit"），
+        默认 "run" 与 log_view 普通行一致。
+        """
+        self.log_view.appendPlainText(line)
+        self._runlog(category, line)
+
+    def _feed_event(self, status: str, text: str) -> None:
+        """activity_feed.append_event 的全量替身：界面（有界）+ 落盘。"""
+        self.activity_feed.append_event(status, text)
+        self._runlog("stream", text, status)
+
+    def _runlog_begin(self, title: str) -> None:
+        """全量运行日志分节（开始扫描/翻译/写回时调用）。"""
+        try:
+            project = self.state.project
+            if project is None:
+                return
+            from hanhua.core.run_log import get_run_log
+            get_run_log(self.state.app_dir,
+                        getattr(project, "game_dir", None)
+                        ).begin_session(title)
+        except Exception:  # noqa: BLE001 日志失败绝不阻断主流程
+            pass
 
     # ── 开始 ──
     def start(self):
@@ -645,9 +677,6 @@ class TranslatePage(QWidget):
         if self._write_running:
             Toast.show(self, "正在写回文件，请稍候再开始翻译", "warning")
             return
-        if self._dry_run_running:
-            Toast.show(self, "写回预演进行中，请稍候", "warning")
-            return
         api = replace(self.state.api)
         if (api.mode != "local"
                 and not (api.base_url and api.api_key and api.model)):
@@ -656,6 +685,16 @@ class TranslatePage(QWidget):
             return
         project = self.state.project
         generation = self.state.project_generation
+        # 全量运行日志分节先于任何输出（任务七：start 不再 clear 落盘日志）
+        # ——game_dir 缺失（测试桩/异常项目）不阻断启动，仅跳过分节
+        try:
+            game_name = Path(project.game_dir).name
+        except (AttributeError, TypeError):
+            game_name = ""
+        self._runlog_begin(
+            f"开始翻译 · {game_name}".rstrip(" ·")
+            + (f" · 模型 {api.model}" if api.mode == "api" and api.model
+               else " · 本地模型"))
         project_profile = getattr(project, "profile", None)
         run = _TranslationRun(
             project=project,
@@ -685,7 +724,7 @@ class TranslatePage(QWidget):
         self.progress_bar.setRange(0, 0)          # 第一批返回前为忙碌动画
         self.activity_feed.clear()
         self._stream_last_done = 0
-        self.activity_feed.append_event("running", "正在请求模型…")
+        self._feed_event("running", "正在请求模型…")
         self._set_stream_status("◐ 正在处理", phase="running")
         signals_holder = {}
 
@@ -700,7 +739,7 @@ class TranslatePage(QWidget):
             if self.state.is_current_project(p, g) else None)
         worker.signals.log.connect(
             lambda line, p=project, g=generation:
-            self.log_view.appendPlainText(line)
+            self._log_line(line)
             if self.state.is_current_project(p, g) else None)
         worker.signals.review.connect(
             lambda done, total, p=project, g=generation:
@@ -718,7 +757,7 @@ class TranslatePage(QWidget):
         # 行为会崩溃——统一经 note 信号回主线程）
         worker.signals.note.connect(
             lambda status, text, p=project, g=generation:
-            self.activity_feed.append_event(status, text)
+            self._feed_event(status, text)
             if self.state.is_current_project(p, g) else None)
         worker.signals.review_summary.connect(
             lambda line, p=project, g=generation:
@@ -1273,9 +1312,12 @@ class TranslatePage(QWidget):
             source = "（记忆命中）" if delta and stats.from_memory else ""
             if delta >= 20:
                 source = "（同文条目共享译文，一次性落库）"
-            self.activity_feed.append_event(
+            self._feed_event(
                 "success",
                 f"本批完成 {delta} 条 · 累计 {done} / {stats.total} {source}")
+            self._runlog(
+                "translate", f"本批完成 {delta} 条 · 累计 {done} / "
+                f"{stats.total} · 失败 {stats.failed} 条{source}")
             self._stream_last_done = done
         if stats.total:
             self._set_stream_status(
@@ -1314,9 +1356,13 @@ class TranslatePage(QWidget):
         now = time.monotonic()
         if done >= total or now - self._last_review_emit >= 0.8:
             self._last_review_emit = now
-            self.activity_feed.append_event(
+            self._feed_event(
                 "info" if done < total else "success",
                 f"语义审核：{done}/{total} 条"
+                + ("" if done < total else " · 完成"))
+            self._runlog(
+                "review",
+                f"语义审核判定：{done}/{total} 条"
                 + ("" if done < total else " · 完成"))
 
     def _on_review_disposition_progress(self, done: int, total: int):
@@ -1341,9 +1387,13 @@ class TranslatePage(QWidget):
         now = time.monotonic()
         if done >= total or now - self._last_review_emit >= 0.8:
             self._last_review_emit = now
-            self.activity_feed.append_event(
+            self._feed_event(
                 "info" if done < total else "success",
                 f"审校处置：{done}/{total} 条"
+                + ("" if done < total else " · 完成"))
+            self._runlog(
+                "review",
+                f"审校处置（反馈重译+再审收敛）：{done}/{total} 条"
                 + ("" if done < total else " · 完成"))
 
     def _on_review_summary(self, line: str):
@@ -1354,7 +1404,8 @@ class TranslatePage(QWidget):
         活动流。长消息按「 · 」拆分换行（Toast 单行不换行会撑出屏幕），
         驻留 8 秒保证看完。
         """
-        self.activity_feed.append_event("success", line)
+        self._feed_event("success", line)
+        self._runlog("review", f"审核汇总：{line}")
         Toast.show(self, line.replace(" · ", "\n"), "success",
                    duration_ms=8000)
 
@@ -1367,8 +1418,9 @@ class TranslatePage(QWidget):
         驱动活动流样式，明细行同步追加到运行记录。终态（success/warning/
         error）除活动流外再 Toast 一次，保证用户一定能看到审计结论。
         """
-        self.activity_feed.append_event(status, text)
-        self.log_view.appendPlainText(text)
+        self._feed_event(status, text)
+        # 落盘走专属 audit 类别（界面 log_view 行 + RunLog [audit] 双写）
+        self._log_line(text, category="audit")
         if status in {"success", "warning", "error"}:
             Toast.show(
                 self, text,
@@ -1394,10 +1446,17 @@ class TranslatePage(QWidget):
              + (f" · 失败 {stats.failed} 条" if stats.failed else "")),
             f"耗时 {stats.elapsed:.1f} 秒 · {stats.rate_per_minute:.0f} 条/分")
         if stats.failed:
-            self.activity_feed.append_event(
-                "error", f"{stats.failed} 条失败（可重试）")
+            self._feed_event("error", f"{stats.failed} 条失败（可重试）")
+            self._runlog(
+                "translate",
+                f"翻译结束：{stats.failed} 条失败（可重试）", "error")
         else:
-            self.activity_feed.append_event("success", "全部完成")
+            self._feed_event("success", "全部完成")
+            self._runlog(
+                "translate",
+                f"翻译结束：全部完成 · {stats.done} 条 · 耗时 "
+                f"{stats.elapsed:.1f} 秒 · {stats.rate_per_minute:.0f} 条/分",
+                "success")
         self._set_stream_status(
             "○ 已完成",
             phase="warning" if stats.failed else "succeeded")
@@ -1491,10 +1550,12 @@ class TranslatePage(QWidget):
             "translation", "failed", "翻译出错", err[:60])
         diagnostic = sanitize_exception(RuntimeError(str(err)), secrets)
         Toast.show(self, f"翻译出错：{json.dumps(diagnostic, ensure_ascii=False)}", "error")
+        self._runlog("translate", f"翻译出错：{err}", "error")
         export_path = self._export_fail_record(
             "翻译出错", json.dumps(diagnostic, ensure_ascii=False))
         if export_path:
-            self.log_view.appendPlainText(f"失败记录已导出：{export_path}")
+            self._log_line(f"失败记录已导出：{export_path}")
+            self._runlog("record", f"失败记录已导出：{export_path}")
 
     def _on_run_drained(self, run: _TranslationRun):
         if self._active_run is run:
@@ -1511,6 +1572,7 @@ class TranslatePage(QWidget):
         if requested:
             self.stop_btn.setEnabled(False)
             self.log_view.appendPlainText("正在停止…未完成条目保留为待翻译，可随时继续")
+            self._runlog("control", "用户停止：未完成条目保留为待翻译")
 
     def retry_failed(self):
         store = self.state.project.store
@@ -1519,103 +1581,27 @@ class TranslatePage(QWidget):
             store.reset_to_pending(r["file_id"], r["key_path"])
         self.state.entriesChanged.emit()
         self.log_view.appendPlainText("已标记失败条目为待翻译")
+        self._runlog("control", "重试失败：已标记失败条目为待翻译")
         self.start()
 
     # ── 写回 ──
-    def dry_run_writeback(self):
-        """写回预演（0.39.0 M4，§62）：只分析不落盘——后台跑
-        build_writeback_plan（与 write_back_v2 / write_back_text 同一
-        分类链、零磁盘零 store 副作用），报告进日志面板。不替代正式
-        写回守卫（unblocked/质量门仍由 write_back() 把关），只是把
-        正式写回的分类结果提前完整呈现。"""
-        if self.state.project is None:
-            Toast.show(self, "请先在首页打开游戏文件夹", "warning")
-            return
-        if self._write_running:
-            Toast.show(self, "正在写回文件，预演请等写回完成", "warning")
-            return
-        if self._dry_run_running:
-            Toast.show(self, "预演正在进行，请稍候", "warning")
-            return
-        project = self.state.project
-        generation = self.state.project_generation
-        self._dry_run_running = True
-        self.dry_run_btn.setEnabled(False)
-        self.log_view.appendPlainText("正在生成写回预演（不修改游戏）…")
-
-        def run_dry_run():
-            with self.state.project_lease(project, generation) as acquired:
-                if not acquired:
-                    return None
-                from hanhua.core.unity.writeback_plan import (
-                    build_writeback_plan)
-                # 分诊服务与正式写回同源探测（write_all 1860-1866 同款）：
-                # 模型在场才启用，缺席 → 分诊层不参与（预演口径 = 正式
-                # 写回口径）。store=None 由 build_writeback_plan 内部保证
-                # （判定缓存不落库，预演零副作用）。
-                triage_app_dir = None
-                try:
-                    from hanhua.core.review_server import (
-                        ReviewModelService)
-                    _spec = ReviewModelService(
-                        self.state.resource_dir)._spec()
-                    if _spec.is_available:
-                        triage_app_dir = self.state.resource_dir
-                except Exception:  # noqa: BLE001 模型探测失败 = 不启用
-                    triage_app_dir = None
-                return build_writeback_plan(
-                    project.store, project.game_dir,
-                    triage_app_dir=triage_app_dir)
-
-        worker = Worker(run_dry_run)
-        worker.signals.finished.connect(
-            lambda plan, p=project, g=generation:
-            self._on_dry_run_done(plan)
-            if plan is not None and self.state.is_current_project(p, g)
-            else None)
-        worker.signals.error.connect(
-            lambda err, p=project, g=generation:
-            (self.log_view.appendPlainText(f"写回预演失败：{err}"),
-             Toast.show(self, f"写回预演失败：{err}", "error"))
-            if self.state.is_current_project(p, g) else None)
-        # 无论结果如何（含项目已切换被丢弃的 plan=None）都要复位按钮
-        worker.signals.finished.connect(self._on_dry_run_drained)
-        worker.signals.error.connect(self._on_dry_run_drained)
-        self._pool.start(worker)
-
-    def _on_dry_run_drained(self, *_args):
-        self._dry_run_running = False
-        self.dry_run_btn.setEnabled(True)
-
-    def _on_dry_run_done(self, plan):
-        self.log_view.appendPlainText(plan.summary())
-        if plan.planned_total == 0 and plan.rejected == 0 \
-                and plan.high_risk == 0 and plan.auto_revert == 0:
-            Toast.show(self, "预演完成：没有可写的译文条目", "warning")
-        else:
-            Toast.show(
-                self,
-                f"预演完成：预计写回 {plan.planned_total} 条"
-                f"（高风险 {plan.high_risk + plan.auto_revert}）", "success")
-
     def write_back(self):
         if self._write_running:
-            self.log_view.appendPlainText("写回正在进行，请等待当前任务完成")
-            return
-        if self._dry_run_running:
-            self.log_view.appendPlainText("写回预演正在进行，请等待完成")
+            self._log_line("写回正在进行，请等待当前任务完成")
             return
         report = self.state.analysis_report
         if report is None or not report.unblocked:
             blocked = [step.reason for step in (report.route if report else ())
                        if step.required and step.status in {"blocked", "failed"}]
             detail = blocked[0] if blocked else "分析报告尚未满足写回条件"
-            self.log_view.appendPlainText(f"写回已阻断：{detail}")
+            self._log_line(f"写回已阻断：{detail}")
+            self._runlog("writeback", f"写回已阻断：{detail}", "warning")
             Toast.show(self, f"写回已阻断：{detail}", "warning")
             return
         if _write_ready_count(self.state.project.store) <= 0:
             detail = "没有通过质量门的可写译文"
-            self.log_view.appendPlainText(f"写回已阻断：{detail}")
+            self._log_line(f"写回已阻断：{detail}")
+            self._runlog("writeback", f"写回已阻断：{detail}", "warning")
             Toast.show(self, f"写回已阻断：{detail}", "warning")
             return
         project = self.state.project
@@ -1648,7 +1634,7 @@ class TranslatePage(QWidget):
             if self.state.is_current_project(p, g) else None)
         worker.signals.log.connect(
             lambda line, p=project, g=generation:
-            self.log_view.appendPlainText(line)
+            self._log_line(line)
             if self.state.is_current_project(p, g) else None)
         # 写回后地毯式审计进度回主线程（2026-08-26 用户实证「写回检查
         # 看不到实际信息」的根因：audit.emit 发生在 _write_worker 内，但
@@ -1668,13 +1654,15 @@ class TranslatePage(QWidget):
         self._write_terminal_message = ""
         self._write_worker_task = worker
         self.write_safety.set_ready(False, "写回进行中…")
+        self._runlog_begin("开始写回")
         self.log_view.appendPlainText("正在写回…")
         self._pool.start(worker)
 
     def _on_write_error(self, err: str):
         message = f"写回失败：{err}"
         self._write_terminal_message = message
-        self.log_view.appendPlainText(message)
+        self._log_line(message)
+        self._runlog("writeback", message, "error")
         self._reset_pipeline_progress()
         self.progress_label.setText(message)
         self.state.pipelinePhase.emit(
@@ -1683,10 +1671,12 @@ class TranslatePage(QWidget):
         export_path = self._export_fail_record("写回失败", err)
         if export_path:
             self.log_view.appendPlainText(f"失败记录已导出：{export_path}")
+            self._runlog("record", f"失败记录已导出：{export_path}")
         record_path = self._export_records(
             error_title="写回失败", error_detail=err)
         if record_path:
             self.log_view.appendPlainText(f"完整记录已导出：{record_path}")
+            self._runlog("record", f"完整记录已导出：{record_path}")
 
     def _write_worker(self, project, generation: int, font_config,
                       signals=None, *, allow_partial: bool = False):
@@ -1782,7 +1772,7 @@ class TranslatePage(QWidget):
         message = str(getattr(stage, "message", "") or "")
         phase = str(getattr(stage, "phase", "") or "")
         if message:
-            self.log_view.appendPlainText(message)
+            self._log_line(message)
             self.progress_label.setText(message)
         # 写回阶段映射到 90-100% 段（2026-08-20 全链路 3-3-3-1）：
         # 七个阶段在 10% 区间内按比例分布，经 _set_pipeline_progress
@@ -1873,6 +1863,14 @@ class TranslatePage(QWidget):
             f"{written_translations} · 原游戏输入哈希 "
             f"{'已保护' if input_protected else '发生变化'} · 输出重开验证 "
             f"{'已通过' if reopen_verified else '未通过'}")
+        self._runlog(
+            "writeback",
+            f"{result_label}：{'，'.join(parts)} → {out}\n"
+            f"验证摘要：变更文件 {changed_files} · 实际写入译文 "
+            f"{written_translations} · 输入哈希 "
+            f"{'已保护' if input_protected else '发生变化'} · 重开验证 "
+            f"{'已通过' if reopen_verified else '未通过'} · overall={overall}",
+            "success" if verified else "warning")
         font_labels = {
             "runtime_fallback": "运行时中文回退",
             "disabled": "未启用",
@@ -1900,6 +1898,13 @@ class TranslatePage(QWidget):
                         self.log_view.appendPlainText(
                             f"  {row.get('scalar')} → {row.get('consumer')}"
                             f"（{row.get('kind')}）")
+                    # 界面只展示前 16 个缺字；全量落盘
+                    self._runlog(
+                        "writeback",
+                        "字体缺字（全量）：\n" + "\n".join(
+                            f"  {row.get('scalar')} → {row.get('consumer')}"
+                            f"（{row.get('kind')}）"
+                            for row in missing), "warning")
             # Phase 5：位图注入摘要（NGUI/BMFont provider 闭环）
             bitmap = verification.get("font_bitmap")
             if bitmap:
@@ -1924,11 +1929,18 @@ class TranslatePage(QWidget):
                 if name != "overall" and item.get("detail"):
                     self.log_view.appendPlainText(
                         f"  {name}: {item['detail']}")
+                    self._runlog(
+                        "writeback", f"闸门 {name}: {item['detail']}")
         for warning in getattr(v2, "warnings", ()) if v2 else ():
             if warning not in warnings:
                 warnings.append(warning)
         for warning in warnings:
             self.log_view.appendPlainText(f"警告：{warning}")
+        if warnings:
+            self._runlog(
+                "writeback",
+                "写回警告（全量）：\n" + "\n".join(f"  {w}" for w in warnings),
+                "warning")
         rejected_entries = verification.get("rejected_entries") or []
         truncated_entries = verification.get("truncated_entries") or []
         if rejected_entries:
@@ -1941,6 +1953,16 @@ class TranslatePage(QWidget):
             if len(rejected_entries) > 10:
                 self.log_view.appendPlainText(
                     f"  … 其余 {len(rejected_entries) - 10} 条")
+            # 界面只展示前 10 条；全量落盘（任务七：拒绝明细是写回复盘
+            # 的核心证据，绝不截断）
+            self._runlog(
+                "writeback",
+                f"拒绝条目 {len(rejected_entries)} 条（默认阻断发布）：\n"
+                + "\n".join(
+                    f"  拒绝 {item.get('locator', '?')}: "
+                    f"{item.get('reason', '?')}"
+                    for item in rejected_entries),
+                "warning")
         if truncated_entries:
             self.log_view.appendPlainText(
                 f"— 截断条目 {len(truncated_entries)} 条"
@@ -1950,6 +1972,10 @@ class TranslatePage(QWidget):
             if len(truncated_entries) > 10:
                 self.log_view.appendPlainText(
                     f"  … 其余 {len(truncated_entries) - 10} 条")
+            self._runlog(
+                "writeback",
+                f"截断条目 {len(truncated_entries)} 条（DLL/IL2CPP 固定容量）",
+                "info")
         manifest_name = verification.get("manifest")
         if manifest_name:
             self.log_view.appendPlainText(
@@ -1966,6 +1992,7 @@ class TranslatePage(QWidget):
             export_path = self._export_fail_record("写回未通过验证", detail)
             if export_path:
                 self.log_view.appendPlainText(f"失败记录已导出：{export_path}")
+                self._runlog("record", f"失败记录已导出：{export_path}")
         if route_blocked:
             Toast.show(self, "写回未通过验证 · 必需能力仍被阻断", "error")
         elif not route_complete:
@@ -1983,12 +2010,14 @@ class TranslatePage(QWidget):
         record_path = self._export_records(write_result=result)
         if record_path:
             self.log_view.appendPlainText(f"完整记录已导出：{record_path}")
+            self._runlog("record", f"完整记录已导出：{record_path}")
             # 写回审计报告随记录文档落盘（record_writer 已生成
             # writeback/audit.txt 时在记录目录内；此处兜底独立路径）
             audit_path = self.state.project.out_dir / "writeback" / "audit.txt"
             if audit_path.is_file():
                 self.log_view.appendPlainText(
                     f"写回审计报告：{audit_path}")
+                self._runlog("audit", f"写回审计报告（全文）：{audit_path}")
 
     def reveal_output(self):
         out = str(self.state.project.out_dir)
@@ -2192,8 +2221,16 @@ class TranslatePage(QWidget):
         self.progress_label.setText("尚未开始")
         self.progress_sub.setText(
             "在开始前，请确认设置页的 API 与游戏档案已配置")
+        # 界面视图清空换新项目；全量日志不丢（任务七）——分节标记项目
+        # 切换，随后输出按新项目 game_dir 落到新日志文件。
         self.log_view.clear()
         self.activity_feed.clear()
+        # game_dir 缺失（测试桩/异常项目）不阻断打开项目，仅跳过分节
+        try:
+            game_name = Path(self.state.project.game_dir).name
+        except (AttributeError, TypeError):
+            game_name = ""
+        self._runlog_begin(f"打开项目 · {game_name}".rstrip(" ·"))
         self._set_stream_status("等待开始", phase="idle")
         self._refresh_chips()
         self._set_primary(self.start_btn)

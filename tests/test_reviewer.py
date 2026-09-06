@@ -706,6 +706,73 @@ def test_reason_claims_missing_translation():
     assert not _reason_claims_missing_translation("")
 
 
+def test_reason_claims_language_error():
+    """C12b：可验证主张「语言错误/不该译成中文」——中文本地化流程里
+    恒不成立（把原文译成中文是任务本身），命中即幻觉。"""
+    from hanhua.core.reviewer import _reason_claims_language_error
+    # fake-it 4B 真实输出形态
+    assert _reason_claims_language_error(
+        "原文为法语，译文误译成中文，语言完全错误。")
+    assert _reason_claims_language_error(
+        "原文为德语，不应翻译成中文，应保留原语言。")
+    assert _reason_claims_language_error("译文语言错误，应为法语。")
+    # 真实语义问题不受影响
+    assert not _reason_claims_language_error(
+        "原文 lecture=读者，译文误译为讲师，语义错误。")
+    assert not _reason_claims_language_error("术语误用：Resume 应译为继续。")
+    assert not _reason_claims_language_error("")
+
+
+def test_language_error_claim_falls_back_to_single_review(monkeypatch):
+    """C12b：批审「原文为法语，译文误译成中文」→ 判定与事实矛盾 →
+    逐条重审兜底（把原文译成中文是本职工作）。"""
+    import hanhua.core.reviewer as rev
+
+    class _LangHalluReviewer:
+        usable = True
+        one_calls = 0
+
+        def __init__(self, app_dir=None, config=None, online_cfg=None):
+            pass
+
+        def review_batch(self, items, on_progress=None,
+                         cancellation_event=None):
+            return {it.entry_id: rev.ReviewResult(
+                it.entry_id, level="CRITICAL",
+                reason="原文为法语，译文误译成中文，语言完全错误")
+                for it in items}, 0
+
+        def review_one(self, item):
+            type(self).one_calls += 1
+            return rev.ReviewResult(item.entry_id, level="PASS",
+                                    reason="正确")
+
+        def retranslate_with_feedback(self, *a, **k):
+            return "x"
+
+    monkeypatch.setattr(rev, "SemanticReviewer", _LangHalluReviewer)
+
+    class _Glossary:
+        def list_all(self):
+            return []
+
+    class _Store:
+        def batch_update_translation_results(self, rows):
+            pass
+
+    entries = [TextEntry(
+        id=1, file_id="f", key_path="k",
+        original="Rendre tous les lecteurs crédules.",
+        translation="让所有读者变得轻信。", status="translated",
+        meta={"kind": "typetree", "role": "display"})]
+    summary = rev.review_entries(
+        entries, _Glossary(), game_name="fake-it",
+        translator=None, memory=None, store=_Store(),
+        app_dir=Path("."), model_name="qwen", max_send_rate=1.0)
+    assert _LangHalluReviewer.one_calls == 1      # 兜底重审一次
+    assert summary["results"]["e0"].level == "PASS"
+
+
 def test_batch_hallucination_falls_back_to_single_review(monkeypatch):
     """审校输出声称「译文缺失」但译文非空 → 逐条重审兜底（防罐头理由）。
     防护统一在 review_entries 层（单条/批量路径都覆盖，每条目至多一次）。"""

@@ -882,10 +882,14 @@ _CN_NUM_UNITS = {"十": 10, "百": 100, "千": 1000,
 _CN_NUM_CHARS = "零〇一二两三四五六七八九十百千万亿"
 # 提取顺序：千分位（1,500）→ 普通小数 → % 允许空格分离（"10 %"）→
 # 百分之中文百分比 → X折/X成（五折=50%）→ X点Y小数 → 半 → 普通中文数字
+# 阿拉伯数字+万亿乘数（50万=500000、1.5亿=1.5e8）必须排在裸数字前——
+# 否则 "50" 先匹配、万被拆走（fake-it 实证：'200.000 readers'→'20万
+# 读者'、'500.000'→'50万' 被 numeric_mismatch 误杀，AI 审核已通过）。
 _NUMBER_TOKEN_RE = re.compile(
     r"\d{1,3}(?:,\d{3})+(?:\.\d+)?\s*%"
     r"|\d{1,3}(?:,\d{3})+(?:\.\d+)?"
     r"|\d+(?:\.\d+)?\s*%"
+    r"|\d+(?:[.,]\d+)?\s*[万亿]"
     r"|\d+(?:\.\d+)?"
     rf"|百分之[{_CN_NUM_CHARS}]+"
     rf"|[{_CN_NUM_CHARS}]+[折成]"
@@ -893,6 +897,16 @@ _NUMBER_TOKEN_RE = re.compile(
     r"|半"
     rf"|[{_CN_NUM_CHARS}]+"
 )
+# 欧式千分位：点分组（200.000 = 二十万，法国/德语区习惯；fake-it 的
+# French ContentFr 字段实证）。仅当小数部分恰为 3 位一组时才判千分位，
+# 普通 3.5 / 1.25 小数不受影响。
+_DOT_GROUPED_RE = re.compile(r"\d{1,3}(?:\.\d{3})+")
+# 阿拉伯数字 + 万/亿 乘数后缀
+_CN_MULT_RE = re.compile(r"^(\d+(?:[.,]\d+)?)\s*([万亿])$")
+# 英文乘数词（million/billion）与数字组合：1.5 million = 150万。
+# 词必须紧贴数字且独立成词（millionaire 之类不算）。
+_EN_MULT_RE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(million|billion)\b", re.I)
 
 
 def _parse_cn_number(text: str) -> int | float | None:
@@ -968,6 +982,72 @@ def _is_low_quality_source(original: str) -> bool:
     return len(signals) >= 2
 
 
+def _number_tokens(text: str) -> list[tuple[float, bool, bool]]:
+    """数字 token 序列（值, 是否百分比, 分母 soft）——原文/译文同口径。
+
+    紧贴 ASCII 字母/下划线的 token 是标识符成分（text0、3D、0x1F、
+    v1.2.3、MP3）——技术键名/格式代号，数字无独立数据语义，不参与
+    强制。中文前缀不豁免（「有百分之五十」是自然语义数字）。
+    """
+    soft_spans = [m.start(1) for m in _OF_DENOM_RE.finditer(text)]
+    # 英文乘数词（1.5 million）合并为单一 token（=150万），防止数字
+    # 部分单独被匹配成 1.5 而乘数词被丢弃（fake-it 数字族根因 C15）
+    en_mult_spans: dict[int, tuple[float, bool, bool]] = {}
+    for m in _EN_MULT_RE.finditer(text):
+        start, end = m.span()
+        if (start > 0 and text[start - 1] in _ASCII_ALNUM) \
+                or (end < len(text) and text[end] in _ASCII_ALNUM):
+            continue
+        value = float(m.group(1).replace(",", "."))
+        unit = 1e6 if m.group(2).lower() == "million" else 1e9
+        en_mult_spans[start] = (value * unit, False, False)
+    tokens: list[tuple[float, bool, bool]] = []
+    for match in _NUMBER_TOKEN_RE.finditer(text):
+        start, end = match.span()
+        if start in en_mult_spans:
+            # 整段数字+乘数词一起吞掉（match 只覆盖数字部分）
+            tokens.append(en_mult_spans.pop(start))
+            continue
+        if (start > 0 and text[start - 1] in _ASCII_ALNUM) \
+                or (end < len(text) and text[end] in _ASCII_ALNUM):
+            continue
+        raw = match.group(0)
+        soft = start in soft_spans  # '3 of 5' 的分母 5 → 可省略
+        mult_m = _CN_MULT_RE.match(raw)
+        if raw.endswith("%"):
+            tokens.append((float(raw.rstrip(" %")), True, soft))
+        elif mult_m:
+            # 50万 = 500000 / 1.5亿 = 1.5e8（阿拉伯数字 × 中文乘数）
+            value = float(mult_m.group(1).replace(",", "."))
+            unit = 10000.0 if mult_m.group(2) == "万" else 1e8
+            tokens.append((value * unit, False, soft))
+        elif "百分之" in raw:
+            value = _parse_cn_number(raw[3:])
+            if value is not None:
+                tokens.append((float(value), True, soft))
+        elif raw == "半":
+            tokens.append((0.5, False, soft))
+        elif raw.endswith(("折", "成")):
+            value = _parse_cn_number(raw[:-1])
+            if value is not None:
+                tokens.append((float(value) * 10, True, soft))
+        elif "点" in raw:
+            value = _parse_cn_number(raw)
+            if value is not None:
+                tokens.append((float(value), False, soft))
+        else:
+            value = _parse_cn_number(raw)
+            if value is None:
+                # 欧式千分位点分组（200.000 = 二百）仅当整段命中才换算，
+                # 否则按普通小数（3.5 保持 3.5，不得当 3 千分位）
+                if _DOT_GROUPED_RE.fullmatch(raw):
+                    value = float(raw.replace(".", ""))
+                else:
+                    value = float(raw.replace(",", ""))
+            tokens.append((float(value), False, soft))
+    return tokens
+
+
 def _numeric_mismatch(original: str, normalized: str) -> bool:
     """数字一致性检查：原文每个数字 token 必须按序在译文中可匹配
     （数值相同、百分比标记相同）。'X of Y' 分母 soft 可省略（「第 3
@@ -999,78 +1079,6 @@ def _numeric_mismatch(original: str, normalized: str) -> bool:
                 # 搜索时吞掉的 dst token 可能正是后续硬 token 需要的，
                 # 必须回退 pos 防止把硬数字误当缺失（'4 real… 3 gems'
                 # 译文「…3 颗宝石」若前一个缺席 token 不回退会把 3 吞掉）
-                pos = start_pos
-            else:
-                return True
-    return False
-
-def _number_tokens(text: str) -> list[tuple[float, bool, bool]]:
-    """数字 token 序列（值, 是否百分比, 分母 soft）——原文/译文同口径。
-
-    紧贴 ASCII 字母/下划线的 token 是标识符成分（text0、3D、0x1F、
-    v1.2.3、MP3）——技术键名/格式代号，数字无独立数据语义，不参与
-    强制。中文前缀不豁免（「有百分之五十」是自然语义数字）。
-    """
-    soft_spans = [m.start(1) for m in _OF_DENOM_RE.finditer(text)]
-    tokens: list[tuple[float, bool, bool]] = []
-    for match in _NUMBER_TOKEN_RE.finditer(text):
-        start, end = match.span()
-        if (start > 0 and text[start - 1] in _ASCII_ALNUM) \
-                or (end < len(text) and text[end] in _ASCII_ALNUM):
-            continue
-        raw = match.group(0)
-        soft = start in soft_spans  # '3 of 5' 的分母 5 → 可省略
-        if raw.endswith("%"):
-            tokens.append((float(raw.rstrip(" %")), True, soft))
-        elif "百分之" in raw:
-            value = _parse_cn_number(raw[3:])
-            if value is not None:
-                tokens.append((float(value), True, soft))
-        elif raw == "半":
-            tokens.append((0.5, False, soft))
-        elif raw.endswith(("折", "成")):
-            value = _parse_cn_number(raw[:-1])
-            if value is not None:
-                tokens.append((float(value) * 10, True, soft))
-        elif "点" in raw:
-            value = _parse_cn_number(raw)
-            if value is not None:
-                tokens.append((float(value), False, soft))
-        else:
-            value = _parse_cn_number(raw)
-            if value is None:
-                value = float(raw.replace(",", ""))
-            tokens.append((float(value), False, soft))
-    return tokens
-
-
-def _numeric_mismatch(original: str, normalized: str) -> bool:
-    """数字一致性检查：原文每个数字 token 必须按序在译文中可匹配
-    （数值相同、百分比标记相同）。'X of Y' 分母 soft 可省略（「第 3
-    波」省略总量是合理译法）；译文多出的数字不追究（"1-2"→「一到二」
-    两边都有；"Press 1 or 2" 的序号回显在两侧一致）。"""
-    src_tokens = _number_tokens(original)
-    if not src_tokens:
-        return False
-    low_quality = _is_low_quality_source(original)
-    dst_tokens = _number_tokens(normalized)
-    pos = 0
-    for value, pct, soft in src_tokens:
-        start_pos = pos
-        found = False
-        while pos < len(dst_tokens):
-            d_value, d_pct, _ = dst_tokens[pos]
-            pos += 1
-            if d_value == value and d_pct == pct:
-                found = True
-                break
-        if not found:
-            if soft or low_quality:
-                # soft token（'3 of 5' 分母）或低质量原文（梗/自嘲/错拼，
-                # 如 '4 real now' 的 4=for）可省略——搜索时吞掉的 dst
-                # token 可能正是后续硬 token 需要的，必须回退 pos 防止
-                # 把硬数字误当缺失（'4 real… 3 gems' 译文「…3 颗宝石」
-                # 若前一个缺席 token 不回退会把 3 吞掉 → 误判）
                 pos = start_pos
             else:
                 return True

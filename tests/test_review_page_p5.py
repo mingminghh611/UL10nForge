@@ -130,3 +130,25 @@ def test_detail_reason_is_readonly_plaintext_edit(qapp, tmp_path):
     assert isinstance(page.detail_reason, QPlainTextEdit)
     assert page.detail_reason.isReadOnly()
     assert page.detail_reason.minimumHeight() >= 160
+
+
+# ── 0.41.0：原文区显示不全回归 ───────────────────────────────────
+
+def test_detail_original_is_readonly_plaintext_edit(qapp, tmp_path):
+    """原文区 QLabel 多行高度由布局决定 → 长原文裁切只见开头一截
+    （用户实证「文本原文显示不全」）。改只读 QPlainTextEdit 后内容
+    完整可见、超长区域内滚动。"""
+    from hanhua.ui.app_state import AppState
+    from hanhua.core.settings import SettingsStore
+    settings = SettingsStore(tmp_path / "settings.json")
+    settings.load()
+    page = ReviewPage(AppState(tmp_path, settings), _Window())
+    assert isinstance(page.detail_original, QPlainTextEdit)
+    assert page.detail_original.isReadOnly()
+    # 固定可视高度（96px），不是 QLabel 的按内容一行高度
+    assert page.detail_original.height() >= 96
+    # 多行长文本 setPlainText 后全文可取（不裁切）
+    long_text = ("This is a very long original text line that would "
+                 "overflow a single-line label and get clipped.\n") * 10
+    page.detail_original.setPlainText(long_text)
+    assert page.detail_original.toPlainText() == long_text

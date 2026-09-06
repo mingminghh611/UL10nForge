@@ -1518,10 +1518,10 @@ def test_review_page_selection_maps_proxy_to_source(qapp, tmp_path):
     src_row = page.proxy.mapToSource(proxy_index).row()
     assert src_row == 2                # 错位：proxy 0 ≠ 源 2
     assert page._current_row == src_row
-    assert page.detail_original.text() == page.model._rows[src_row]["original"]
+    assert page.detail_original.toPlainText() == page.model._rows[src_row]["original"]
     # 选中 proxy 第 0 行（源第 2 行 Gamma）→ 中栏显示 Gamma（修复前
     # mapToSource 收源索引会把 proxy 行 0 当源行 0 → 始终显示 Alpha）
-    assert page.detail_original.text() == "Gamma"
+    assert page.detail_original.toPlainText() == "Gamma"
 
 
 def test_review_page_reload_keeps_selection(qapp, tmp_path):
@@ -1551,7 +1551,7 @@ def test_review_page_reload_keeps_selection(qapp, tmp_path):
     await_reload(page)
     assert page._current_row is not None
     assert page.model._rows[page._current_row]["key_path"] == "b"
-    assert page.detail_original.text() == "Beta"
+    assert page.detail_original.toPlainText() == "Beta"
 
 
 def test_review_page_same_text_save_and_reload_edit_protected(qapp, tmp_path):
@@ -1612,7 +1612,7 @@ def test_review_page_same_text_save_and_reload_edit_protected(qapp, tmp_path):
     page._on_selection_changed(
         page.table.selectionModel().selection(), None)
     assert page._pending_reload is False
-    assert page.detail_original.text() == "Beta"    # 新行正常显示
+    assert page.detail_original.toPlainText() == "Beta"    # 新行正常显示
 
 
 # ── #19 回归：翻译完成度用待翻译总数口径 ──────────────────────
@@ -1977,77 +1977,16 @@ def test_home_scan_done_ambiguous_fallback_hint_is_actionable(
     assert any("多个 Unity 游戏" in t for t in toasts)
 
 
-def test_dry_run_button_runs_plan_and_reports_summary(
-        qapp, tmp_path, monkeypatch):
-    """0.39.0 M4 写回预演（§62）：按钮触发后台 build_writeback_plan，
-    摘要四类计数进日志面板；预演零副作用标志复位，按钮恢复可用。"""
-    from hanhua.core.unity.writeback_plan import WritebackPlan
-
+def test_dry_run_feature_removed(qapp, tmp_path):
+    """0.41.0：写回预演（Dry Run）功能整体删除（用户指令）——按钮/
+    标志/方法均不存在，writeback_plan 模块已移除。"""
     state = _state(tmp_path)
     page = TranslatePage(state, _Window())
-    assert page.dry_run_btn.text() == "写回预演"
-    assert not page._dry_run_running
-
-    plan = WritebackPlan(text_planned=3, v2_planned=7, rejected=1,
-                         high_risk=2, auto_revert=1)
-
-    started = []
-
-    def _fake_worker(fn, *_a, **_k):
-        started.append(True)
-        worker = type("W", (), {})()
-        worker.signals = type("S", (), {})()
-        # 模拟 Worker.run：同步走 finished 路径（plan 由闭包带入）
-        class _Sig:
-            def __init__(self):
-                self._finished, self._error = [], []
-
-            def connect(self, slot):
-                self._slots = getattr(self, "_slots", [])
-                self._slots.append(slot)
-
-            def emit(self, value):
-                for s in self._slots:
-                    s(value)
-
-        worker.signals.finished = _Sig()
-        worker.signals.error = _Sig()
-        page._pool.start  # 存在即可
-        # 直接同步执行：先跑 fn 再 emit finished——与 Worker.run 同序
-        def _run():
-            result = fn()
-            worker.signals.finished.emit(result)
-        monkeypatch.setattr(
-            page, "_pool", type("P", (), {"start": staticmethod(
-                lambda w: _run())})())
-        return worker
-
-    import hanhua.ui.pages.translate_page as tp
-    monkeypatch.setattr(tp, "Worker", _fake_worker)
-    # 预演函数体内 `from ... import build_writeback_plan` 是函数级导入，
-    # monkeypatch 目标是源模块属性
-    import hanhua.core.unity.writeback_plan as wp
-    monkeypatch.setattr(wp, "build_writeback_plan", lambda *a, **k: plan)
-    # 最小 project：store 是真实空库（函数体内先跑 store.get_files）
-    store = ProjectStore(tmp_path / "p.db")
-    store.init_schema()
-    fake_project = type("P", (), {
-        "store": store, "game_dir": tmp_path})()
-    state.project = fake_project  # AppState.project 是普通属性
-    state._project_generation = 1
-    # resource_dir：AppState 属性，路径存在即可
-    monkeypatch.setattr(
-        state, "resource_dir", tmp_path, raising=False)
-
-    # state.project_lease / is_current_project 真实实现要求
-    # state.project 属性可设——AppState 允许直接赋值
-    page.dry_run_writeback()
-
-    assert started
-    assert not page._dry_run_running  # drained 已复位
-    assert page.dry_run_btn.isEnabled()
-    log = page.log_view.toPlainText()
-    assert "写回预演（不修改游戏）" in log
-    assert "预计写回：10" in log
-    assert "拒绝：1" in log
-    assert "高风险：3" in log
+    # 按钮与在跑标志已删
+    assert not hasattr(page, "dry_run_btn")
+    assert not hasattr(page, "_dry_run_running")
+    assert not hasattr(page, "dry_run_writeback")
+    # 核心模块已删（find_spec 找不到即移除）
+    import importlib.util
+    spec = importlib.util.find_spec("hanhua.core.unity.writeback_plan")
+    assert spec is None

@@ -43,10 +43,11 @@ from .translator import builtin_ui_conflict
 
 # ── 审核维度与四级判定标准 ─────────────────────────────────────────
 
-_REVIEW_SYSTEM_PROMPT = """你是游戏本地化质量审核员。审核必须严格，逐项核对十
+_REVIEW_SYSTEM_PROMPT = """你是游戏本地化质量审核员。审核必须严格，逐项核对十二
 个审核维度，任一维度有问题就按严重程度定级，宁严勿松。
 
-审核维度（十一项，#43 重构指令 §10 + 2026-08-24 原文低质量豁免）：
+审核维度（十二项，#43 重构指令 §10 + 2026-08-24 原文低质量豁免 +
+2026-09-07 源语言认知 C12b）：
 1. 语义准确：译文是否传达原文全部含义，不张冠李戴、不增删信息。
    核对：否定（not/no/never/without——「不」被吞是 CRITICAL）、
    人物关系（主宾颠倒 A 打 B 译成 B 打 A 是 CRITICAL）、条件与因果
@@ -107,6 +108,16 @@ _REVIEW_SYSTEM_PROMPT = """你是游戏本地化质量审核员。审核必须�
       译文：宽普钦 → PASS（原文是错拼梗，译文音译保留大意即可）
     - 原文：the enemy does not drop any gold
       译文：敌人会掉落金币。→ CRITICAL（原文真否定被漏译，语义相反）
+12. 源语言认知：原文**不一定总是英文**——多语言游戏的语料可能包含
+    法语/德语/西班牙语/日语等非英语原文（字段名 ContentFr/TextDe…
+    或词形可辨）。审核任务恒定是「把原文译成简体中文」：把法语/德语
+    原文译成中文不是错误，恰恰是正确完成本职工作。
+    - 严禁以「原文为法语/德语/其他语言，译文误译成中文」「语言完全
+      错误」「原文非英语不该翻译」为由判错——这些理由在中文本地化
+      流程里永远不成立，是幻觉；
+    - 判「翻译错误」只能基于语义：译文是否忠实传达了**该语言原文**
+      的意思（法语 lecture=读者不是讲师，德语 Fehler=错误不是失败）；
+    - 原文含非英语词但译文语义正确 → PASS。
 
 级别定义：
 - PASS：语义/结构/术语全部正确，可直接写库
@@ -129,7 +140,7 @@ dimensions/issues 可选，解析器仍兼容）"""
 # issues/suggestion 多出 50-150 token × 20 条 ≈ 2-3k 输出 token，4B
 # 生成它们要几十秒——评审判定只需级别+理由，修正要点并入 reason）。
 _REVIEW_BATCH_OUTPUT = (
-    "本次一次给出 {n} 条待审核条目，请逐条独立审核（每条按同样十维"
+    "本次一次给出 {n} 条待审核条目，请逐条独立审核（每条按同样十二维"
     "标准），输出严格 JSON 数组，数组元素与条目一一对应，不得遗漏"
     "任何一条、不得合并、不得输出任何其他文字（包括思考、解释）：\n"
     '[{{"entry_id": "<该条 ID>", "level": "PASS|MINOR|MAJOR|CRITICAL", '
@@ -210,7 +221,31 @@ def _translation_dropped_negation(original: str, translation: str) -> bool:
     return not _NEGATION_ZH_RE.search(str(translation or ""))
 
 
-# 提示词元数据回显形态（prompts.py build_batch_user_prompt 的元数据行
+# 批审幻觉防护（2026-09-07 fake-it 实证，C12b）：4B 对非英语原文
+# （法语 ContentFr 列）成批输出「原文为法语，译文误译成中文」「语言
+# 完全错误」——120+ 条被阻断，但「把原文译成中文」正是本职工作，
+# 语言本身永远不是判错理由。这是可验证主张：reason 声称语言错误
+# → 判定不可信 → 逐条重审兜底（重审单条时系统 prompt 的源语言
+# 认知维度生效）。
+_LANGUAGE_ERROR_CLAIMS = (
+    "原文为法语", "原文为德语", "原文为日语", "原文为韩语",
+    "原文为西语", "原文为俄语", "误译成中文", "语言完全错误",
+    "语言错误", "应保留原语言", "不应翻译成中文", "原文非英语",
+    "应为法语", "应为德语", "应为日语", "译回原文", "语言不一致",
+)
+
+
+def _reason_claims_language_error(reason: str) -> bool:
+    """reason 是否声称「语言错误/不该译成中文」（可验证主张）。
+
+    中文本地化流程里该主张恒不成立——原文无论什么语言，译成简体
+    中文都是任务本身。命中即判幻觉，逐条重审兜底。
+    """
+    r = reason or ""
+    return any(p in r for p in _LANGUAGE_ERROR_CLAIMS)
+
+
+
 # + 审核条目段字段行）。重译模型偶尔回显 prompt 结构而非纯译文——
 # 多行修复取「首个非空行」会恰好抓到「[来源文件] …」这类行写进游戏
 # （0.39.1 fromivan 证据：multi-line candidate 首行为元数据回显）。
@@ -1261,6 +1296,13 @@ def review_entries(entries, glossary, *, game_name: str = "",
             if on_note:
                 on_note(f"语义审核：条目 {eid} 判定与事实矛盾（译文已含否定"
                         f"却报否定漏译）→ 逐条重审")
+            results[eid] = reviewer.review_one(item)
+        elif _reason_claims_language_error(r.reason):
+            # C12b：把原文译成中文是本职工作，「语言错误」类理由恒不
+            # 成立 → 批审判定不可信，逐条重审兜底
+            if on_note:
+                on_note(f"语义审核：条目 {eid} 判定与事实矛盾（把原文译成"
+                        f"中文是任务本身，语言类理由不成立）→ 逐条重审")
             results[eid] = reviewer.review_one(item)
         # 2026-08-26 专名/品牌保留回显类机械门兜底（'Out of the Loop
         # studio' 案例）：条目带 proper_name_echo 豁免打标（原文与译文

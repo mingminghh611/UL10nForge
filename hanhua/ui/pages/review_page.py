@@ -550,15 +550,21 @@ class ReviewPage(QWidget):
         lay.addLayout(head)
 
         lay.addWidget(self._section_label("原文"))
-        self.detail_original = QLabel("")
+        # 0.41.0 修复「原文显示不全」：QLabel 高度由首行行距决定（未设
+        # sizeAdjustPolicy，多行文本超出即裁切）——长原文/多行富文本标签
+        # 只见开头一截。改 QPlainTextEdit 只读：内容完整可见，超长区域
+        # 内滚动，与译文框同宽对照；PlainText 格式与 #48（标签原样显示、
+        # 与模型输入一致）保持一致。
+        self.detail_original = QPlainTextEdit()
         self.detail_original.setObjectName("detailOriginal")
-        self.detail_original.setWordWrap(True)
-        self.detail_original.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        # #48：原文含富文本标签（<b>…</b>），AutoText 会把标签渲染成
-        # 粗体——用户看到「无标签原文」误以为审校模型看到的也是纯文本
-        #（实际模型 prompt 带标签）。强制 PlainText 原样显示，与模型
-        # 输入一致，标签结构可核对。
-        self.detail_original.setTextFormat(Qt.PlainText)
+        self.detail_original.setReadOnly(True)
+        self.detail_original.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        # 原文典型 1-3 行给足默认可视高度，长文区域内滚动
+        self.detail_original.setFixedHeight(96)
+        self.detail_original.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.detail_original.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.detail_original.setPlaceholderText("（原文为空）")
         lay.addWidget(self.detail_original)
 
         lay.addWidget(self._section_label("译文"))
@@ -591,7 +597,7 @@ class ReviewPage(QWidget):
         self.copy_src_btn = QPushButton("复制原文")
         self.copy_src_btn.setMinimumHeight(TOKENS.control_height)
         self.copy_src_btn.clicked.connect(
-            lambda: self._copy(self.detail_original.text()))
+            lambda: self._copy(self.detail_original.toPlainText()))
         self.copy_tr_btn = QPushButton("复制译文")
         self.copy_tr_btn.setMinimumHeight(TOKENS.control_height)
         self.copy_tr_btn.clicked.connect(
@@ -698,7 +704,7 @@ class ReviewPage(QWidget):
         source = meta.get("source", row["file_id"])
         name = Path(source).name if isinstance(source, str) and source else str(source)
         self.detail_source.setText(name)
-        self.detail_original.setText(row["original"])
+        self.detail_original.setPlainText(row["original"])
         self.detail_edit.setPlainText(row["translation"] or "")
         self._detail_dirty = False  # 重填即干净状态（setPlainText 会触发 textChanged）
         self.lock_check.blockSignals(True)

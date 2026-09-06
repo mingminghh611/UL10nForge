@@ -596,7 +596,9 @@ QFrame#detailPanel {{
     border: none;
     border-radius: {RADIUS_PANEL}px;
 }}
-QLabel#detailOriginal {{
+/* 0.41.0：原文区改只读 QPlainTextEdit（QLabel 多行裁切致显示不全），
+   字号/配色沿用原 QLabel 方案保持视觉不变 */
+QPlainTextEdit#detailOriginal {{
     background: {RAISED};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_MD}px;

@@ -569,6 +569,83 @@ _TYPETREE_IMMUTABLE_FIELD_NAMES = (
 _MAX_CANDIDATES_PER_OBJECT = 200
 
 
+# 同对象平行语言后缀字段（fake-it 实证 2026-09-07，B21）：本地化对象
+# 同层携带多语言字段——ContentEn/ContentFr/ContentDe、TitleEn/TitleFr、
+# m_Text_EN/m_Text_FR 等。游戏只按当前语言读其一（默认英文）：
+# - En（或无后缀权威字段）：进池翻译；
+# - 其他语言后缀（Fr/De/It/Es/Ja/Ko/Zh/Ru/Pt/Cn…）：翻译无人读取，
+#   浪费翻译量，且非英语源进审核后 4B 频繁输出「原文为法语，译文误译
+#   成中文」类幻觉阻断（fake-it 120+ 条 ContentFr 被阻断实证）——
+#   提取层整字段跳过（skipped 留档，reason=parallel_lang_field）。
+_PARALLEL_LANG_SUFFIXES = frozenset({
+    "fr", "de", "it", "es", "ja", "jp", "ko", "zh", "cn", "ru", "pt",
+    "pl", "nl", "sv", "da", "no", "fi", "cs", "tr", "ar", "hi", "th",
+    "id", "uk", "hu", "ro", "el", "bg", "he", "vi", "en",
+})
+# 字段名 → (基名, 语言后缀) 拆分：ContentEn → ("content", "en")；
+# m_Text_FR → ("text", "fr")；不含后缀返回 None。三种形态都认：
+# 尾部 PascalCase 后缀（ContentEn）、下划线（Content_EN/Content_Eng/
+# m_Text_FR）、m_/_ 前缀组合。
+_FIELD_LANG_RE = _re.compile(
+    r"^(m_|_)?(?P<base>[A-Za-z]+?)[ _]*_(?P<lang>[A-Za-z]{2,3})$",
+    _re.I)
+# PascalCase 尾缀：基名任意大小写开头 + 2~3 字母大写开头后缀，
+# ContentEn/ContentFr/ContentEng/ContentJPN/TitleFr。普通 Pascal 词
+# （LevelName/AudioSource）不会命中——尾部大写起始词段要么超过 3
+# 字符，要么拆出的「语言码」不在白名单/歧义黑名单。
+# 歧义黑名单：id/no 在语言白名单里（印尼/挪威语）但作为字段后缀
+# 几乎总是 Id=标识/No=编号，宁可漏判。
+_FIELD_LANG_CAMEL_RE = _re.compile(
+    r"^(m_|_)?(?P<base>[A-Za-z][A-Za-z0-9]*?)(?P<lang>[A-Z][A-Za-z]{1,2})$")
+_FIELD_LANG_AMBIGUOUS = frozenset({"id", "no"})
+
+
+def _parallel_lang_field_info(key: str) -> tuple[str, str] | None:
+    """字段名是「基名+语言码」形态时返回 (归一化基名, 小写语言码)。
+
+    只认**基名是已知显示字段/常见显示词**的后缀拆分——防止 Source/
+    Level 之类普通字段被误判（SourceFr 的 fr 拆出来 'sourcefr' 基名
+    不在 known_bases，返回 None）。语言码白名单（_PARALLEL_LANG_
+    SUFFIXES）外的后缀不判；3 字母码（ENG/JPN/CHN/FRA/GER/ESP/RUS/
+    ITA/PTB）归一到前 2 位再查白名单。
+    """
+    name = str(key)
+    lang = None
+    base_raw = None
+    m = _FIELD_LANG_RE.match(name)
+    if m:
+        base_raw, lang = m.group("base"), m.group("lang")
+    else:
+        # PascalCase 尾缀（ContentEn/TitleFr）：后缀必须全大写字母组
+        # （En/Fr/De），且拆出后基名须非空
+        m2 = _FIELD_LANG_CAMEL_RE.match(name)
+        if m2:
+            base_raw, lang = m2.group("base"), m2.group("lang")
+    if lang is None or base_raw is None:
+        return None
+    lang = lang.casefold()
+    if lang in _FIELD_LANG_AMBIGUOUS:
+        return None
+    if len(lang) == 3:
+        long_map = {"eng": "en", "jpn": "ja", "kor": "ko", "chn": "zh",
+                    "fra": "fr", "ger": "de", "esp": "es", "rus": "ru",
+                    "ita": "it", "ptb": "pt"}
+        lang = long_map.get(lang)
+        if lang is None:
+            return None
+    if lang not in _PARALLEL_LANG_SUFFIXES:
+        return None
+    base = _normalized_field_name(base_raw)
+    known_bases = _TYPETREE_DISPLAY_FIELDS | {
+        "text", "label", "title", "content", "description", "message",
+        "name", "string", "value", "dialog", "body", "caption",
+        "subtitle", "question", "answer", "choice", "prompt", "hint",
+        "tooltip", "header", "footer", "story", "line"}
+    if base not in known_bases:
+        return None
+    return base, lang
+
+
 def _normalized_field_name(value: object) -> str:
     name = str(value)
     low = name.casefold()
@@ -661,10 +738,25 @@ def _typetree_string_entries(
     candidates: list[TextEntry] = []
     prefix = (f"asset#{asset_file_name}#{obj_path_id}"
               if asset_file_name else f"asset#{obj_path_id}")
-    leaves: list[tuple[list[str | int], str, str, bool]] = []
+    leaves: list[tuple[list[str | int], str, str, bool, bool]] = []
 
     def visit(value, path: list[str | int], structural: bool = False) -> None:
         if isinstance(value, dict):
+            # B21 平行语言后缀字段：先摸清本层「字段 → 语言码」分布与
+            # 无后缀权威字段。En（或无后缀同基名字段）在场时，其他语言
+            # 后缀列（Fr/De/Ja…）整列跳过——游戏默认读英文列，翻其他列
+            # 无人读取且非英语源进审核会被 4B 指「原文为法语」误阻断
+            # （fake-it 120+ 条 ContentFr 实证）；En 不在场时不动（游戏
+            # 可能本身就是该语言）。
+            lang_of: dict[str, str] = {}
+            base_has_en: set[str] = set()
+            for key in value:
+                info = _parallel_lang_field_info(key)
+                if info:
+                    lang_of[key] = info[1]
+                    if info[1] == "en":
+                        base_has_en.add(info[0])
+            plain_bases = {_normalized_field_name(k) for k in value}
             for key, child in value.items():
                 normalized = _normalized_field_name(key)
                 # 事件绑定元数据字段（UnityEvent 回调 m_Calls 下的
@@ -683,6 +775,11 @@ def _typetree_string_entries(
                 # protected 会拦截）——即使对象含值证据也不得升格 display
                 # （doubleshake 实证）。casefold 拦截 m_name/M_Name 变体；
                 # 裸 name 字段（对话角色名等）不受影响。
+                parallel_info = _parallel_lang_field_info(key)
+                parallel_skip = bool(
+                    parallel_info and parallel_info[1] != "en"
+                    and (parallel_info[0] in base_has_en
+                         or parallel_info[0] in plain_bases))
                 blocked = structural or event_branch or mirror_branch or bool(
                     _field_name_tokens(key) & _TYPETREE_STRUCTURAL_FIELDS) \
                     or key.casefold() in _TYPETREE_IMMUTABLE_FIELD_NAMES \
@@ -690,9 +787,11 @@ def _typetree_string_entries(
                     in _TYPETREE_ANIMATION_TRIGGER_FIELDS
                 child_path = [*path, key]
                 if isinstance(child, str) and child.strip():
-                    leaves.append((child_path, child, normalized, blocked))
+                    leaves.append((child_path, child, normalized, blocked,
+                                   parallel_skip))
                 else:
-                    visit(child, child_path, blocked)
+                    visit(child, child_path,
+                          blocked or parallel_skip)
         elif isinstance(value, list):
             for index, child in enumerate(value):
                 visit(child, [*path, index], structural)
@@ -702,12 +801,12 @@ def _typetree_string_entries(
     # 对象级值特征：任一叶子是显示证据（句子/白名单字段/显示证据形态）
     # → 其余非键字符串也升 display（与 raw scan 的 obj_has_values 一致）
     has_value_evidence = any(
-        not blocked and (
+        not blocked and not parallel_skip and (
             normalized in _TYPETREE_DISPLAY_FIELDS
             or _has_sentence_shape(text.strip())
             or has_display_text_evidence(text)
         )
-        for _, text, normalized, blocked in leaves)
+        for _, text, normalized, blocked, parallel_skip in leaves)
 
     def append(kind: str, path: list[str | int], text: str, reason: str,
                confidence: str, status: str, role: str,
@@ -735,8 +834,21 @@ def _typetree_string_entries(
     # R5 留档：键/标识符/结构值/类型引用不再静默 continue（限量样本 +
     # skipped_count 承载真实总数），typetree 候选层同理。
     prefilter_counts: dict[str, int] = {}
-    for path, text, normalized, blocked in leaves:
+    for path, text, normalized, blocked, parallel_skip in leaves:
         if blocked:
+            continue
+        if parallel_skip:
+            # B21：非英文平行语言列跳过——skipped 留档（非静默），
+            # 与 prefilter 同款「样本 + skipped_count」语义。
+            key = "parallel_lang_field"
+            count = prefilter_counts[key] = \
+                prefilter_counts.get(key, 0) + 1
+            if count <= _PREFILTER_SAMPLE_LIMIT:
+                append("typetree_prefilter", path, text,
+                       "parallel_lang_field", "low", STATUS_SKIPPED,
+                       "candidate",
+                       {"prefilter": "parallel_lang_field",
+                        "skipped_count": count})
             continue
         stripped = text.strip()
         if normalized in _TYPETREE_DISPLAY_FIELDS:

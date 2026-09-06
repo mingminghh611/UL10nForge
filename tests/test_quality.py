@@ -4,6 +4,7 @@ import pytest
 
 from hanhua.core.models import TextEntry
 from hanhua.core.quality import (_is_format_template,
+                                 _number_tokens,
                                  has_independent_lower_word,
                                  validate_translation_quality)
 
@@ -1014,6 +1015,37 @@ def test_numeric_consistency_normal_translations():
         result = validate_translation_quality(_entry(original), translation)
         assert result.passed is True, (original, translation, result.reasons)
         assert "numeric_mismatch" not in result.reasons, (original, translation)
+
+
+def test_numeric_cn_multiplier_and_european_thousands():
+    """阿拉伯数字+万/亿乘数换算与欧式千分位点分组（fake-it 实证 C15）：
+    '200.000 readers'→'20万读者'、'500.000'→'50万'、'1.5M'→'150万'、
+    '1.5 billion'→'15亿' 都是正确译法，不得误杀 numeric_mismatch。
+    AI 审核已判通过、机械门却阻断 → 重译恒败 → BLOCKED 留人工。"""
+    for original, translation in (
+        ("200.000 readers", "20万读者"),
+        ("500.000 readers", "50万读者"),
+        ("10.000 readers", "1万名读者"),
+        ("Reaches 50000 people", "覆盖5万人"),
+        ("Costs 1.5 billion", "耗资15亿"),
+        ("50,000 damage", "造成五万点伤害"),    # 逗号千分位→中文数字 等价
+        ("1.5 million users", "150万用户"),
+    ):
+        result = validate_translation_quality(_entry(original), translation)
+        assert "numeric_mismatch" not in result.reasons, (
+            original, translation, result.reasons)
+    # 对照：数值真实改动仍判失败——乘数换算不是数字放行口
+    for original, translation in (
+        ("200.000 readers", "2万读者"),        # 20万→2万 偷改数量级
+        ("Reaches 50000 people", "覆盖5千人"),
+        ("50万 damage", "造成五千点伤害"),
+    ):
+        result = validate_translation_quality(_entry(original), translation)
+        assert "numeric_mismatch" in result.reasons, (
+            original, translation, result.reasons)
+    # 中文数字+万 的原文侧（五万=50000）：与「50万」的阿拉伯乘数（=
+    # 500000）不同值，必须能区分——乘数换算不是单向放行口
+    assert _number_tokens("五万") == [(50000.0, False, False)]
 
 
 def test_numeric_mismatch_missing_number_rejected():

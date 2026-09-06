@@ -89,6 +89,10 @@ def main():
         memory_cleanup=memory_cleanup,
     )
     app.aboutToQuit.connect(state.close)
+    # 全量运行日志（0.41.0 任务七）：退出时统一关闭全部日志句柄，
+    # 保证逐条 flush 之外再无缓冲丢失（失败静默，绝不阻断退出）
+    from hanhua.core.run_log import close_all_run_logs
+    app.aboutToQuit.connect(close_all_run_logs)
     win = MainWindow(state)
     win.show()
     sys.exit(app.exec())

@@ -259,6 +259,87 @@ def test_animname_field_skipped_even_when_display_evidence_present(
                for e in pf.entries)
 
 
+# ── B21 平行语言后缀字段（fake-it 实证 2026-09-07）──────────────
+# 本地化对象同层携带 ContentEn/ContentFr/TitleEn/TitleFr——游戏只读
+# 英文列。非英文列整列跳过（skipped 留档 reason=parallel_lang_field），
+# 英文列照常 pending。审核端 4B 对法语源输出「原文为法语，译文误译成
+# 中文」幻觉阻断 120+ 条——提取层根治。
+
+def test_parallel_lang_field_info_split():
+    from hanhua.core.unity.extractor import _parallel_lang_field_info
+    # PascalCase 后缀
+    assert _parallel_lang_field_info("ContentEn") == ("content", "en")
+    assert _parallel_lang_field_info("ContentFr") == ("content", "fr")
+    assert _parallel_lang_field_info("TitleFr") == ("title", "fr")
+    # 3 字母码归一
+    assert _parallel_lang_field_info("ContentEng") == ("content", "en")
+    assert _parallel_lang_field_info("ContentJPN") == ("content", "ja")
+    # 下划线形态 + m_ 前缀
+    assert _parallel_lang_field_info("m_Text_FR") == ("text", "fr")
+    assert _parallel_lang_field_info("_content_de") == ("content", "de")
+    # 反例：普通 Pascal 词不被误拆（Id=标识）或基名不在显示白名单
+    assert _parallel_lang_field_info("LevelName") is None
+    assert _parallel_lang_field_info("Source") is None
+    assert _parallel_lang_field_info("AudioFr") is None  # audio 非显示基名
+    assert _parallel_lang_field_info("TextId") is None  # Id 歧义黑名单
+    assert _parallel_lang_field_info("Text") is None
+
+
+def test_parallel_lang_non_en_columns_skipped_en_pending(
+        tmp_path, monkeypatch):
+    """En 列在场时 Fr 列整列 skipped（reason=parallel_lang_field），
+    En 列照常进翻译池。"""
+    tree = {
+        "m_Name": "loc_entry",
+        "ContentEn": "Make all readers gullible.",
+        "ContentFr": "Rendre tous les lecteurs crédules.",
+        "TitleEn": "Chapter 1",
+        "TitleFr": "Chapitre 1",
+    }
+    pf = _extract(tmp_path, [
+        _FakeObject(Path("level1"), tree, path_id=598),
+    ], monkeypatch)
+    pend = [e for e in pf.entries if e.status == "pending"]
+    fr = [e for e in pf.entries if "lecteurs" in (e.original or "")
+          or "Chapitre" in (e.original or "")]
+    assert pend, "英文列应照常 pending"
+    assert {e.original for e in pend} == {
+        "Make all readers gullible.", "Chapter 1"}
+    assert fr and all(e.status != "pending" for e in fr), \
+        "法文列必须整列跳过"
+    assert all(e.meta.get("reason") == "parallel_lang_field"
+               for e in fr), f"reason 应为 parallel_lang_field，实际 {[e.meta for e in fr]}"
+
+
+def test_parallel_lang_en_alone_stays_pending(tmp_path, monkeypatch):
+    """只有 En 列（无兄弟语言列）时不受影响——照常翻译。"""
+    tree = {
+        "m_Name": "loc_entry",
+        "ContentEn": "Make all readers gullible.",
+    }
+    pf = _extract(tmp_path, [
+        _FakeObject(Path("level1"), tree, path_id=599),
+    ], monkeypatch)
+    assert any(e.status == "pending"
+               and e.original == "Make all readers gullible."
+               for e in pf.entries)
+
+
+def test_parallel_lang_no_en_keeps_fr(tmp_path, monkeypatch):
+    """只有 Fr 列无 En 列 → 不跳过（游戏可能本身读法语）。"""
+    tree = {
+        "m_Name": "loc_entry",
+        "ContentFr": "Rendre tous les lecteurs crédules.",
+    }
+    pf = _extract(tmp_path, [
+        _FakeObject(Path("level1"), tree, path_id=600),
+    ], monkeypatch)
+    assert any(e.status == "pending"
+               and "lecteurs" in (e.original or "")
+               for e in pf.entries), \
+        "无 En 兄弟列时 Fr 列不应被 parallel_lang_field 跳过"
+
+
 # ── Unity PerformanceTestRunInfo JSON（B11c，minato 实证 2026-09-02）──
 # 性能测试运行信息：TestSuite 根键 + Player/Editor 渲染与构建配置
 # （RenderThreadingMode='Split'/AndroidBuildSystem='Gradle'/Branch='6000.3/staging'）
