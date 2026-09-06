@@ -146,6 +146,16 @@ _CLASS_ROWS: tuple[ClassEntry, ...] = (
     ClassEntry("TextMeshProUGUI", "display", "ui_text"),
     ClassEntry("TMP_InputField", "display", "ui_text"),
     ClassEntry("TextMeshPro", "display", "ui_text"),
+    # ── display：文本内容 ScriptableObject（fake-it 实证 2026-09-07）──
+    # Experimental.ScriptableText（sharedassets 内 ContentFr/ContentEn 双语
+    # 字段）持有整个主菜单 UI 文本（'New Game'/'Nouveau jeu'、'To Do'/
+    # 'A faire' 70 对）——此前被「共享资源小配置对象」规则当 Timeline 剪辑
+    # 名误跳过（140 条漏网，reason=shared_resource_config_object，AI 召回
+    # 面也不收）。类名含 Text 且字段是内容字段是确定性文本证据，登记为
+    # display：对象内字符串按值形态正常分类，不受小配置对象规则整跳。
+    # 裸名精确登记（Experimental. 命名空间经 rsplit 兼容路径命中），跨游戏
+    # 重名风险极低（Text 词义明确指向文本内容）。
+    ClassEntry("Experimental.ScriptableText", "display", "scriptable_text"),
 )
 
 CONFIG_CLASSES: frozenset[str] = frozenset(

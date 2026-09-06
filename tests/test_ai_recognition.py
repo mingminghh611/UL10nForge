@@ -105,6 +105,22 @@ def test_collect_candidates_whitelist_kinds_only():
     assert [e.key_path for e in picked] == ["k1", "k2"]
 
 
+def test_collect_candidates_parallel_lang_field_excluded():
+    # B23（fake-it 实证）：parallel_lang_field 是 B21 确定性双语列策略
+    # （英文列在场 → 非英文列保持 skipped，游戏只读英文列），虽以
+    # typetree_prefilter/candidate 形态留档，AI 无权推翻——192 条法语
+    # ContentFr 被升级导致 219 对象 Fr+En 双列全 pending 的回归锚点。
+    rows = [
+        _candidate_row("p1", "Nouveau jeu", kind="typetree_prefilter",
+                       extra_meta={"prefilter": "parallel_lang_field",
+                                   "reason": "parallel_lang_field"}),
+        # 普通候选照常收（对照）
+        _candidate_row("k1", "Combat Music"),
+    ]
+    picked = collect_candidates(rows)
+    assert [e.key_path for e in picked] == ["k1"]
+
+
 def test_collect_candidates_ranks_valueless_spaced_first():
     rows = [
         _candidate_row("a", "sometoken", obj_has_values=True),

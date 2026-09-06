@@ -1860,11 +1860,16 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
     ui_word_signal = is_small_config_shape and any(
         s.strip().casefold() in DISPLAY_WORDS for s in small_words)
     # 引擎配置对象（无豁免的小配置形态）：Timeline 剪辑名/动画状态名
-    # 不含控件词缀且不在白名单，仍按配置跳过。
+    # 不含控件词缀且不在白名单，仍按配置跳过。B23：display 类对象
+    # （class_registry 登记的文本内容资产，如 Experimental.ScriptableText）
+    # 是确定性文本证据，整个形态不成立——小配置形态猜测不得推翻类名
+    # 确定性（证据分层）。
+    is_display_class = _class_disposition(script_class) == "display"
     is_small_config_object = (
         is_small_config_shape
         and not ui_control_signal
-        and not ui_word_signal)
+        and not ui_word_signal
+        and not is_display_class)
 
     # 对象级键列表判定：键列表对象中的标识符全部降级为 skipped（写回也据此跳过）。
     # 单词式写法（CREDITOS / Settings）是显示值不算键风格标识符——避免西语等

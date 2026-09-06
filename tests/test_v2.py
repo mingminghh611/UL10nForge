@@ -1727,6 +1727,45 @@ def test_raw_string_entries_shared_resource_small_config_skipped_but_level_kept(
     assert level[0].status == "pending"              # 场景文件不受影响
 
 
+def test_raw_string_entries_display_class_scriptable_text_released_from_small_config():
+    # B23（fake-it 实证 2026-09-07）：Experimental.ScriptableText 资产
+    # （sharedassets 内 ContentFr/ContentEn 双语字段）持有主菜单 UI 文本
+    # （'Nouveau jeu'/'New Game' 70 对 140 条）——此前被共享资源小配置
+    # 规则当 Timeline 剪辑名误跳过。class_registry display 类登记后，
+    # 确定性类名证据豁免小配置对象整跳，文本按正常分类链释放 pending。
+    # 布局仿真实 obj39（sharedassets2）：m_GameObject PPtr 12 零字节 +
+    # m_Enabled=1 + m_Script PPtr(fid=1,pid=25) + m_Name + ContentFr + ContentEn。
+    import struct as _struct
+    raw = (b"\x00" * 12 + b"\x01\x00\x00\x00"
+           + _struct.pack("<i", 1) + _struct.pack("<q", 25)
+           + _with_len("New Game")        # m_Name（name_span 排除）
+           + _with_len("Nouveau jeu")     # ContentFr
+           + _with_len("New Game"))       # ContentEn
+    entries = _raw_string_entries(
+        "sharedassets2.assets", 39, raw, {}, "sharedassets2.assets",
+        script_class="Experimental.ScriptableText")
+    # 排除 m_Name 后应有 ContentFr/ContentEn 两条记录，均为可译
+    assert len(entries) == 2
+    for e in entries:
+        assert e.status == "pending", (e.original, e.meta)
+    originals = {e.original for e in entries}
+    assert originals == {"Nouveau jeu", "New Game"}
+
+
+def test_raw_string_entries_unregistered_class_small_config_still_skipped():
+    # B23 对照组：未登记 display 的类名（Timeline 剪辑 displayName
+    # 'Timothy'/'Player Idle'）不受豁免影响——小配置对象跳过照常，
+    # 防止类名豁免被误扩到真引擎配置对象。
+    raw = ((b"\x00" * 12) + _with_len("Timothy") + _with_len("Player Idle"))
+    entries = _raw_string_entries("sharedassets4.assets", 23, raw, {},
+                                  "sharedassets4.assets",
+                                  script_class="AnimationPlayableAsset")
+    by_orig = {e.original: e for e in entries}
+    for name in ("Timothy", "Player Idle"):
+        assert by_orig[name].status == "skipped", name
+        assert by_orig[name].meta.get("reason") == "shared_resource_config_object", name
+
+
 def test_raw_string_entries_select_pending_without_inputsystem_signal():
     # 无 GameActions 信号的普通 UI 对象：SELECT 是按钮显示文本，保持 pending
     raw = (_with_len("SELECT") + _with_len("QUIT") + _with_len("PAUSE")

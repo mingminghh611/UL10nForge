@@ -184,6 +184,14 @@ def collect_candidates(rows: list[dict], *, limit: int = _MAX_CANDIDATES_PER_RUN
         if meta.get("kind") in _CANDIDATE_KINDS:
             if meta.get("role") != "candidate":
                 continue
+            # B23：parallel_lang_field 是 B21 的确定性双语列策略（英文
+            # 列在场 → 非英文列必须保持 skipped，游戏只读英文列）。它以
+            # typetree_prefilter/candidate 形态留档仅为样本可追溯，AI 无权
+            # 推翻——fake-it 实测 192 条法语 ContentFr 被升级导致 219 个
+            # 对象 Fr+En 双列全 pending（法语原文翻译既浪费又引入源语言
+            # 幻觉阻断风险）。
+            if meta.get("reason") == "parallel_lang_field":
+                continue
         elif not _is_recall_candidate(meta):
             continue
         if meta.get(_MUTED):
