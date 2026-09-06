@@ -908,6 +908,71 @@ def test_review_entries_term_hint_only_matching_pairs(monkeypatch):
     assert "GLISLYA" not in by_orig["Show FPS counter"].term_hint
 
 
+def test_review_entries_counterexample_hint_injected(monkeypatch, tmp_path):
+    """C16 审核反例召回：fail_case/审核 域同原文历史误译注入
+    context_hint（「勿重蹈」提示）——此前 1674 条反例只写不读。"""
+    import hanhua.core.reviewer as rev
+    from hanhua.core.knowledge import KnowledgeBase
+
+    captured = {}
+
+    class _FakeReviewer:
+        usable = True
+
+        def __init__(self, app_dir=None, config=None, online_cfg=None):
+            pass
+
+        def review_batch(self, items, on_progress=None,
+                         cancellation_event=None):
+            captured["items"] = items
+            return {it.entry_id: ReviewResult(
+                it.entry_id, level="PASS", reason="正确") for it in items}, 0
+
+        def retranslate_with_feedback(self, *a, **k):
+            return "x"
+
+    monkeypatch.setattr(rev, "SemanticReviewer", _FakeReviewer)
+
+    # 反例库建在 data_dir（与 GUI 传 ~/.hanhua 对应；tmp_path 即 data 根）
+    import json
+    kb = KnowledgeBase(tmp_path / "knowledge.db")
+    note = json.dumps({
+        "schema": "review_failure_v1", "game": "fake it",
+        "original": "Make all readers gullible",
+        "wrong_translation": "让读者容易上当",
+        "correct_translation": "", "review_reason": "漏译祈使语气",
+        "suggestion": "", "converged": True,
+        "final_outcome": "APPROVED"}, ensure_ascii=False)
+    kb.store.upsert("fail_case", "审核", "fake it_Data/f:12",
+                    action="apply_fix", note=note, game="fake it")
+    kb.close()
+
+    class _FakeGlossary:
+        def list_all(self):
+            return []
+
+    class _FakeStore:
+        def batch_update_translation_results(self, rows):
+            pass
+
+    entries = [
+        TextEntry(id=1, file_id="f", key_path="a",
+                  original="Make all readers gullible",
+                  translation="让所有读者变得轻信",
+                  status="translated",
+                  meta={"kind": "textasset", "role": "display"}),
+    ]
+    rev.review_entries(
+        entries, _FakeGlossary(), game_name="fake it",
+        translator=None, memory=None, store=_FakeStore(),
+        app_dir=Path("."), data_dir=tmp_path, model_name="qwen",
+        max_send_rate=1.0)
+    (it,) = captured["items"]
+    assert "历史错译反例" in it.context_hint
+    assert "让读者容易上当" in it.context_hint
+    assert "勿重蹈" in it.context_hint
+
+
 def test_review_entries_negation_claim_re_reviews(monkeypatch):
     """可验证「否定漏译」罐头理由 → 逐条重审（come-back 实证：4B 把
     not only 强调句当否定句漏译；译文已含「不仅」/「不」却报语义相反）。

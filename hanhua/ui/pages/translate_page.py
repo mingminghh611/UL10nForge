@@ -103,6 +103,16 @@ def _hex_to_rgba(hex_color: str, alpha: float = 1.0) -> str:
     return f"rgba({r}, {g}, {b}, {alpha})"
 
 
+def _game_dir_name(project) -> str:
+    """项目游戏名兜底（C16）：profile.game_name 未设置时取 game_dir
+    目录名——审核反例/语境检索按游戏加权、知识沉淀 game 归属都依赖
+    game_name；缺失时历史 982/1674 条反例无游戏归属。"""
+    try:
+        return Path(project.game_dir).name
+    except (AttributeError, TypeError):
+        return ""
+
+
 # ── 动效时长（2026-08-21 Task #4 配色与动效优化） ──
 # 图例尺跨段淡入淡出 220ms OutCubic（略长于 page_enter，让高亮切换在
 # 进度到位后落定——视觉上「先到位再点亮」）。reduced-motion 时
@@ -1029,7 +1039,8 @@ class TranslatePage(QWidget):
                 learn_g = GlossaryStore(self.state.app_dir / "glossary.db")
                 learn_g.init_schema()
                 learned = learn_g.learn_proper_names(
-                    entries, collected_names, str(profile.game_name or ""))
+                    entries, collected_names,
+                    str(profile.game_name or _game_dir_name(project)))
                 if learned:
                     on_log(f"术语库学习：新增 {learned} 条专名"
                            f"（跨游戏复用）")
@@ -1073,7 +1084,12 @@ class TranslatePage(QWidget):
                         # ai_review_strategy 不再参与（设置页已改全量说明）。
                         review_summary = review_entries(
                             entries, learn_g,
-                            game_name=str(profile.game_name or ""),
+                            # C16 game_name 兜底：profile.game_name 未设置时
+                            # 此前传空串——审核反例/语境检索按游戏加权全落空，
+                            # 982/1674 条反例无游戏归属的根因。与 _runlog
+                            # 分节同款 game_dir.name 兜底。
+                            game_name=str(profile.game_name
+                                          or _game_dir_name(project)),
                             # 设计文档 §16：Game Context 注入审校——审校
                             # 模型看到与翻译同一份游戏语境（游戏背景/
                             # 语言风格/相关角色/相关术语/翻译注意事项），
@@ -1187,12 +1203,16 @@ class TranslatePage(QWidget):
                                 write_review_report)
                             report_dir = self.state.app_dir / "reviews"
                             report_dir.mkdir(parents=True, exist_ok=True)
-                            safe = re.sub(r'[\\/:*?"<>|\s]+', "_",
-                                          str(profile.game_name or "game"))
+                            safe = re.sub(
+                                r'[\\/:*?"<>|\s]+', "_",
+                                str(profile.game_name
+                                    or _game_dir_name(project) or "game"))
                             write_review_report(
                                 review_summary,
                                 report_dir / f"{safe}-review-report.md",
-                                game_name=str(profile.game_name or ""))
+                                game_name=str(
+                                    profile.game_name
+                                    or _game_dir_name(project)))
                         except Exception:  # noqa: BLE001
                             pass
                     elif review_summary is not None \
@@ -1232,7 +1252,8 @@ class TranslatePage(QWidget):
                 # 知识库学习：从「该翻未翻」回显条目沉淀特殊情况模式
                 learn_kb = KnowledgeBase(self.state.app_dir / "knowledge.db")
                 learned_kb, hits_kb = learn_kb.learn(
-                    entries, str(profile.game_name or ""),
+                    entries, str(profile.game_name
+                                or _game_dir_name(project)),
                     names=set(collected_names))
                 # #43 阶段 G（重构指令 §16 反馈学习）：审核失败结构化
                 # 沉淀（与 runner 同源 fail_case 域）——MAJOR/CRITICAL

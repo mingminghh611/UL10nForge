@@ -1172,6 +1172,28 @@ def review_entries(entries, glossary, *, game_name: str = "",
                         else f"{e.file_id}:{e.key_path}"] = evidence
     except Exception:  # noqa: BLE001 语境/向量检索故障不影响分流
         pass
+    # C16 审核反例召回（2026-09-07 知识库审计）：fail_case/审核 域此前
+    # 只写不读——1674 条「原文→误译」反例从未回流审核链路。同原文/
+    # 同语义单元的历史误译以「勿重蹈」提示注入 context_hint（批审
+    # prompt 语境参考段），首审即看到本作/同文本的历史翻车现场。
+    counterexamples_by_id: dict[str, list[dict]] = {}
+    try:
+        from hanhua.core.knowledge import KnowledgeBase
+        kb_path = data_root / "knowledge.db"
+        if kb_path.exists():
+            kb = KnowledgeBase(kb_path)
+            try:
+                for e in item_entries:
+                    hits = kb.review_counterexamples(
+                        str(e.original), game=game_name, limit=2)
+                    if hits:
+                        counterexamples_by_id[
+                            e.id if e.id is not None
+                            else f"{e.file_id}:{e.key_path}"] = hits
+            finally:
+                kb.close()
+    except Exception:  # noqa: BLE001 反例库故障不影响审核
+        pass
     if force_send:
         # 人工强制送审（审校页「重新审核」按钮）：不做风险分流，全量
         # 送审——人工复审的语义就是无条件再判，不能因无风险信号被直放
@@ -1243,6 +1265,20 @@ def review_entries(entries, glossary, *, game_name: str = "",
             ctx_hint = "；".join(
                 f"「{ev.translation}」({ev.kind}, 置信 {ev.confidence:.2f})"
                 for ev in evidence[:3] if ev.translation)
+        # C16：历史误译反例注入（本条原文/同语义单元的历史翻车现场）
+        counter = counterexamples_by_id.get(
+            e.id if e.id is not None else f"{e.file_id}:{e.key_path}")
+        if counter:
+            parts = []
+            for c in counter:
+                tag = (f"【{c['game']}】" if c.get("game") else "")
+                reason = (f"（{c['review_reason'][:60]}）"
+                          if c.get("review_reason") else "")
+                parts.append(
+                    f"{tag}「{c['original'][:60]}」曾被误译为"
+                    f"「{c['wrong_translation'][:60]}」{reason}，勿重蹈")
+            ctx_hint = (f"{ctx_hint}；" if ctx_hint else "") + \
+                "历史错译反例：" + "；".join(parts)
         review_items.append(ReviewItem(
             entry_id=it.entry_id, original=it.original,
             translation=it.translation, text_type=it.text_type,

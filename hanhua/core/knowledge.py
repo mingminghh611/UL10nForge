@@ -1254,6 +1254,178 @@ class KnowledgeBase:
         scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
         return [r for _, _, r in scored[:limit]]
 
+    # ── 审核反例召回（C16，2026-09-07 知识库审计）──────────────────────
+    # fail_case/审核 域 1674 条反例此前只写不读——review_failures 沉淀了
+    # 完整的 原文→误译 对照，但审核/重译链路从未检索。召回后同原文或
+    # 同语义单元的历史误译以「勿重蹈」提示注入审核与重译反馈。
+
+    @staticmethod
+    def _recall_keys(text: str) -> list[str]:
+        """match_case 同款拆词（复用打分口径，无分词依赖）。"""
+        keys = [text.casefold()]
+        zh_runs = re.findall(r"[一-鿿]{2,}", text)
+        for run in zh_runs:
+            keys.append(run.casefold())
+            keys += [run[i:i + 2] for i in range(len(run) - 1)]
+        keys += [w.casefold() for w in re.findall(r"[A-Za-z]{3,}", text)]
+        return list(dict.fromkeys(k for k in keys if k))
+
+    def review_counterexamples(self, original: str, game: str = "",
+                               limit: int = 3) -> list[dict]:
+        """审核反例召回：按原文拆词检索 fail_case/审核 历史误译记录。
+
+        过滤：kind=='审核' 且非 deprecated；note JSON 解析失败跳过；
+        wrong==correct（自相矛盾记录，首审误判沉淀）跳过；同 game 的记录
+        优先（本作既有翻车现场最相关）。命中调 mark_used 留痕。
+
+        返回 dict：original/wrong_translation/review_reason/suggestion/
+        correct_translation/game——供审核提示与重译反馈注入。"""
+        if self.store is None or not original:
+            return []
+        keys = self._recall_keys(original)
+        if not keys:
+            return []
+        scored: list[tuple[int, int, dict]] = []
+        for row in self.store.list_by_domain("fail_case"):
+            if row["kind"] != "审核" or row.get("status") == "deprecated":
+                continue
+            try:
+                note = json.loads(row["note"])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(note, dict):
+                continue
+            wrong = str(note.get("wrong_translation") or "")
+            correct = str(note.get("correct_translation") or "")
+            if wrong and wrong == correct:
+                continue  # 自相矛盾记录（首审误判）不召回
+            note_original = str(note.get("original") or "")
+            if not note_original:
+                note_original = str(row["pattern"] or "")
+            hay = (f"{note_original}|{wrong}|{correct}").casefold()
+            score = 0
+            if original.casefold() in hay:
+                score += 3
+            for k in keys:
+                if k in hay:
+                    score += 1
+            if score <= 0:
+                continue
+            if game and (row.get("game") or "") == game:
+                score += 2  # 本作历史翻车现场加权
+            scored.append((score, int(row.get("hits", 0)), row, {
+                "original": note_original,
+                "wrong_translation": wrong,
+                "review_reason": str(note.get("review_reason") or ""),
+                "suggestion": str(note.get("suggestion") or ""),
+                "correct_translation": correct,
+                "game": str(row.get("game") or ""),
+            }))
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        top = scored[:limit]
+        for _, _, row, _ in top:
+            self.store.mark_used("fail_case", "审核", row["pattern"])
+        return [r for _, _, _, r in top]
+
+    def prune_invalid_patterns(self) -> dict[str, int]:
+        """错误知识清理（C16 知识库审计）：四类坏条目 set_status →
+        deprecated（退役留档，永不物理删除——历史可追溯）。
+
+        1. invalid_regex：text 域 pattern 非法正则（re.error），match_text
+           的 except 分支使其静默死亡，从未生效；
+        2. should_skip_leak：should_skip 判定结构串（键名/占位符骨架）被
+           learn 沉淀为 multilingual_source——使 requires_translation 对
+           结构串误判 True；
+        3. self_contradictory：fail_case/审核 记录 wrong==correct（首审
+           误判沉淀的自相矛盾「反例」）；
+        4. false_language_claim：note.review_reason 含「原文为日文」但
+           original 为纯 ASCII（假名判定与事实矛盾，如 'noshuio'）。
+
+        返回各类清理计数。幂等：已 deprecated 的行不再计入。"""
+        counts = {"invalid_regex": 0, "should_skip_leak": 0,
+                  "self_contradictory": 0, "false_language_claim": 0}
+        if self.store is None:
+            return counts
+        # 1+2：text 域逐行体检
+        for row in self.store.list_by_domain("text"):
+            if row.get("status") == "deprecated":
+                continue
+            pattern = str(row["pattern"] or "")
+            try:
+                re.compile(pattern)
+            except re.error:
+                if self.store.set_status("text", row["kind"], pattern,
+                                         "deprecated"):
+                    counts["invalid_regex"] += 1
+                continue
+            if row["kind"] == "multilingual_source" and should_skip(pattern):
+                if self.store.set_status("text", "multilingual_source",
+                                         pattern, "deprecated"):
+                    counts["should_skip_leak"] += 1
+        # 3+4：fail_case/审核 自相矛盾与假语言判定
+        for row in self.store.list_by_domain("fail_case"):
+            if row["kind"] != "审核" or row.get("status") == "deprecated":
+                continue
+            try:
+                note = json.loads(row["note"])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(note, dict):
+                continue
+            wrong = str(note.get("wrong_translation") or "")
+            correct = str(note.get("correct_translation") or "")
+            if wrong and wrong == correct:
+                if self.store.set_status("fail_case", "审核",
+                                         row["pattern"], "deprecated"):
+                    counts["self_contradictory"] += 1
+                continue
+            reason = str(note.get("review_reason") or "")
+            original = str(note.get("original") or "")
+            if ("原文为日文" in reason or "片假名" in reason) and \
+                    original and original.isascii():
+                if self.store.set_status("fail_case", "审核",
+                                         row["pattern"], "deprecated"):
+                    counts["false_language_claim"] += 1
+        return counts
+
+    def backfill_missing_game(self) -> int:
+        """game 字段回填（C16）：fail_case/审核 pattern 首段路径含
+        '<Game>_Data' 时从目录名提取游戏名（strip '_Data'），同时更新
+        行 game 列与 note.game。GUI 审核链路曾传空 game_name（无
+        game_dir.name 兜底），982/1674 条反例无游戏归属。
+
+        返回回填条数。幂等：game 非空或路径无 _Data 段不动。"""
+        if self.store is None:
+            return 0
+        filled = 0
+        for row in self.store.list_by_domain("fail_case"):
+            if row["kind"] != "审核" or (row.get("game") or ""):
+                continue
+            pattern = str(row["pattern"] or "")
+            head = pattern.split("/", 1)[0].split("\\", 1)[0]
+            if not head.endswith("_Data"):
+                continue
+            game = head[:-len("_Data")]
+            if not game:
+                continue
+            try:
+                note = json.loads(row["note"])
+            except (ValueError, TypeError):
+                note = None
+            new_note = row["note"]
+            if isinstance(note, dict):
+                note["game"] = game
+                new_note = json.dumps(note, ensure_ascii=False)
+            with self.store._lock:
+                self.store.conn.execute(
+                    "UPDATE knowledge_items SET game=?, note=?"
+                    " WHERE domain='fail_case' AND kind='审核'"
+                    " AND pattern=?",
+                    (game, new_note, pattern))
+                self.store.conn.commit()
+            filled += 1
+        return filled
+
     def library_stats(self) -> dict[str, dict]:
         """六库命中统计：每库条数（内置种子 + 持久库）与总 hits。
 

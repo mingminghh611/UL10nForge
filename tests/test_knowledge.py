@@ -401,3 +401,187 @@ class TestLanguageOptionFill:
         from hanhua.core.knowledge import language_option_translation
         assert language_option_translation("Press START to begin") is None
         assert language_option_translation("Volume: High") is None
+
+
+# ── C16 知识库审计（2026-09-07）：反例召回 + 错误知识清理 + game 回填 ──
+
+class TestReviewCounterexamples:
+    """fail_case/审核 域此前只写不读（1674 条反例零召回）——
+    review_counterexamples 按原文拆词召回历史误译，注入审核提示。"""
+
+    def _note(self, *, original="Make all readers gullible",
+              wrong="让读者都容易上当", correct="", reason="漏译祈使语气",
+              suggestion=""):
+        import json
+        return json.dumps({
+            "schema": "review_failure_v1", "game": "Fake it",
+            "original": original, "wrong_translation": wrong,
+            "correct_translation": correct, "review_reason": reason,
+            "suggestion": suggestion, "converged": True,
+            "final_outcome": "APPROVED"}, ensure_ascii=False)
+
+    def test_recall_by_original(self, tmp_path):
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        kb.store.upsert("fail_case", "审核", "Fake it_Data/f:12",
+                        action="apply_fix", note=self._note(),
+                        game="Fake it")
+        hits = kb.review_counterexamples(
+            "Make all readers gullible.", game="Fake it")
+        assert len(hits) == 1
+        assert hits[0]["wrong_translation"] == "让读者都容易上当"
+        assert hits[0]["review_reason"] == "漏译祈使语气"
+        assert hits[0]["game"] == "Fake it"
+        # mark_used 留痕
+        row = [r for r in kb.store.list_by_domain("fail_case")
+               if r["pattern"] == "Fake it_Data/f:12"][0]
+        assert row["usage_count"] == 1
+        kb.close()
+
+    def test_self_contradictory_not_recalled(self, tmp_path):
+        # wrong==correct（首审误判沉淀）不召回
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        kb.store.upsert("fail_case", "审核", "g_Data/f:1",
+                        action="apply_fix",
+                        note=self._note(wrong="让读者上当",
+                                        correct="让读者上当"),
+                        game="Fake it")
+        assert kb.review_counterexamples(
+            "Make all readers gullible.") == []
+        kb.close()
+
+    def test_deprecated_not_recalled(self, tmp_path):
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        kb.store.upsert("fail_case", "审核", "g_Data/f:2",
+                        action="apply_fix", note=self._note(),
+                        game="Fake it")
+        kb.store.set_status("fail_case", "审核", "g_Data/f:2", "deprecated")
+        assert kb.review_counterexamples(
+            "Make all readers gullible.") == []
+        kb.close()
+
+    def test_unrelated_original_no_recall(self, tmp_path):
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        kb.store.upsert("fail_case", "审核", "g_Data/f:3",
+                        action="apply_fix", note=self._note(),
+                        game="Fake it")
+        assert kb.review_counterexamples("PRESS START") == []
+        kb.close()
+
+    def test_same_game_weighted_first(self, tmp_path):
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        # 同分命中（整串 +3）时本作 +2 加权优先于他作
+        kb.store.upsert(
+            "fail_case", "审核", "g_Data/f:1", action="apply_fix",
+            note=self._note(wrong="外作误译"), game="Other")
+        kb.store.upsert(
+            "fail_case", "审核", "g_Data/f:2", action="apply_fix",
+            note=self._note(wrong="本作误译"), game="Fake it")
+        hits = kb.review_counterexamples(
+            "Make all readers gullible", game="Fake it", limit=1)
+        assert len(hits) == 1
+        assert hits[0]["wrong_translation"] == "本作误译"
+        kb.close()
+
+
+class TestPruneInvalidPatterns:
+    """四类坏知识清理：invalid_regex / should_skip_leak /
+    self_contradictory / false_language_claim → deprecated 退役。"""
+
+    def test_invalid_regex_deprecated(self, tmp_path):
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        kb.store.upsert("text", "spaced_action", "* unclosed[",
+                        action="translate")
+        assert kb.prune_invalid_patterns()["invalid_regex"] == 1
+        row = kb.store.list_by_domain("text")[0]
+        assert row["status"] == "deprecated"
+        # 幂等：再跑零清理
+        assert kb.prune_invalid_patterns()["invalid_regex"] == 0
+        kb.close()
+
+    def test_should_skip_leak_deprecated(self, tmp_path):
+        from hanhua.core.placeholders import should_skip
+        structural = "line:de8670da"  # C16 实证泄漏样本
+        assert should_skip(structural)
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        kb.store.upsert("text", "multilingual_source", structural,
+                        action="translate")
+        assert kb.prune_invalid_patterns()["should_skip_leak"] == 1
+        assert kb.store.list_by_domain("text")[0]["status"] == "deprecated"
+        kb.close()
+
+    def test_self_contradictory_deprecated(self, tmp_path):
+        import json
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        note = json.dumps({
+            "original": "Hello", "wrong_translation": "你好",
+            "correct_translation": "你好", "review_reason": "x"},
+            ensure_ascii=False)
+        kb.store.upsert("fail_case", "审核", "g_Data/f:1",
+                        action="apply_fix", note=note, game="g")
+        assert kb.prune_invalid_patterns()["self_contradictory"] == 1
+        kb.close()
+
+    def test_false_kana_claim_deprecated(self, tmp_path):
+        # 'noshuio' 纯 ASCII 但 reason 声称「原文为日文片假名」→ 与事实矛盾
+        import json
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        note = json.dumps({
+            "original": "noshuio", "wrong_translation": "诺休",
+            "correct_translation": "", "review_reason":
+            "原文为日文片假名，译文未翻译且拼写错误"}, ensure_ascii=False)
+        kb.store.upsert("fail_case", "审核", "g_Data/f:1",
+                        action="apply_fix", note=note, game="g")
+        counts = kb.prune_invalid_patterns()
+        assert counts["false_language_claim"] == 1
+        assert counts["self_contradictory"] == 0
+        kb.close()
+
+    def test_good_knowledge_untouched(self, tmp_path):
+        import json
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        kb.store.upsert("text", "uppercase_action", "TOSS TRASH",
+                        action="translate", map_to="丢垃圾")
+        note = json.dumps({
+            "original": "Hello", "wrong_translation": "喂喂喂",
+            "correct_translation": "你好", "review_reason": "语气不对"},
+            ensure_ascii=False)
+        kb.store.upsert("fail_case", "审核", "g_Data/f:1",
+                        action="apply_fix", note=note, game="g")
+        assert all(v == 0 for v in kb.prune_invalid_patterns().values())
+        assert kb.store.list_by_domain("text")[0]["status"] != "deprecated"
+        kb.close()
+
+
+class TestBackfillMissingGame:
+    """game 空缺反例从 pattern 首段 '<Game>_Data' 提取游戏名回填。"""
+
+    def test_backfill_from_data_dir(self, tmp_path):
+        import json
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        note = json.dumps({
+            "original": "Hello", "wrong_translation": "喂",
+            "review_reason": "x", "game": ""}, ensure_ascii=False)
+        kb.store.upsert("fail_case", "审核", "Minato_Data/files:3",
+                        action="apply_fix", note=note, game="")
+        assert kb.backfill_missing_game() == 1
+        row = kb.store.list_by_domain("fail_case")[0]
+        assert row["game"] == "Minato"
+        assert json.loads(row["note"])["game"] == "Minato"
+        # 幂等
+        assert kb.backfill_missing_game() == 0
+        kb.close()
+
+    def test_no_data_segment_untouched(self, tmp_path):
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        kb.store.upsert("fail_case", "审核", "plain_locator:1",
+                        action="apply_fix", note="{}", game="")
+        assert kb.backfill_missing_game() == 0
+        assert kb.store.list_by_domain("fail_case")[0]["game"] == ""
+        kb.close()
+
+    def test_existing_game_untouched(self, tmp_path):
+        kb = KnowledgeBase(tmp_path / "knowledge.db")
+        kb.store.upsert("fail_case", "审核", "Fake it_Data/f:1",
+                        action="apply_fix", note="{}", game="Other")
+        assert kb.backfill_missing_game() == 0
+        kb.close()
