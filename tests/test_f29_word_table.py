@@ -100,15 +100,21 @@ def _ui_card_raw() -> bytes:
 
 
 def test_f38_ui_card_high_freq_released():
-    """UI 卡片对象（含 pending 同侪）：高频 UI 词升级为显示文本。"""
+    """UI 卡片对象（含 pending 同侪）：高频 UI 词升级为显示文本。
+
+    B22 优先级 4 后路径变化：Health/Food/Resource 不再进高频预过滤
+    （DISPLAY_WORDS/_WORD_CASE 显式证据优先于频次猜测），走常规链由
+    F39 word_list_object 释放——终态不变（pending/display）。"""
     # freq：Health/Food/Resource 达到高频阈值（总量 30 条 → 阈值 ~7）
     freq = {"Health": 20, "Food": 20, "Resource": 20}
     entries = _raw_string_entries("f1", 9, _ui_card_raw(), freq,
                                   "sharedassets0.assets")
     by = {e.original: e for e in entries}
     assert by["Health"].status == "pending"
-    assert by["Health"].meta["reason"] == "single_visible_string"
-    assert by["Health"].meta.get("f38_released") is True
+    # F38（prefilter 高频释放）或 F39（词表对象释放）任一路径均合法
+    # ——两条都是「UI 词进池」的确定性释放闸门
+    assert by["Health"].meta["reason"] in ("single_visible_string",
+                                           "word_list_object")
     assert by["Food"].status == "pending"
     assert by["Resource"].status == "pending"
     assert by["Clam 01"].status == "pending"
@@ -118,7 +124,11 @@ def test_f38_ui_card_high_freq_released():
 
 def test_f38_component_object_high_freq_stays_skipped():
     """组件配置对象（code_heavy：方法名/类型引用 ≥2）：
-    'Play' 高频词保持跳过（FMOD 事件名，翻译断音效引用）。"""
+    'Play' 高频词保持跳过（FMOD 事件名，翻译断音效引用）。
+
+    B22 优先级 4 后：Play ∈ DISPLAY_WORDS 不进高频预过滤，改走
+    code_heavy 链的 code_heavy_identifier 跳过（同侪 Populate 同因）——
+    语义不变：code_heavy 对象里的白名单词保持跳过。"""
     raw = _scriptable_object_raw(
         "Play", "Populate", "SetState",
         "FMODUnity.StudioEventEmitter, FMODUnity",
@@ -128,7 +138,8 @@ def test_f38_component_object_high_freq_stays_skipped():
                                   "sharedassets0.assets")
     by = {e.original: e for e in entries}
     assert by["Play"].status == "skipped"
-    assert by["Play"].meta["reason"] == "prefilter_high_frequency"
+    assert by["Play"].meta["reason"] in ("prefilter_high_frequency",
+                                         "code_heavy_identifier")
 
 
 def test_f38_ugui_state_names_stay_skipped():
@@ -142,7 +153,8 @@ def test_f38_ugui_state_names_stay_skipped():
     by = {e.original: e for e in entries}
     assert by["Health"].status == "pending"          # UI 词升级
     assert by["Normal"].status == "skipped"          # 状态名不升级
-    assert by["Normal"].meta["reason"] == "prefilter_high_frequency"
+    assert by["Normal"].meta["reason"] in ("prefilter_high_frequency",
+                                           "unity_control_state")
     assert by["Pressed"].status == "skipped"
     assert by["Disabled"].status == "skipped"
 

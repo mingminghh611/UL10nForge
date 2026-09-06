@@ -554,6 +554,17 @@ _TYPETREE_DISPLAY_FIELD_ROWS: tuple[_DisplayField, ...] = (
 # 淹没真实文本。
 _TYPETREE_DISPLAY_FIELDS = frozenset(
     f.name for f in _TYPETREE_DISPLAY_FIELD_ROWS)
+# 显示字段 token 集（B22 优先级 3a）：复合字段名（UIHeaderText/
+# StartGameLabel/m_ButtonCaption）此前精确匹配白名单漏判——normalized
+# "uiheadertext" 不在白名单，但 token 交集 {header,text} 命中。与结构
+# token 黑名单（_TYPETREE_STRUCTURAL_FIELDS）对称：黑名单已有 token 匹
+# 配而白名单只有精确匹配的不对称是复合字段漏判根因。多 token 交集
+# 命中（≥2 个显示 token）才放行，单 token（如 valueText 的 text）不足以
+# 抵御「键+text」类字段名误判。
+_TYPETREE_DISPLAY_FIELD_TOKENS = frozenset().union(*(
+    frozenset(_re.split(r"[^A-Za-z0-9]+", _re.sub(
+        r"([a-z0-9])([A-Z])", r"\1_\2", f.name).casefold()))
+    for f in _TYPETREE_DISPLAY_FIELD_ROWS))
 _TYPETREE_STRUCTURAL_FIELDS = frozenset(
     {"key", "keys", "id", "method", "binding", "path", "property", "code"})
 # Unity 惯例不可变字段（M1 单一源：structural_fields.IMMUTABLE_FIELD_NAMES_FOLDED，casefold 化以
@@ -676,8 +687,13 @@ def _field_name_tokens(value: object) -> frozenset[str]:
         if token)
 
 
+def _display_field_token_hits(field_name: object) -> int:
+    """字段名与显示 token 集的交集大小（B22 优先级 3a 共用实现）。"""
+    return len(_field_name_tokens(field_name)
+               & _TYPETREE_DISPLAY_FIELD_TOKENS)
+
+
 def _encode_field_path(field_path: list[str | int]) -> str:
-    """Encode path segments reversibly while retaining key/index types."""
     return "/".join(
         f"i:{segment}" if isinstance(segment, int)
         else f"k:{quote(segment, safe='')}"
@@ -803,10 +819,11 @@ def _typetree_string_entries(
     has_value_evidence = any(
         not blocked and not parallel_skip and (
             normalized in _TYPETREE_DISPLAY_FIELDS
+            or _display_field_token_hits(leaf_path[-1]) >= 2
             or _has_sentence_shape(text.strip())
             or has_display_text_evidence(text)
         )
-        for _, text, normalized, blocked, parallel_skip in leaves)
+        for leaf_path, text, normalized, blocked, parallel_skip in leaves)
 
     def append(kind: str, path: list[str | int], text: str, reason: str,
                confidence: str, status: str, role: str,
@@ -851,7 +868,14 @@ def _typetree_string_entries(
                         "skipped_count": count})
             continue
         stripped = text.strip()
-        if normalized in _TYPETREE_DISPLAY_FIELDS:
+        # B22 优先级 3a：白名单精确匹配 → token 交集扩展（复合字段名
+        # UIHeaderText/StartGameLabel）。blocked（结构 token/事件绑定/
+        # 镜像/immutable）已在 visit 阶段拦截，不会走到这里，结构否决
+        # 权天然保留。≥2 token 交集才放行——单 token（keyText/valueText
+        # 的 text）不足以抵御「键+text」类字段名误判，但复合显示字段
+        #（MainMenuTitleText 的 title+text）是强命名证据。
+        if (normalized in _TYPETREE_DISPLAY_FIELDS
+                or _display_field_token_hits(path[-1]) >= 2):
             append("typetree", path, text, "typetree_display_field",
                    "high", "pending", "display")
         elif is_tag_composed(text):
@@ -1676,10 +1700,18 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
             prefilter = "engine_string"
         else:
             non_engine.append(s)
+            stripped_casefold = s.strip().casefold()
             if should_skip(s) and structural_reason is None:
                 prefilter = "key_identifier"
             elif (freq.get(s, 0) >= freq_threshold
-                  and not strong_display_evidence):
+                  and not strong_display_evidence
+                  # B22 优先级 4：白名单显示词/单词式短语不受高频预过滤
+                  # ——开局菜单按钮（Start Game/Continue）在多场景重复出
+                  # 现即成「高频串」，但 DISPLAY_WORDS 是显式显示词证据
+                  # （证据分层），_WORD_CASE 单词式（F44 西语按钮同证据）
+                  # 不得被频次猜测推翻。
+                  and stripped_casefold not in DISPLAY_WORDS
+                  and not _WORD_CASE.match(s)):
                 prefilter = "high_frequency"
             else:
                 prefilter = None
@@ -2061,8 +2093,25 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
             reason = "symbols_only"
             confidence, role = "low", "structural"
         elif entry.status == STATUS_SKIPPED:
-            reason = "duplicate_key_position"
-            confidence, role = "low", "structural"
+            # B22 优先级 5：重复位置条目（has_marker 字典对象里非首末
+            # 出现的串）此前无条件跳过——但「键风格」形态（下划线/全大
+            # 写标识符）才是键；'Start Game' 这类带空格/大小写混合的
+            # 显示形态在字典中间位置出现也是值副本（同值末条已 pending，
+            # 中间条目跳过导致只有部分 UI 状态被汉化——deadbeat 暂停菜
+            # 单 Pause ×3 同根因）。非键风格重复放行为 pending；真键
+            # （is_key_style_identifier 形态）维持跳过（宁漏勿坏）。
+            if is_key_style_identifier(stripped):
+                reason = "duplicate_key_position"
+                confidence, role = "low", "structural"
+            elif has_display_text_evidence(stripped) or _has_sentence_shape(
+                    stripped):
+                # 带空格/大小写混合的显示形态（'Start Game'）才是值副本
+                reason = "duplicate_display_position"
+                confidence, role = "medium", "display"
+            else:
+                # 单词式/无显示证据的重复串：位置不明，保守跳过
+                reason = "duplicate_key_position"
+                confidence, role = "low", "structural"
         elif is_pure_tags(stripped):
             # 纯 TMP 标签序列（<size=30><align=center>，无正文字母）：
             # 标签是排版标记不是语言内容，翻译必破坏标签结构（TMP 标签
@@ -2181,12 +2230,17 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
             confidence, role = "low", "structural"
         elif is_code_heavy:
             # 白名单显示词（Play/Instructions 等按钮文本）仅在对象有 UI 证据
-            # （交互提示/控件状态）时放行——hotel-paradise 真实按钮对象含
-            # Normal/Highlighted/Pressed 状态；纯 code 对象（无 UI 证据）中的
-            # 单词仍跳过（防代码常量误放行）。core_menu_terms 不能作为证据——
-            # 那是被检查词自身，用它会循环放行菜单词。
+            # （交互提示/控件状态/控件词缀信号）时放行——hotel-paradise 真实
+            # 按钮对象含 Normal/Highlighted/Pressed 状态；纯 code 对象（无 UI
+            # 证据）中的单词仍跳过（防代码常量误放行）。core_menu_terms 不能
+            # 作为证据——那是被检查词自身，用它会循环放行菜单词。
+            # B22 优先级 4：ui_control_signal（对象名以 Button/Btn/Label 结尾
+            # 的控件词缀）此前不在证据里——「StartGameButton 对象里的 Start」
+            # 因控件状态 <3 且无交互提示被误判 code_heavy_identifier（开局菜
+            # 单按钮遗漏根因之一）。
             has_ui_evidence = bool(
-                len(control_states) >= 3 or interaction_prompt)
+                len(control_states) >= 3 or interaction_prompt
+                or ui_control_signal)
             # 控件状态名（Normal/Highlighted/Pressed/Selected/Disabled）是
             # Unity VisualState 引擎文本，即使在本按钮对象中也不翻译
             # （hotel-paradise 真实误伤：按钮对象的 Normal 被错误放行）
@@ -3318,7 +3372,11 @@ def _should_downgrade_pending(entry: TextEntry) -> bool:
             or _QUALIFIED.match(s)                  # 'Konbanmio-n' 连字符被当程序集名
             or (len(s) >= 20 and _LOG_TEMPLATE_TAIL.search(s))  # 冒号结尾西语 UI 被当日志模板
         )
-    if _is_engine_string(entry.original):
+    if is_engine_string_core(entry.original):
+        # B22 优先级 5：is_engine_string 含命名模式猜测（类名猜引擎串），
+        # 误杀面比 is_engine_string_core 大——xml 分支（3354）早已用 core，
+        # 本分支此前用全量版不一致。降级只对形态标记明确（GUID/版本号/
+        # 程序集串）的机器数据生效。
         return True
     if is_key_style_identifier(entry.original):
         return True
@@ -3733,7 +3791,14 @@ def extract_asset_file(path: str | Path, file_id: str | None = None,
                         if candidates:
                             deferred_candidates.append(
                                 (asset_name, int(obj.path_id), candidates))
-                if tname not in _NATIVE_TEXT_TYPES:
+                # 原生文本类型（Text/TextMeshPro 等）typetree 解析失败时
+                # tree 不是 dict（3636 行 init 为 None）——此前被本行
+                # `not in _NATIVE_TEXT_TYPES` 挡住 raw scan，整对象 0 条
+                # 提取（首个场景英文可见漏网的根因，B22）。display 条目
+                # 存在时上方 continue 已跳过，本放宽只影响 typetree 失败
+                # 的兜底路径。
+                if (tname not in _NATIVE_TEXT_TYPES
+                        or not isinstance(tree, dict)):
                     try:
                         raw = obj.get_raw_data()
                     except Exception:  # noqa: BLE001

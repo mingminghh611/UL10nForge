@@ -521,8 +521,23 @@ def detect_indent(text: str) -> int | str | None:
 
 
 def apply_json(
-    entries: list[TextEntry], source_text: str, ensure_ascii: bool = False
+    entries: list[TextEntry], source_text: str, ensure_ascii: bool = False,
+    skipped: set[str] | None = None,
 ) -> str:
+    """把译文按 key_path 写回 JSON 文本（原位替换，保格式）。
+
+    skipped（0.42.1 假记账根治）：可选集合出参——**未被实际应用**的条目
+    key_path 收集于此（静默丢弃路径全量暴露：key_style/键字段跳过、
+    目标值不匹配跳过）。调用方（writer/审计）据此逐条记账，杜绝
+    「从未落盘却记 written」的假账（审计通过但游戏里是英文的确定性
+    路径）。
+
+    目标值不匹配（P5a）：不再 raise ValueError——单条坏条目（旧库 meta
+    过期/key_path 失效）跳过即可（进 skipped 集合），由调用方按
+    json_target_mismatch 记 rejected；raise 会击穿整场写回（writer 不
+    捕获 → RuntimeError 全场终止），与「宁漏勿坏：拿不准的写回宁可
+    保留原文」相悖。
+    """
     document = _load_document(source_text)
     translations: dict[TypedPath, str] = {}
     for entry in entries:
@@ -538,6 +553,8 @@ def apply_json(
         if is_key_style_identifier(entry.original) or (
             isinstance(leaf, str) and looks_like_key_field(leaf)
         ):
+            if skipped is not None:
+                skipped.add(entry.key_path)
             continue
         span = document.value_spans.get(path)
         # strip 容差（Rendezvous 实证 2026-08-17）：ink 对话行提取时
@@ -546,9 +563,12 @@ def apply_json(
         if (span is None
                 or (span.value != entry.original
                     and span.value.strip() != entry.original.strip())):
-            raise ValueError(
-                f"JSON translation target does not match source: {entry.key_path!r}"
-            )
+            # P5a（0.42.1）：单条目标不匹配跳过不抛——旧库 meta 过期/
+            # key_path 失效只影响本条（进 skipped 集合由调用方记
+            # rejected），整场写回不再被单条坏数据击穿
+            if skipped is not None:
+                skipped.add(entry.key_path)
+            continue
         translations[path] = entry.translation
 
     if not translations:

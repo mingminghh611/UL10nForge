@@ -1812,7 +1812,10 @@ def test_duplicate_strings_key_position_skipped_with_localization_marker():
 
 def test_generic_strong_display_does_not_override_duplicate_position_with_marker():
     # marker 串本身带 type_reference 结构化原因（structural skipped 条目），
-    # 随后的重复显示文本保持首键末值
+    # 随后的重复显示文本保持首键末值。
+    # B22 优先级 5：非键风格的重复串（'Open Settings Menu' 句式形态）
+    # 释放为 display（duplicate_display_position）——首条不再强按键跳过，
+    # 但「只译末条」的守恒约束保持（首条 display 跳过/末条 pending 待译）。
     raw = (_with_len("UnityEngine.Localization")
            + _with_len("Open Settings Menu") * 2)
 
@@ -1820,7 +1823,8 @@ def test_generic_strong_display_does_not_override_duplicate_position_with_marker
 
     assert [entry.status for entry in entries] == ["skipped", "skipped", "pending"]
     assert entries[0].meta["role"] == "structural"
-    assert entries[1].meta["reason"] == "duplicate_key_position"
+    assert entries[1].meta["reason"] == "duplicate_display_position"
+    assert entries[1].meta["role"] == "display"
     assert entries[2].meta["role"] == "display"
 
 

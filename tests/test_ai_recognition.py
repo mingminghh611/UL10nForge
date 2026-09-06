@@ -2,9 +2,12 @@
 
 锁定 ai_recognition 的安全契约：
 - 候选收集白名单（只收 typetree_candidate/typetree_prefilter 的
-  role=candidate status=skipped，muted 短路）；
+  role=candidate status=skipped，muted 短路；B22-P2 扩面：rawstr
+  弱形态 reason 召回——确定性 reason 仍不收）；
 - 升格路径（模型判 display → pending/display/translate，通过
-  is_actionable_translation 终检）；
+  is_actionable_translation 终检；B22：kind 归一到可分发基类——
+  writer._select_write_items 按 kind 精确匹配，"ai_upgraded" 会被
+  尾部循环拒绝导致无法写回）；
 - 键风格预校验（模型幻觉防线：MENU_PLAY 判 display 也不放行）；
 - 结构终检（URL/程序集名 AI 无权推翻——宁漏勿坏）；
 - 确认跳过（structural verdict 留档 muted，防重复询问）；
@@ -120,6 +123,69 @@ def test_collect_candidates_respects_limit():
     assert len(collect_candidates(rows, limit=10)) == 10
 
 
+# ── B22 优先级 2：rawstr 弱形态召回面 ───────────────────────────────────
+
+def test_collect_candidates_rawstr_recall_reasons_picked():
+    """B22-P2：三类弱形态 reason 的 rawstr skipped 收进候选面（八库普查
+    实证有真实显示文本漏网——drova 德语装备词/交互提示/Credits）。"""
+    rows = [
+        _candidate_row("r1", "Heiltrank", kind="rawstr",
+                       extra_meta={"role": "structural",
+                                   "reason":
+                                       "identifier_without_display_evidence"}),
+        _candidate_row("r2", "Talk to Shopkeeper", kind="rawstr",
+                       extra_meta={"role": "structural",
+                                   "reason": "code_heavy_identifier"}),
+        _candidate_row("r3", "Complete Bow", kind="rawstr",
+                       extra_meta={"role": "structural",
+                                   "reason": "prefilter_high_frequency"}),
+    ]
+    picked = collect_candidates(rows)
+    # 排序按可疑度（含空格词组优先），顺序不敏感断言集合
+    assert sorted(e.key_path for e in picked) == ["r1", "r2", "r3"]
+
+
+def test_collect_candidates_rawstr_deterministic_reasons_excluded():
+    """确定性结构 reason（词表/输入绑定/timeline/类型引用等）AI 无权
+    重判——N2 结论：这些抽样几乎全对，扩面只引噪声。"""
+    rows = [
+        _candidate_row("d1", "play", kind="rawstr",
+                       extra_meta={"role": "structural",
+                                   "reason": "word_table_object"}),
+        _candidate_row("d2", "<Gamepad>/leftStick", kind="rawstr",
+                       extra_meta={"role": "structural",
+                                   "reason": "input_binding"}),
+        _candidate_row("d3", "TimelinePlayableAsset", kind="rawstr",
+                       extra_meta={"role": "structural",
+                                   "reason": "timeline_asset"}),
+        _candidate_row("d4", "UnityEngine.Object, UnityEngine",
+                       kind="rawstr",
+                       extra_meta={"role": "structural",
+                                   "reason": "type_reference"}),
+        # rawstr 但 role=display（提取层已释放）不收
+        _candidate_row("d5", "Main Menu", kind="rawstr",
+                       extra_meta={"role": "display",
+                                   "reason": "single_visible_string"}),
+        # 非 rawstr 非 typetree 候选 kind（il2cpp）不收
+        _candidate_row("d6", "...<sentence>", kind="il2cpp_sentence",
+                       extra_meta={"role": "structural",
+                                   "reason": "code_heavy_identifier"}),
+    ]
+    assert collect_candidates(rows) == []
+
+
+def test_collect_candidates_rawstr_recall_muted_skipped():
+    """召回面条目同样受 muted 短路（已判定过的不再询问）。"""
+    rows = [
+        _candidate_row("r1", "Heiltrank", kind="rawstr",
+                       extra_meta={"role": "structural",
+                                   "reason":
+                                       "identifier_without_display_evidence",
+                                   "ai_verdict": "structural"}),
+    ]
+    assert collect_candidates(rows) == []
+
+
 # ── verdict 解析 ────────────────────────────────────────────────────────
 
 def test_parse_verdicts_plain_and_fenced_and_regex_fallback():
@@ -178,6 +244,43 @@ def test_upgraded_entry_passes_actionable_gate():
               "disposition": "translate", "confidence": "medium",
               "confidence_promoted": True, "ai_verdict": "display"})
     assert is_actionable_translation(entry)
+
+
+def test_b22_upgrade_meta_keeps_dispatchable_kind():
+    """B22 根因回归：升格 meta 的 kind 必须保持写回可分发的基类。
+
+    writer._select_write_items 按 meta.kind 精确匹配分发分支——
+    kind="ai_upgraded" 会让每条升级条目在 v2 尾部循环被拒
+    "locator_not_found_or_unchanged"，0.38.0 上线以来 AI 升格
+    条目全部无法写回。候选 kind 归一 typetree/rawstr，ai_verdict_
+    source 留档原 kind。"""
+    from hanhua.core.ai_recognition import _upgrade_meta
+    for src_kind, base in (("typetree_candidate", "typetree"),
+                           ("typetree_prefilter", "typetree"),
+                           ("rawstr", "rawstr"),
+                           ("ai_upgraded", "typetree")):
+        entry = TextEntry(
+            file_id="f", key_path="k", original="Combat Music",
+            status=STATUS_SKIPPED,
+            meta={"kind": src_kind, "role": "structural",
+                  "field_path": ["m_Text"], "obj": 7, "asset_file": "a",
+                  "obj_has_values": True, "tmp_tag_refs": [1]})
+        meta = _upgrade_meta(entry, {"ai_model_verdict": "display"})
+        assert meta["kind"] == base, (src_kind, meta["kind"])
+        assert meta["ai_verdict_source"] == src_kind
+        assert meta["ai_upgraded"] is True
+        assert meta["role"] == "display"
+        # 写回定位/审计链字段保留
+        assert meta["field_path"] == ["m_Text"]
+        assert meta["obj"] == 7
+        assert meta["asset_file"] == "a"
+        assert meta["obj_has_values"] is True
+        assert meta["tmp_tag_refs"] == [1]
+        # 升格后可通过翻译池闸门
+        upgraded = TextEntry(
+            file_id="f", key_path="k", original="Combat Music",
+            status="pending", meta=meta)
+        assert is_actionable_translation(upgraded)
 
 
 # ── verdict 应用 ────────────────────────────────────────────────────────

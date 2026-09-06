@@ -54,6 +54,25 @@ from hanhua.core.placeholders import is_key_style_identifier
 # WORDS 根治）。扩大 AI 收集面只会引入噪声，白名单保持收窄。
 _CANDIDATE_KINDS = frozenset({"typetree_candidate", "typetree_prefilter"})
 
+# B22 优先级 2：rawstr 侧的 AI 收窄召回面。八库全量普查实证——
+# rawstr skipped 里确定性证据的 reason（word_table_object / unity_
+# control_state / script_class_config / input_* / timeline_* / tmp_asset_
+# object / type_reference / method_name 等）抽样几乎全对（N2 结论维持），
+# 但三类「弱形态判定」reason 存在真实显示文本漏网：
+# - identifier_without_display_evidence：e0449121aa（drova）德语装备词
+#   Heiltrank/Schwert/Schild…（UI 物品目录）、1ac74a68f3 的 Credits/Title；
+# - code_heavy_identifier：1dbe255992 的 '[E] Talk Shopkeeper' 等
+#   全部交互提示（真玩家可见文本，被 code_heavy 对象误杀）；
+# - prefilter_high_frequency：'Complete Bow'/'Equipment'/'Start' 等
+#   游戏 UI 词在非释放对象中被高频哑信号吞掉。
+# 只收这三类（8 库 distinct 合计数百条，量级可控），键风格预校验 +
+# is_actionable_translation 终检照常兜底（fail-closed 不变）。
+_RAWSTR_RECALL_REASONS = frozenset({
+    "identifier_without_display_evidence",
+    "code_heavy_identifier",
+    "prefilter_high_frequency",
+})
+
 # 单次批量分类条数上限：Qwen3.5-4B ctx 8192 预算——识别 prompt 固定
 # 部分 ≈300 token，每条目 ≤120 token（索引+原文截断 120 字符），40 条
 # ≈5k 输出 JSON ≈40×15=600 token，安全余量 >2k。与审校 review_batch_
@@ -122,12 +141,33 @@ def _rank_key(entry: TextEntry) -> tuple:
     return (has_values, not spaced, entry.key_path)
 
 
+def _is_recall_candidate(meta: dict) -> bool:
+    """B22 优先级 2：rawstr 弱形态 reason 的窄面召回判定。
+
+    kind=rawstr ∧ status=skipped ∧ reason ∈ _RAWSTR_RECALL_REASONS ∧
+    未 muted。typetree 候选层（kind ∈ _CANDIDATE_KINDS）走原判定；
+    rawstr 侧只收三类弱形态 reason（见 _RAWSTR_RECALL_REASONS 注释），
+    确定性结构 reason（word_table/input/timeline/config/type_reference…）
+    AI 无权重判——那是确定性证据，不是「拿不准」。
+    """
+    if meta.get("kind") != "rawstr":
+        return False
+    if meta.get("role") != "structural":
+        return False
+    return meta.get("reason") in _RAWSTR_RECALL_REASONS
+
+
 def collect_candidates(rows: list[dict], *, limit: int = _MAX_CANDIDATES_PER_RUN,
                        ) -> list[TextEntry]:
     """从 store 行中筛出 AI 可判定的候选条目（排序 + 截断）。
 
-    只收：meta.kind ∈ _CANDIDATE_KINDS ∧ role=candidate ∧ status=skipped
-    ∧ 未 muted（meta.ai_verdict 缺失）∧ 原文非空。
+    收两类（B22 优先级 2 扩面后）：
+    1. typetree 候选层：meta.kind ∈ _CANDIDATE_KINDS ∧ role=candidate
+       ∧ status=skipped；
+    2. rawstr 召回面：kind=rawstr ∧ role=structural ∧ reason ∈
+       _RAWSTR_RECALL_REASONS ∧ status=skipped（弱形态判定，确定性
+       证据不足——AI 二次分类的正当场景）。
+    共同约束：未 muted（meta.ai_verdict 缺失）∧ 原文非空。
     """
     picked: list[TextEntry] = []
     for row in rows:
@@ -141,9 +181,10 @@ def collect_candidates(rows: list[dict], *, limit: int = _MAX_CANDIDATES_PER_RUN
                 continue
         if not isinstance(meta, dict):
             continue
-        if meta.get("kind") not in _CANDIDATE_KINDS:
-            continue
-        if meta.get("role") != "candidate":
+        if meta.get("kind") in _CANDIDATE_KINDS:
+            if meta.get("role") != "candidate":
+                continue
+        elif not _is_recall_candidate(meta):
             continue
         if meta.get(_MUTED):
             continue
@@ -301,16 +342,25 @@ def _upgrade_meta(entry: TextEntry, note: dict) -> dict:
     confidence=medium + confidence_promoted=True（rescan 的 quality_keys
     会保留 promoted，但 role/disposition 会被提取器重新断言——
     提取层形态判定升级时以提取层为准，这是预期行为）。
-    kind 改为 ai_upgraded 防止下轮重复收进候选池（muted 同效）。
+    kind 保持写回可分发的基类（typetree_candidate/prefilter → typetree；
+    rawstr 候选 → rawstr）：写回按 meta.kind 精确匹配分发分支
+    （writer._select_write_items），改成 "ai_upgraded" 会导致每条升级
+    条目在 v2 尾部循环被拒 "locator_not_found_or_unchanged"——AI 识别
+    升格 0.38.0 上线以来全部无法写回的根因（B22）。重复收进候选池由
+    status→pending + role→display + _MUTED 三重阻断，无需改 kind。
     """
+    base_kind = entry.meta.get("kind") or "typetree"
+    if base_kind not in ("typetree", "rawstr"):
+        base_kind = "typetree"  # 候选 kind 一律归一到可分发基类
     meta = {
-        "kind": "ai_upgraded",
+        "kind": base_kind,
         "role": "display",
         "disposition": "translate",
         "confidence": "medium",
         "confidence_promoted": True,
         _MUTED: VERDICT_DISPLAY,
-        "ai_verdict_source": "typetree_candidate",
+        "ai_upgraded": True,
+        "ai_verdict_source": entry.meta.get("kind") or "typetree_candidate",
         "ai_note": note,
     }
     # 保留原 field_path/obj/asset_file 写回定位信息（写回按 key_path，
