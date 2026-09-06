@@ -348,6 +348,28 @@ class ReviewModelService:
                 proc.kill()
 
     # ── 对话 ─────────────────────────────────────────────────────
+    @staticmethod
+    def _endpoint_url(base_url: str, provider: str) -> str:
+        """端点 URL 归一化（与 translator.normalize_base_url 同语义）。
+
+        fromivan 实证（2026-09-06）：用户在设置里填的 base_url 有两种
+        习惯——带 /v1（https://host/v1）与不带（https://host）。此前
+        chat() 硬拼固定后缀：openai 恒 + /chat/completions（不带 /v1
+        的配置 → 404）；anthropic 恒 + /v1/messages（用户已带 /v1 →
+        /v1/v1/messages 404）。翻译链路（BaseClient）早已按后缀智能
+        补全，审核链路补齐同一规则——两链路行为一致。
+        """
+        url = base_url.strip().rstrip("/")
+        if provider == "anthropic":
+            if url.endswith("/messages"):
+                return url
+            return url + ("/messages" if url.endswith("/v1")
+                          else "/v1/messages")
+        if url.endswith("/chat/completions"):
+            return url
+        return url + ("/chat/completions" if url.endswith("/v1")
+                      else "/v1/chat/completions")
+
     def chat(self, prompt: str, *, max_tokens: int = 1024,
              temperature: float = 0.1, timeout: float = 120.0) -> str:
         """审核模型单轮对话，返回 content 文本（无 reasoning）。
@@ -356,12 +378,13 @@ class ReviewModelService:
         Bearer 形式；Anthropic 原生端点（api.anthropic.com）走
         /v1/messages + x-api-key 头 + anthropic-version（2026-08-21
         云端链路修复：此前在线端点恒用 OpenAI 形式，Anthropic provider
-        兼容性缺失）。
+        兼容性缺失；2026-09-06 修复 base_url 带/不带 /v1 的两种填法，
+        见 _endpoint_url）。
         """
         info = self.ensure_running()
         if self._online_provider == "anthropic":
             resp = httpx.post(
-                info["base_url"].rstrip("/") + "/v1/messages",
+                self._endpoint_url(info["base_url"], "anthropic"),
                 headers={
                     "x-api-key": info["api_key"],
                     "anthropic-version": "2023-06-01",
@@ -380,7 +403,7 @@ class ReviewModelService:
                     return str(block["text"])
             return ""
         resp = httpx.post(
-            info["base_url"] + "/chat/completions",
+            self._endpoint_url(info["base_url"], "openai"),
             headers={"Authorization": f"Bearer {info['api_key']}"},
             json={"model": info.get("model", "local"),
                   "messages": [{"role": "user", "content": prompt}],

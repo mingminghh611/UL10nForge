@@ -500,3 +500,86 @@ def test_export_text_records_review_meta_line(tmp_path):
     # 条目 C 没有「审核：」行
     assert "普通译文C" in text
     assert text.count("审核：") == 2
+
+
+def test_export_records_review_summary_writes_report(tmp_path):
+    """P4（2026-09-06 fromivan 实证「审核的内容没有记录，只在运行记录
+    中临时记录了」）：export_records 传入 review_summary 后——
+    ①生成 review/review-report.md（全量送审明细，含 PASS 条目）；
+    ②summary.md 补 §3.5 语义审核节（审核条数/不合格/阻断/终态分布）；
+    ③记录文件清单包含 review/review-report.md。不传时三者都不出现。"""
+    from hanhua.core.record_writer import export_records
+    from tests.test_scanner import _make_tree
+    from hanhua.core.project import Project
+
+    game_dir = _make_tree()
+    proj = Project.open_game_dir(game_dir, tmp_path / "app")
+    proj.scan()
+    rows = proj.store.get_entries()
+    pending = [r for r in rows if r["status"] == "pending"]
+    proj.store.update_translation(
+        pending[0]["file_id"], pending[0]["key_path"], "审核过的译文")
+    proj.store.update_translation(
+        pending[1]["file_id"], pending[1]["key_path"], "被阻断的译文")
+
+    eid_a = f'{pending[0]["file_id"]}:{pending[0]["key_path"]}'
+    eid_b = f'{pending[1]["file_id"]}:{pending[1]["key_path"]}'
+    review_summary = {
+        "used": True,
+        "reviewed": 2, "sent": 2, "flagged": 1, "blocked": 1,
+        "pairs_added": 1, "pairs_rejected": [],
+        "outcomes": {"APPROVED": 1, "NEEDS_REVISION": 1},
+        "levels": {"PASS": 1, "CRITICAL": 1},
+        # GUI 形态：flagged/results 都以 entry_id 为键，locators 映射
+        # 回 file_id:key_path
+        "results": {
+            "eid-A": type("RR", (), {
+                "entry_id": "eid-A", "level": "PASS",
+                "reason": "译文准确", "issues": [], "reviewed": True,
+                "verdict": "PASS", "issue": "", "suggestion": "",
+                "error": "", "overall_score": 92, "dimensions": {}})(),
+        },
+        "locators": {"eid-A": eid_a},
+        "detail": [
+            {"locator": eid_a, "text_type": "display",
+             "original": "Hello", "translation": "审核过的译文",
+             "final_translation": "审核过的译文", "level": "PASS",
+             "reason": "译文准确", "suggestion": "", "issues": [],
+             "overall_score": 92, "dimensions": {}, "quality_reasons": [],
+             "outcome": "APPROVED", "review_round": 0},
+            {"locator": eid_b, "text_type": "display",
+             "original": "Bye", "translation": "被阻断的译文",
+             "final_translation": "", "level": "CRITICAL",
+             "reason": "语义相反，重译未收敛", "suggestion": "重新翻译",
+             "issues": ["语义相反"], "overall_score": 20,
+             "dimensions": {"准确性": 1}, "quality_reasons": ["语义相反"],
+             "outcome": "BLOCKED", "review_round": 2},
+        ],
+    }
+    out_root = tmp_path / "records"
+    export_records(proj, out_root, review_summary=review_summary)
+    rec_dir = out_root / proj.game_dir.name
+
+    report = (rec_dir / "review" / "review-report.md").read_text(
+        encoding="utf-8")
+    assert "全量送审明细" in report
+    assert "Hello" in report and "审核过的译文" in report
+    assert "译文准确" in report
+    assert "语义相反，重译未收敛" in report
+
+    summary = (rec_dir / "summary.md").read_text(encoding="utf-8")
+    assert "## 3.5 语义审核" in summary
+    assert "审核条数：2" in summary
+    assert "不合格：1" in summary
+    assert "重译未收敛阻断：1" in summary
+    assert "术语沉淀：1" in summary
+    assert "APPROVED: 1" in summary
+    assert "review/review-report.md" in summary
+
+    # 基线：不传 review_summary 时不生成报告、无 §3.5
+    out_root2 = tmp_path / "records2"
+    export_records(proj, out_root2)
+    rec_dir2 = out_root2 / proj.game_dir.name
+    assert not (rec_dir2 / "review" / "review-report.md").exists()
+    summary2 = (rec_dir2 / "summary.md").read_text(encoding="utf-8")
+    assert "## 3.5 语义审核" not in summary2

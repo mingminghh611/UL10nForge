@@ -157,14 +157,38 @@ def test_patch_font_object_replaces():
 
 
 def test_patch_font_object_syncs_metrics():
-    # 目标 TTF 度量（0.86/-0.2）→ m_Ascent/m_Descent/m_LineSpacing 按 16px 换算
+    # 0.40.0：行距等比缩放——m_LineSpacing 对齐原字体声明值（16.0），
+    # 度量间保持替换 TTF 自然比（ascent:descent:line = 0.86:-0.2:0），
+    # 缩放系数 = 16.0 / ((0.86+0.2)*16) = 16/16.96。
     obj = _StubFontObj(list(_make_font_ttf()))
     assert _patch_font_object(None, obj, _make_metric_ttf()) is True
-    assert obj.saved["m_Ascent"] == 13.76
-    assert obj.saved["m_Descent"] == -3.2
-    assert obj.saved["m_LineSpacing"] == 16.96
+    assert obj.saved["m_LineSpacing"] == 16.0
+    # scale = 16.0/16.96；ascent = 0.86*16*scale = 12.98
+    assert obj.saved["m_Ascent"] == 12.98
+    # descent 为负值乘 scale 后四舍五入：-0.2*16*0.9434 → -3.02
+    assert obj.saved["m_Descent"] == -3.02
     # 像素字体渲染模式（2=HintedRaster）→ Smooth(0) 提高矢量 TTF 清晰度
     assert obj.saved["m_FontRenderingMode"] == 0
+
+
+def test_patch_font_object_metrics_scaled_not_natural():
+    """fromivan B21 回归：原紧凑行距（0.93em）遇 CJK 替换字体自然行距
+    （1.437em）不得写自然值——统一放大致 BestFit 组件字号被压小。"""
+    obj = _StubFontObj(list(_make_font_ttf()))
+    obj._tree["m_LineSpacing"] = 14.86   # Kroftsmann 原值（16px 字号）
+    assert _patch_font_object(None, obj, _make_metric_ttf()) is True
+    # 缩放后行距 = 原行距 14.86（而非自然值 16.96）
+    assert obj.saved["m_LineSpacing"] == 14.86
+
+
+def test_patch_font_object_no_orig_linespacing_falls_back():
+    # 原字体异常资产无行距声明 → 退回替换 TTF 自然度量（旧行为）
+    obj = _StubFontObj(list(_make_font_ttf()))
+    del obj._tree["m_LineSpacing"]
+    assert _patch_font_object(None, obj, _make_metric_ttf()) is True
+    assert obj.saved["m_LineSpacing"] == 16.96
+    assert obj.saved["m_Ascent"] == 13.76
+    assert obj.saved["m_Descent"] == -3.2
 
 
 def test_patch_font_object_keeps_smooth_mode():

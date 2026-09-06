@@ -770,12 +770,16 @@ def _write_summary(project, out_dir: Path, profile, *,
                    error_title: str = "",
                    error_detail: str = "",
                    agent_report: dict | None = None,
-                   run_stats=None) -> None:
+                   run_stats=None,
+                   review_summary: dict | None = None) -> None:
     """summary.md：识别/翻译/审校/写回统计 + 运行记录。
 
     run_stats：BatchTranslator 统计对象（requests/input_tokens/
     output_tokens/elapsed/rate_per_minute）——GUI 路径此前缺失运行
     记录，只有 runner 摘要有；现在两条路径同构（2026-08-22 补齐）。
+    review_summary：review_entries 汇总 dict——非 None 时补 §3.5 语义
+    审核节（P4：审核条数/不合格/阻塞/术语沉淀 + 明细文件指引，与
+    runner summary §3.5 同构）。
     """
     store = project.store
     counts = _status_counts(store)
@@ -938,6 +942,33 @@ def _write_summary(project, out_dir: Path, profile, *,
                 f"未注入 {bitmap.get('pending')}")
     else:
         blocks.append("- 未执行")
+    # P4（2026-09-06 fromivan）：§3.5 语义审核节——审核内容随记录落盘，
+    # 与 runner summary §3.5 同构；GUI 侧 flagged 是 list、术语键为
+    # pairs_added，取值时按两种口径兼容。
+    if review_summary:
+        flagged = review_summary.get("flagged") or []
+        try:
+            flagged_n = len(flagged)
+        except TypeError:
+            flagged_n = int(flagged or 0)
+        pairs_n = review_summary.get(
+            "pairs_added", review_summary.get("pairs", 0))
+        blocks += [
+            "", "## 3.5 语义审核",
+            f"- 审核条数：{review_summary.get('reviewed', 0)}"
+            f" · 送审：{review_summary.get('sent', 0)}"
+            f" · 不合格：{flagged_n}"
+            f" · 重译未收敛阻断：{review_summary.get('blocked', 0)}",
+            f"- 术语沉淀：{pairs_n}"
+            f" · 明细：review/review-report.md"
+            f"（原文/译文/AI 判定/理由/终态逐条，含合格条目）；"
+            f"阻断条目全字段见 text/blocked.txt",
+        ]
+        outcomes = review_summary.get("outcomes") or {}
+        if outcomes:
+            outcome_text = " · ".join(
+                f"{k}: {v}" for k, v in sorted(outcomes.items()))
+            blocks.append(f"- 终态分布：{outcome_text}")
     blocks += ["", "## 4 分析（待办）",
                "- [ ] 成功文本质量抽检（译文是否得当/是否无关文本）",
                "- [ ] 失败文本根因系统彻查（同类问题全解）",
@@ -949,6 +980,8 @@ def _write_summary(project, out_dir: Path, profile, *,
                "- text/translated.txt / text/failed.txt / text/skipped.txt / "
                "text/blocked.txt / text/retranslated.txt",
                "- writeback/writeback.txt",
+               "- review/review-report.md（语义审核逐条明细，"
+               "review_summary 在场时生成）",
                "- analysis/analysis-final.md / fix record/fix-record.md / "
                "final report/final-report.md", "",
     ]
@@ -1220,7 +1253,8 @@ def export_records(project, out_root: Path | None = None, *,
                    model_name: str = "",
                    agent_report: dict | None = None,
                    run_stats=None,
-                   review_results: dict | None = None) -> Path | None:
+                   review_results: dict | None = None,
+                   review_summary: dict | None = None) -> Path | None:
     """GUI 手动汉化写回后自动生成完整记录文档。
 
     成功路径传 write_result；失败路径传 error_title/error_detail
@@ -1231,6 +1265,11 @@ def export_records(project, out_root: Path | None = None, *,
     （请求/Token/耗时/吞吐）。
     review_results：语义审核结论 {locator: ReviewResult}——文本记录
     透出审核问题/建议标注（runner 语义审核闭环传入）。
+    review_summary：review_entries 返回的完整汇总 dict——P4（2026-09-06
+    fromivan 实证「审核的内容没有记录，只在运行记录中临时记录了」）：
+    非 None 且有 detail 时 ①summary.md 补 §3.5 语义审核节 ②生成
+    review/review-report.md 逐条明细（原文/译文/AI 判定/理由/终态，
+    PASS 也记录）——与 runner 闭环 review/ 目录同构。
     """
     try:
         profile = project.store.get_profile()
@@ -1254,12 +1293,26 @@ def export_records(project, out_root: Path | None = None, *,
             project, out_dir / "writeback", profile,
             result=write_result,
             error_title=error_title, error_detail=error_detail)
+        # P4：审核逐条明细随记录落盘（复用 write_review_report 单一
+        # 实现——CRITICAL 明细 + 全量送审明细与 runner review/ 完全同
+        # 格式；失败降级不阻断记录导出）。
+        if review_summary and review_summary.get("detail"):
+            try:
+                from hanhua.core.reviewer import write_review_report
+                review_dir = out_dir / "review"
+                review_dir.mkdir(parents=True, exist_ok=True)
+                write_review_report(
+                    review_summary, review_dir / "review-report.md",
+                    game_name=_game_name(project, profile))
+            except Exception:  # noqa: BLE001 报告失败不阻断记录导出
+                pass
         _write_summary(
             project, out_dir, profile, model_name=model_name,
             result=write_result,
             error_title=error_title, error_detail=error_detail,
             agent_report=agent_report,
-            run_stats=run_stats)
+            run_stats=run_stats,
+            review_summary=review_summary)
         if agent_report:
             _write_memory_report(out_dir, agent_report)
         _write_auto_docs(

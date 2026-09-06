@@ -210,6 +210,15 @@ def _translation_dropped_negation(original: str, translation: str) -> bool:
     return not _NEGATION_ZH_RE.search(str(translation or ""))
 
 
+# 提示词元数据回显形态（prompts.py build_batch_user_prompt 的元数据行
+# + 审核条目段字段行）。重译模型偶尔回显 prompt 结构而非纯译文——
+# 多行修复取「首个非空行」会恰好抓到「[来源文件] …」这类行写进游戏
+# （0.39.1 fromivan 证据：multi-line candidate 首行为元数据回显）。
+_METADATA_ECHO_RE = re.compile(
+    r"^\s*(?:\[(?:来源文件|定位键|文本角色|识别置信度|上下文|条目)\]"
+    r"|原文：|译文：|类型：|术语参考：|语境参考：|游戏语境参考：)")
+
+
 def _repair_multiline_candidate(original: str, candidate: str) -> str:
     """单行原文的多行候选 → 取首个非空行（2026-08-14 minato 实证：
     4B/1.8B 反馈重译稳定输出双候选「左滑\n左移」——原文单行时
@@ -218,6 +227,8 @@ def _repair_multiline_candidate(original: str, candidate: str) -> str:
 
     仅做单行原文修复（多行原文截断有信息丢失风险，留给重试/人工）；
     首行非空才修；修复结果与候选不同才返回（否则空串）。
+    首行是提示词元数据回显（「[来源文件] …」/「原文：…」）时拒绝
+    修复——那是模型复述 prompt 结构，不是译文，写回即污染（0.39.1）。
     """
     if not candidate or len(re.split(r"\\n|\r\n|\r|\n", original)) != 1:
         return ""
@@ -227,6 +238,8 @@ def _repair_multiline_candidate(original: str, candidate: str) -> str:
         return ""
     first = next((line for line in lines if line), "")
     if not first or first == candidate.strip():
+        return ""
+    if _METADATA_ECHO_RE.match(first):
         return ""
     return first
 
@@ -267,7 +280,7 @@ def _short_exc(exc: Exception) -> str:
 
 @dataclass
 class ReviewConfig:
-    """审核服务配置（本地 Qwen3.5-4B，无云端路径）。"""
+    """审核行为配置（超时/长度/批大小；模型由 ModelRegistry 管理）。"""
     timeout: float = 120.0
     max_tokens: int = 1024
     batch_size: int = 1        # 4B 单实例并发 1，逐条送审
@@ -378,10 +391,10 @@ def _build_item_prompt(item: ReviewItem) -> str:
     为调用方检索注入的知识库参考（术语表 + 语境证据摘要），空串跳过
     ——旧调用方（不传 hint）行为与旧版完全一致。
 
-    截断 220/120（2026-08-14 提速）：600+600+400 字符 × 20 条 ≈ 万级
-    token 远超 ctx 8192——llama-server 静默截断 prompt 尾部，后半批
-    模型根本没看到 → 输出缺失 → 逐条兜底（每条 10-30s），「半分钟
-    一批」的真凶之一。220 字符足够语义判定（长文本本就按行翻译）。
+    截断口径 _review_text_cap（220 短文本 / 600 长文本，0.39.1）：
+    220 短文本提速口径保留；长文本放宽到 600——220 字符英文信件
+    截断处之后的内容审核模型看不到，是「幻觉增义」误判重灾区
+    （fromivan Dear Ivan 信实证）。预算拆组保证组批不超 ctx。
     """
     return _REVIEW_SYSTEM_PROMPT + _build_item_body(item)
 
@@ -391,9 +404,11 @@ def _estimate_prompt_tokens(item: ReviewItem) -> int:
 
     组批预算拆组用（2026-08-14 提速）：llama-server 对超 ctx 的 prompt
     静默截断尾部——按估算累加拆组，保证任意组必然放得下，后半批不再
-    丢失。截断口径与 _build_item_prompt 一致。
+    丢失。截断口径与 _build_item_body 一致（共用 _review_text_cap，
+    0.39.1：长文本放宽到 600 后估算同口径，预算拆组不失真）。
     """
-    text = ((item.original or "")[:220] + (item.translation or "")[:220]
+    text = (_review_text_cap(item.original)
+            + _review_text_cap(item.translation)
             + (item.term_hint or "")[:120]
             + (item.context_hint or "")[:120]
             + (item.game_context_hint or "")[:300])
@@ -498,12 +513,32 @@ def _parse_batch_result(raw: str,
     return out
 
 
+def _review_text_cap(text: str, cap: int = 220, long_cap: int = 600) -> str:
+    """审核送审字段截断（0.39.1 fromivan 修正）：
+
+    短文本维持 220 cap（2026-08-14 提速口径不变）；长文本（>cap）
+    放宽到 600——中文每字 ≈1 token，同样 220 字符中文 ≈ 语义量 4 倍
+    于英文，长英文信件在 220 处截断后审核模型看不到的原文区间恰好
+    是「幻觉增义」误判重灾区（Dear Ivan 信「across the Soviet
+    Union」段被截 → 模型把译文合理演绎判为无中生有）。
+
+    上限 600 与上游 ReviewItem 构造（str(e.original)[:600]）对齐——
+    上游已带 600，此处放宽不引入新数据需求。调用方（_build_item_body
+    与 _estimate_prompt_tokens）必须共用本函数，保证单条/批量/估算
+    同口径，预算拆组不失真。
+    """
+    text = str(text or "")
+    if len(text) <= cap:
+        return text
+    return text[:long_cap]
+
+
 def _build_item_body(item: ReviewItem, title: bool = False) -> str:
     """条目段（类型/原文/译文 + 术语/语境参考 + Game Context），单条与批量共用。
 
-    截断 220/120（2026-08-14 提速，见 _build_item_prompt）：单条/批量
-    必须同口径——批量此前漏改仍用 600/400，与 _estimate_prompt_tokens
-    的估算（220/120）不一致会让预算拆组失真。title=True 时带
+    截断口径 _review_text_cap（220 短文本 / 600 长文本，0.39.1）：
+    单条/批量/预算估算三者必须同口径——此前批量与估算用 220/120 而
+    单条曾用 600/400，口径不一致会让预算拆组失真。title=True 时带
     「### 条目」标题（批量数组输出需要条目标识；单条路径保持旧格式）。
 
     game_context_hint（设计文档 §16）：审校模型看到与翻译同一份游戏
@@ -513,8 +548,8 @@ def _build_item_body(item: ReviewItem, title: bool = False) -> str:
     head = f"\n### 条目 {item.entry_id}\n" if title else "\n"
     parts = [
         head + f"类型：{item.text_type or '未知'}\n"
-        f"原文：{item.original[:220]}\n"
-        f"译文：{item.translation[:220]}",
+        f"原文：{_review_text_cap(item.original)}\n"
+        f"译文：{_review_text_cap(item.translation)}",
     ]
     if item.game_context_hint:
         parts.append(f"游戏语境参考：{item.game_context_hint[:300]}")
@@ -540,10 +575,13 @@ def _build_batch_prompt(items: list) -> str:
 
 
 class SemanticReviewer:
-    """本地四级审核器：Qwen3.5-4B 逐条判定（无云端路径）。
+    """四级审核器（2026-09-06 云端链路接通）。
 
-    服务生命周期由 ReviewModelService 管理（review_runtime.json
-    跨实例复用）；审核失败返回空结果（调用方保守处理 + 告警）。
+    默认本地 Qwen3.5-4B（服务生命周期由 ReviewModelService 管理，
+    review_runtime.json 跨实例复用）；online_cfg 传入完整云端配置时
+    （base_url/api_key/model 齐全）走在线端点——review_one/review_batch/
+    retranslate_with_feedback/_re_review 全链路同一 service.chat 出口。
+    审核失败返回空结果（调用方保守处理 + 告警）。
     """
 
     def __init__(self, config: ReviewConfig | None = None,
@@ -905,38 +943,11 @@ def _failed_reason(entry: TextEntry) -> str:
 # 机械失败原因 → 重译修正指引（2026-08-15 minato 实证：4B 判 PASS 但
 # 机械门 failed 的条目强制重译时，反馈只有干巴巴的原因列表——模型
 # 不知道具体修什么，重译输出再被同一机械门拒 → BLOCKED 留人工）
-# 2026-08-22 补全：覆盖 quality.py 全部 failure reason——此前缺
-# key_name_mistranslated 等 10 项时落到通用「请按原文语义重译」，
-# 模型不知道具体修什么，重译再被同一门拒（「翻译没问题却被阻断」
-# 的直接根因之一：反馈盲修 → 多轮不收敛 → BLOCKED）
-_QUALITY_FIX_HINTS = (
-    ("newline_mismatch", "保持与原文完全一致的换行行数与结构"),
-    ("line_content_mismatch", "保持与原文一致的行内容分布（不合并不拆行）"),
-    ("placeholder_mismatch", "完整保留原文全部占位符（{0}、%s 等），不得增删"),
-    ("rich_text_mismatch", "完整保留原文全部富文本标签（<b>…</b> 等）"),
-    ("numeric_mismatch", "译文必须包含原文的全部数字且数值不变"),
-    ("untranslated_text", "必须译成中文，不得保留大段原文英文"),
-    ("target_script_mismatch", "只输出简体中文译文，不混入其他文字"),
-    ("explanatory_prefix",
-     "直接输出译文本身，不要任何「译文：」等前缀或解释说明"),
-    ("markdown_wrapper", "不要用 markdown 代码块/列表标记包裹译文"),
-    ("key_name_mistranslated",
-     "物理键名（Shift/Ctrl/RMB/Esc/Space 等）与按键别名必须原样保留英文，"
-     "不得译成中文"),
-    ("glossary_mismatch", "严格遵守术语表词对，按术语表译文用词"),
-    ("consistency_mismatch",
-     "同一原文在同一语境必须给同一译文（与批内其他条目一致）"),
-    ("builtin_ui_mismatch",
-     "引擎/系统内置 UI 文案按该引擎官方中文译法输出"),
-    ("input_token_mismatch",
-     "输入标记/协议 token（如 {input} 等模板占位）必须原样保留"),
-    ("action_word_residue",
-     "动作动词必须译成中文，不得残留原文英文动词"),
-    ("empty_translation", "必须输出非空译文"),
-    ("illegal_control", "不得输出控制字符（除原文已有的换行/制表符）"),
-    ("direction_mismatch",
-     "输入绑定语境的方向词（left/right/up/down 等）必须译出对应方向字"
-     "（左/右/上/下）"),
+# 2026-09-06 P5 迁移：映射表单一来源化到 quality_fix_hints.py（审校页
+# 质量门展示共用同一张表，防止两处文案漂移）；此处保留原名导入兼容。
+from hanhua.core.quality_fix_hints import (
+    QUALITY_FIX_HINTS as _QUALITY_FIX_HINTS,
+    quality_fix_hint as _quality_fix_hint_of,
 )
 
 
@@ -1680,7 +1691,26 @@ def _retranslate_with_feedback(translator, entry: TextEntry,
             except Exception:  # noqa: BLE001 - 重译失败 → BLOCKED 终止循环
                 ok, translation = False, ""
         if not ok or not translation:
+            # P3（2026-09-06 fromivan 实证）：BLOCKED 必须带具体原因——
+            # 此前两个 BLOCKED 出口不传 reason，meta["review_reason"]
+            # 永远缺失，blocked.txt 只剩「BLOCKED（CRITICAL）」无任何
+            # 理由（33 条全部无审核理由），人工无从复核（「莫名卡住」）。
+            # 证据合成：最近一次机械门失败原因（entry.quality_reasons
+            # 由 _apply_quality 落在条目上，是本轮最具体的拒绝证据，
+            # 反馈串里没有——反馈只含首审理由与上轮再审理由）+ 重译
+            # 反馈（首审理由/建议，随轮次更新）。
+            reasons = entry.quality_reasons or (entry.meta or {}).get(
+                "quality_reasons") or ()
+            mech = ""
+            if reasons:
+                mech = ("机械质量门拒绝（"
+                        + "、".join(str(r) for r in reasons)
+                        + "）：" + _quality_fix_hints(reasons))
+            reason = "；".join(
+                p for p in (mech, str(feedback or result.reason or ""))
+                if p)
             apply_outcome(entry, BLOCKED, level=result.level,
+                          reason=reason[:400] or _failed_reason(entry),
                           rejected_candidate=last_translation,
                           rounds=round_no, clear_translation=True)
             return "blocked"
@@ -1724,7 +1754,20 @@ def _retranslate_with_feedback(translator, entry: TextEntry,
             entry.status = STATUS_TRANSLATED
             return "converged"
         feedback = re_result.reason or feedback   # 新一轮反馈
+    # P3：max_rounds 耗尽的 BLOCKED 同样必须带原因——feedback 此时
+    # 持有最近一轮再审理由（1761 行已更新）或首审理由/建议，机械门
+    # 拒绝证据取条目上最后落盘的 quality_reasons。
+    reasons = entry.quality_reasons or (entry.meta or {}).get(
+        "quality_reasons") or ()
+    mech = ""
+    if reasons:
+        mech = ("机械质量门拒绝（"
+                + "、".join(str(r) for r in reasons)
+                + "）：" + _quality_fix_hints(reasons))
+    reason = "；".join(
+        p for p in (mech, str(feedback or result.reason or "")) if p)
     apply_outcome(entry, BLOCKED, level=result.level,
+                  reason=reason[:400] or _failed_reason(entry),
                   rejected_candidate=last_translation,
                   rounds=max_rounds, clear_translation=True)
     return "blocked"
@@ -1772,6 +1815,11 @@ def write_review_report(summary: dict, report_path: str | Path,
     flagged = summary.get("flagged") or []
     originals = summary.get("originals") or {}
     locators = summary.get("locators") or {}
+    # flagged 口径兼容（P4 记录落盘）：review_entries 返回 list[
+    # ReviewResult]（可迭代取 CRITICAL）；持久化/JSON 还原形态可能是
+    # 计数 int——此时跳过 CRITICAL 逐条明细，只走 detail 全量明细节。
+    if isinstance(flagged, int):
+        flagged = []
     criticals = [r for r in flagged if r.level == "CRITICAL"]
     sent = summary.get("sent", 0)
     total = summary.get("reviewed", 0)

@@ -487,6 +487,11 @@ def test_blocked_after_two_rounds(monkeypatch):
     assert tr.calls == 2                    # 上限 2 轮即停
     assert entry.meta["review_blocked"] is True
     assert entry.meta["review_blocked_rounds"] == 2
+    # P3（2026-09-06 fromivan 实证）：BLOCKED 必须带具体原因——
+    # 否则 blocked.txt 只剩「BLOCKED（CRITICAL）」无任何理由，
+    # 人工无从复核（「莫名卡住」）。再审理由随轮次更新进 reason。
+    assert entry.meta.get("review_reason"), "BLOCKED 必须写 review_reason"
+    assert "仍错译" in entry.meta["review_reason"]
 
 
 def test_blocked_when_retranslate_fails(monkeypatch):
@@ -497,6 +502,31 @@ def test_blocked_when_retranslate_fails(monkeypatch):
     assert result == "blocked"
     assert tr.calls == 1
     assert entry.meta["review_blocked"] is True
+    # P3：首条 BLOCKED 出口同样必须带原因（首审理由兜底）
+    assert entry.meta.get("review_reason"), "BLOCKED 必须写 review_reason"
+    assert "错译" in entry.meta["review_reason"]
+
+
+def test_blocked_reason_carries_mechanical_gate_evidence():
+    """P3：机械门拒绝导致 BLOCKED 时，理由必须含机械失败证据。
+
+    fromivan blocked.txt 33 条 0 条审核理由的根因即两个 BLOCKED 出口
+    不传 reason。机械失败条目（quality_reasons 落在条目上）走重译
+    全败 → BLOCKED，理由应含机械原因与修正指引，而非只有语义理由。
+    """
+    tr = _FakeTranslator([(False, "")])
+    entry = _entry()
+    entry.quality_reasons = ("newline_mismatch", "placeholder_mismatch")
+    entry.meta["quality_reasons"] = ["newline_mismatch",
+                                     "placeholder_mismatch"]
+    result = _retranslate_with_feedback(
+        tr, entry, ReviewResult("e0", level="CRITICAL", reason="错译"), None)
+    assert result == "blocked"
+    reason = entry.meta.get("review_reason") or ""
+    assert "newline_mismatch" in reason
+    assert "placeholder_mismatch" in reason
+    assert "换行" in reason          # _QUALITY_FIX_HINTS 的具体修正指引
+    assert "占位符" in reason
 
 
 def test_review_never_reviews_failed_translation():

@@ -510,13 +510,20 @@ def _run_semantic_review(project, entries, out_dir: Path, game_name: str,
                          skip: bool = False,
                          translator=None, app_dir: Path | None = None,
                          model_name: str = "", lang: str = "",
-                         max_send_rate: float = 0.15) \
+                         max_send_rate: float = 0.15,
+                         online_review_cfg=None) \
         -> tuple[dict[str, ReviewResult], dict]:
     """翻译后语义审核（翻译质量升级核心，2026-08-12）。
 
     对全部已翻译条目做语义级审核（术语/语境/专名/语义/风格五维），
     不合格条目标记「需要优化」并写 review 报告；术语词对自动沉淀
     全局术语库（后续游戏翻译按词对约束模型输出）。
+
+    online_review_cfg（2026-09-06 云端链路，fromivan 实证）：API 模式
+    时传入 review kind 的 ApiConfig——review_entries 内部
+    SemanticReviewer(online_cfg=...) 全链路（首审/4B 重译反馈/复审）
+    走同一云端端点；None = 本地 4B（与 GUI 默认一致）。GUI 侧
+    translate_page 在 api.mode == "api" 时同样注入，两入口同链路。
 
     Phase A（2026-08-13 架构审计）：通过 review_entries 统一管线把终态
     原子落回 project.store——MAJOR/CRITICAL/blocked/审核错误不可写回
@@ -535,9 +542,10 @@ def _run_semantic_review(project, entries, out_dir: Path, game_name: str,
                "deferred_due_to_budget": 0}
     if skip:
         return {}, summary
-    reviewer = SemanticReviewer(app_dir=app_dir or PROJECT_ROOT)
+    reviewer = SemanticReviewer(
+        app_dir=app_dir or PROJECT_ROOT, online_cfg=online_review_cfg)
     if not reviewer.usable:
-        print("  [审核] 跳过：本地审核服务不可用（模型缺失或启动失败）")
+        print("  [审核] 跳过：审核服务不可用（本地模型缺失或云端配置不全）")
         return {}, summary
     # 设计文档 §16：Game Context 注入审校——runner 与 GUI 同一份游戏
     # 语境（背景/风格/角色/术语/注意事项）进审校 prompt，语境判定
@@ -552,7 +560,8 @@ def _run_semantic_review(project, entries, out_dir: Path, game_name: str,
         on_note=lambda s: print(f"  [审核] {s}"),
         translator=translator, memory=project.store, store=project.store,
         app_dir=app_dir or PROJECT_ROOT, model_name=model_name, lang=lang,
-        max_send_rate=max_send_rate, profile=_profile)
+        max_send_rate=max_send_rate, profile=_profile,
+        online_review_cfg=online_review_cfg)
     if not core["used"]:
         print("  [审核] 无可审核条目（0 条已翻译）")
         return {}, summary
@@ -903,8 +912,14 @@ def run_game(game_dir: Path, *, batch: int | None = None,
     translator = None
     lang = ""
     if do_translate and not resume:
-        print("[2/4] 翻译（真实本地模型）…")
-        manager = LocalModelManager(PROJECT_ROOT, startup_timeout=180)
+        # 云端模式（2026-09-06 fromivan 实证）：runner 此前无条件走
+        # LocalModelManager——云端 API 用户没有本地模型，ensure_running
+        # 直接崩「本地模型启动失败」。翻译/语境识别/审核全链路按
+        # api.mode 分流：云端跳过本地模型管理器，client 直连 API。
+        print("[2/4] 翻译（真实本地模型）…" if api.mode == "local"
+              else f"[2/4] 翻译（云端 {api.provider} · {api.model}）…")
+        manager = (LocalModelManager(PROJECT_ROOT, startup_timeout=180)
+                   if api.mode == "local" else None)
         # ── 语境识别（任务 #15：runner 与 GUI 同链路）──
         # GUI 的「识别游戏语境」按钮走 _recognize_worker（本地=4B 审核
         # 模型 / 云端=create_client），识别结果经 save_game_context 同步
@@ -965,10 +980,15 @@ def run_game(game_dir: Path, *, batch: int | None = None,
             print(f"  [智能上下文] 按文本统计计算 ctx={_ctx}"
                   f"（条目 {len(_origins)} 条 · 批量 {_bs}）", flush=True)
         try:
-            runtime = manager.ensure_running(api)
-            api = replace(api, base_url=runtime.endpoint,
-                          api_key=runtime.api_key, model=runtime.model)
-            print(f"  服务就绪：{runtime.backend.upper()} · 端口 {runtime.port}")
+            if api.mode == "local":
+                runtime = manager.ensure_running(api)
+                api = replace(api, base_url=runtime.endpoint,
+                              api_key=runtime.api_key,
+                              model=runtime.model)
+                print(f"  服务就绪：{runtime.backend.upper()} · 端口 {runtime.port}")
+            else:
+                runtime = None
+                print(f"  服务就绪：云端 {api.provider} · {api.base_url}")
         except Exception as exc:  # noqa: BLE001
             print(f"[错误] 本地模型启动失败：{exc}")
             _write_summary(project, report, None, None, game_name, out_dir,
@@ -1031,8 +1051,12 @@ def run_game(game_dir: Path, *, batch: int | None = None,
             llama-server 长任务中偶发被静默终止，批量层连续失败 ≥2 批
             时调用本回调——ensure_running 重新探测/启动服务，更新
             client 与 runtime（后续批在新服务上继续，不丢进度）。
+            云端模式无本地进程可管理：直接返回（云端瞬时错误由
+            批量层重试语义处理）。
             """
             nonlocal runtime, client, api
+            if api.mode != "local":
+                return
             try:
                 new_rt = manager.ensure_running(api)
                 api = replace(api, base_url=new_rt.endpoint,
@@ -1214,12 +1238,20 @@ def run_game(game_dir: Path, *, batch: int | None = None,
     # 翻译完成 18634 条后卡在旧 timeout=120 审核超时循环，重跑需 4.5h）。
     if do_review and (do_translate or resume):
         try:
+            # 云端链路（2026-09-06 fromivan 实证）：API 模式时审核全链
+            # 路（首审/4B 反馈重译/复审）走 review kind 的云端配置——
+            # 与 GUI translate_page 同一注入方式，完全同一链路。本地
+            # 模式传 None（4B 审核服务，行为不变）。
+            online_review_cfg = (
+                settings.api_config("review")
+                if api.mode == "api" else None)
             review_results, review_summary = _run_semantic_review(
                 project, entries, out_dir, game_name,
                 glossary=glossary, skip=False,
                 translator=translator, app_dir=PROJECT_ROOT,
                 model_name=api.model, lang=lang,
-                max_send_rate=strategy_rate)
+                max_send_rate=strategy_rate,
+                online_review_cfg=online_review_cfg)
             if review_summary.get("flagged"):
                 print(f"  [审核] 不合格 {review_summary['flagged']} 条"
                       f"（见 review/review-report.md，需人工确认）")
@@ -1281,6 +1313,8 @@ def run_game(game_dir: Path, *, batch: int | None = None,
         audit_res = audit_writeback(
             project.store, project.game_dir, project.out_dir,
             run_model=True, app_dir=PROJECT_ROOT,
+            online_cfg=(settings.api_config("review")
+                        if api.mode == "api" else None),
             font_enabled=bool(getattr(settings.font, "enabled", False)),
             v2_result=writeback_result.get("v2") if writeback_result else None,
             on_note=lambda s: print(f"  {s}"))

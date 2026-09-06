@@ -31,7 +31,8 @@ from hanhua.core.manual_correction import manual_correction
 from hanhua.core import models
 from hanhua.core.models import (TextEntry, entry_from_row,
                                 is_actionable_translation)
-from hanhua.core.reviewer import review_entries
+from hanhua.core.reviewer import review_entries, text_type_for
+from hanhua.core.quality_fix_hints import quality_fix_hint
 from hanhua.core.translator import (create_client, translate_interactive,
                                     merge_translation_references)
 from hanhua.ui.app_state import AppState
@@ -626,14 +627,25 @@ class ReviewPage(QWidget):
         self.detail_context = QLabel("")
         self.detail_context.setObjectName("detailContext")
         self.detail_context.setWordWrap(True)
+        self.detail_context.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.detail_context.setAlignment(Qt.AlignTop)
+        self.detail_context.setMinimumHeight(52)
         lay.addWidget(self.detail_context)
 
         lay.addWidget(self._section_label("质量门"))
-        self.detail_reason = QLabel("")
+        # P5（2026-09-06）：质量门是审核结论的承载区，此前 9pt QLabel
+        # 无最小高度、长理由（多轮审核意见/完整坏译文对照）被整列挤压
+        # 成 1-2 行，用户截图实证信息被截断。改 QPlainTextEdit 只读 +
+        # 160px 最小高：内容多时区域内滚动，不再挤占/被挤占。
+        self.detail_reason = QPlainTextEdit()
         self.detail_reason.setObjectName("detailReason")
-        self.detail_reason.setWordWrap(True)
-        lay.addWidget(self.detail_reason)
-        lay.addStretch(1)
+        self.detail_reason.setReadOnly(True)
+        self.detail_reason.setMinimumHeight(160)
+        self.detail_reason.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.detail_reason.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.detail_reason.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        lay.addWidget(self.detail_reason, 1)
         return panel
 
     @staticmethod
@@ -704,25 +716,55 @@ class ReviewPage(QWidget):
             not self._review_running and bool(candidate)
             and row["status"] in ("translated", "blocked"))
         self.detail_context.setText(self._context_text(meta))
-        self.detail_reason.setText(self._quality_text(row, meta))
+        self.detail_reason.setPlainText(self._quality_text(row, meta))
         self._detail_stack.setCurrentWidget(self.detail_panel)
 
     def _context_text(self, meta: dict) -> str:
-        """§24 Context 区域：文件/类型/场景/前文/后文。"""
+        """§24 Context 区域：来源/位置/类型/角色 + 前文/后文窗口。
+
+        P5（2026-09-06）修复「上下文全是 ——」：旧实现读 scene/
+        ui_position/text_type 三个 meta 键，但提取器从不写入这些键
+        （真实键是 asset_file/obj/kind/role/ctx_before/ctx_after），
+        现场必然落到「—」。改读真实键：对象定位行沿用 record_writer
+        的口径（文件/对象/行号），类型用 text_type_for（与审核模型
+        看到的类型同一来源），角色/处置透出提取端语义。
+        """
         lines = []
-        for label, key in (("场景", "scene"), ("位置", "ui_position"),
-                           ("类型", "text_type")):
-            value = meta.get(key)
-            if value:
-                lines.append(f"{label}：{value}")
-        if meta.get("ctx_before"):
-            lines.append(f"前文：{meta['ctx_before']}")
-        if meta.get("ctx_after"):
-            lines.append(f"后文：{meta['ctx_after']}")
+        # 对象定位：asset_file/obj/line（与文本记录「对象」行同口径）
+        loc = []
+        if meta.get("asset_file"):
+            loc.append(f"文件 {meta['asset_file']}")
+        if meta.get("obj") is not None:
+            loc.append(f"对象 {meta['obj']}")
+        if meta.get("line") is not None:
+            loc.append(f"行 {meta['line']}")
+        if loc:
+            lines.append("位置：" + " · ".join(str(x) for x in loc))
+        # 文本类型：与审核模型 prompt 注入的 text_type 同源
+        lines.append(f"类型：{text_type_for(meta)}")
+        # 角色与处置（提取端语义：display/candidate 等 + translate/skip）
+        role = str(meta.get("role") or "")
+        disposition = str(meta.get("disposition") or "")
+        if role or disposition:
+            piece = "、".join(x for x in (role, disposition) if x)
+            lines.append(f"角色：{piece}")
+        # 相邻文本窗口（提取器 _attach_context_window 写入的 list）
+        before = [str(x) for x in (meta.get("ctx_before") or [])]
+        after = [str(x) for x in (meta.get("ctx_after") or [])]
+        if before:
+            lines.append("前文：" + " / ".join(before))
+        if after:
+            lines.append("后文：" + " / ".join(after))
         return "\n".join(lines) or "—"
 
     def _quality_text(self, row: dict, meta: dict) -> str:
-        """质量门 + 审核判定摘要（来自翻译/审核流程落盘字段）。"""
+        """质量门 + 审核判定摘要（来自翻译/审核流程落盘字段）。
+
+        P5（2026-09-06）可读性升级：机械失败码翻译成中文修正指引
+        （与重译反馈共用 quality_fix_hints 映射）；rejected_candidate
+        不再截断 80 字符——坏译文全文对照是人工复核的依据，长内容由
+        质量门区域自身滚动承载。
+        """
         parts = []
         reasons = meta.get("quality_reasons") or []
         if row["status"] == "failed":
@@ -730,7 +772,8 @@ class ReviewPage(QWidget):
         elif meta.get("quality_passed"):
             parts.append("✓ 已通过质量门")
         if reasons:
-            parts.append("未通过：" + "、".join(str(r) for r in reasons))
+            hints = "；".join(quality_fix_hint(r) for r in reasons)
+            parts.append("✗ 质量门未通过：\n" + hints)
         level = meta.get("review_level")
         if level in _REVIEW_LEVEL_TEXT:
             text = f"AI 审核：{_REVIEW_LEVEL_TEXT[level]}"
@@ -738,12 +781,14 @@ class ReviewPage(QWidget):
                 text += f" · {meta['review_reason']}"
             parts.append(text)
         if meta.get("review_blocked"):
-            parts.append("⚠ 审核阻断：多轮未通过")
+            rounds = meta.get("review_blocked_rounds")
+            suffix = f"（{rounds} 轮）" if rounds else ""
+            parts.append(f"⚠ 审核阻断：多轮未通过{suffix}")
         # #47：BLOCKED 时坏译文在 rejected_candidate（发布译文已清空）——
         # 人工复核需对照原坏译文判断，不展示则无从下手
         candidate = meta.get("rejected_candidate")
         if candidate:
-            parts.append("✗ 原译文：" + str(candidate)[:80])
+            parts.append("✗ 被拒译文（全文对照）：\n" + str(candidate))
         # #43 阶段 G（重构指令 §13）：风险评分/等级透出（有字段才显示）
         score = meta.get("risk_score")
         rlevel = meta.get("risk_level") or ""

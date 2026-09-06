@@ -914,6 +914,7 @@ def _audit_v2_model(v2_result, service, *, cards_per_batch: int = 12,
 def audit_writeback(store, game_dir: Path, out_dir: Path,
                     service=None, *, run_model: bool = True,
                     app_dir: str | Path | None = None,
+                    online_cfg=None,
                     batch_size: int = 12,
                     max_pairs_per_file: int = 400,
                     font_enabled: bool = False,
@@ -927,6 +928,11 @@ def audit_writeback(store, game_dir: Path, out_dir: Path,
     service 为空且 run_model=True 时，若给了 app_dir 则尝试从
     ReviewModelService 按需构建（模型可用才跑模型层；不可用 → 覆盖
     缺口，阻断发布）。第 1 层任何文件 FAIL → needs_rewrite=True。
+
+    online_cfg（2026-09-06 fromivan 云端链路）：云端模式下调用方传入
+    settings.api_config("review")——按需构建的 ReviewModelService 走
+    在线端点，模型层照常执行，不再因本地模型缺失而 model_unavailable
+    阻断发布。本地模式不传（None），行为不变。
 
     v2_result（0.39.0 M3）：write_back_v2 的 WriteResult——非 None 且
     object_evidence 非空时，第 2 层 b 对二进制对象证据卡做模型语义
@@ -948,7 +954,8 @@ def audit_writeback(store, game_dir: Path, out_dir: Path,
         if service is None and app_dir is not None:
             try:
                 from .review_server import ReviewModelService
-                service = ReviewModelService(Path(app_dir).resolve())
+                service = ReviewModelService(Path(app_dir).resolve(),
+                                             online_cfg=online_cfg)
             except Exception as exc:  # noqa: BLE001
                 if on_note:
                     on_note(f"[写回审计] 模型服务构建失败，跳过模型层：{exc}")

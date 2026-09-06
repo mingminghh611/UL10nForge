@@ -622,9 +622,25 @@ QLabel#detailSection {{
     font-weight: 600;
     letter-spacing: 1px;
 }}
-QLabel#detailContext, QLabel#detailReason {{
+QLabel#detailContext {{
     color: {TEXT_SECONDARY};
     font-size: 9pt;
+    background: {RAISED};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_MD}px;
+    padding: 8px 12px;
+}}
+/* P5：质量门改只读 QPlainTextEdit——多行理由/坏译文全文对照在
+   区域内滚动，不再被整列布局挤压截断 */
+QPlainTextEdit#detailReason {{
+    color: {TEXT_SECONDARY};
+    font-size: 9.5pt;
+    background: {RAISED};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_MD}px;
+    padding: 8px 12px;
+    selection-background-color: {ACCENT_BG};
+    selection-color: {PRIMARY_TEXT};
 }}
 QLabel#saveFeedback {{ color: {SUCCESS}; font-size: 9pt; font-weight: 600; }}
 

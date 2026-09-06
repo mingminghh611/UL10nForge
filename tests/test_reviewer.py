@@ -403,7 +403,7 @@ def test_review_batch_grouped_batch_size_one_unchanged():
 # ── 2026-08-14 二次提速：输出精简 + 预算拆组 + max_tokens 收紧 ──
 
 def test_review_prompt_trimmed_fields_and_shorter_cutoffs():
-    """输出要求精简为 level+reason；原文/译文截断降到 220、术语 120。
+    """输出要求精简为 level+reason；短文本截断 220、术语 120。
 
     提速依据：20 条 × (600+600+400 字符) ≈ 万级 token 超 ctx 8192 →
     llama-server 静默截断 prompt 尾部 → 后半批输出缺失 → 逐条兜底
@@ -419,24 +419,47 @@ def test_review_prompt_trimmed_fields_and_shorter_cutoffs():
     assert '"dimensions"' not in _REVIEW_BATCH_OUTPUT
     assert '"issues"' not in _REVIEW_BATCH_OUTPUT
     assert "修正要点" in _REVIEW_SYSTEM_PROMPT
-    # 截断收紧：600+ 字符原文只保留前 220（长文本按行翻译，足够判定）
+    # 短文本截断：原文/译文 >600 才截到 600（0.39.1 放宽，见下个测试）
     item = ReviewItem(entry_id="a1", original="x" * 900,
                       translation="译" * 900, term_hint="术" * 900)
     prompt = _build_item_prompt(item)
-    assert "x" * 220 in prompt
-    assert "x" * 221 not in prompt
+    assert "x" * 600 in prompt
+    assert "x" * 601 not in prompt
     batch = _build_batch_prompt([item])
     assert "术" * 120 in batch
     assert "术" * 121 not in batch
+
+
+def test_review_long_text_cap_raised_to_600():
+    """0.39.1 fromivan 幻觉增义误判修复：长文本截断 220 → 600。
+
+    英文信件原文 ~470 字符、中文译文 ~300 字符——旧 220 截断后审核
+    模型看不到的区间恰好是译文演绎来源（「across the Soviet Union」
+    段），合理译文被误判「幻觉增义」。短文本维持 220 口径不变。
+    """
+    from hanhua.core.reviewer import _build_item_prompt
+    letter_en = ("Dear Ivan, " * 40)[:470]          # 470 字符英文信
+    letter_zh = "亲爱的伊万：" * 40                  # 240 字符中文译文
+    item = ReviewItem(entry_id="l1", original=letter_en,
+                      translation=letter_zh)
+    prompt = _build_item_prompt(item)
+    # 原文 470 字符全部在场（旧 220 截断下后半缺失）
+    assert letter_en in prompt
+    assert letter_zh in prompt
+    # 短文本不受影响：220 内原样
+    short = ReviewItem(entry_id="l2", original="Resume", translation="继续")
+    assert "原文：Resume" in _build_item_prompt(short)
 
 
 def test_review_batch_splits_by_token_budget():
     """组批按估算 token 预算拆组（batch_size 是上限）——超 ctx 的
     prompt 会被 llama-server 静默截断尾部，预算拆组保证放得下。
 
-    估算口径与 prompt 截断一致（译文/术语各 220/120 中文字符）：每条
-    中文长文本 ≈ 380 token，batch_size=20 时 14 条 ≈ 5.3k 超 4500
-    预算 → 拆成 [11, 3] 两组（20 条短文本约 1.3k 仍在预算内不拆）。
+    估算口径与 prompt 截断一致（0.39.1 长文本 600 cap）：每条
+    中文长文本（译文 2000 字 → 截 600 + term_hint 截 120 + 40 格式）
+    ≈ 761 token，batch_size=20 时 14 条 ≈ 10.6k 超 4500 预算 →
+    5×761=3805 放得下、6×761=4566 超预算 → 拆成 [5, 5, 4] 三组
+    （20 条短文本约 1.3k 仍在预算内不拆）。
     """
     from hanhua.core.reviewer import ReviewConfig
     import json
@@ -445,8 +468,9 @@ def test_review_batch_splits_by_token_budget():
         return json.dumps([{"entry_id": str(i), "level": "PASS",
                             "reason": "正确"} for i in ids],
                           ensure_ascii=False)
-    service = _FakeService(outputs=[
-        group_json(range(1, 12)), group_json(range(12, 15))])
+    service = _FakeService(outputs=[group_json(range(1, 6)),
+                                    group_json(range(6, 11)),
+                                    group_json(range(11, 15))])
     reviewer = SemanticReviewer(
         service=service, config=ReviewConfig(batch_size=20))
     items = [ReviewItem(entry_id=str(i), original="text",
@@ -455,13 +479,16 @@ def test_review_batch_splits_by_token_budget():
     results, cancelled = reviewer.review_batch(items)
     assert cancelled == 0
     assert len(results) == 14
-    assert len(service.prompts) == 2                 # [11, 3] 两组
-    # 组一未超预算（4500），组二不含前组条目（不截断不串组；
-    # 「条目 1」是「条目 12」的子串，用完整 id 断言）
+    assert len(service.prompts) == 3                 # [5, 5, 4] 三组
+    # 各组不串组不截断（「条目 1」是「条目 12」的子串，用完整 id 断言）
     assert "### 条目 1\n" in service.prompts[0]
-    assert "### 条目 11\n" in service.prompts[0]
-    assert "### 条目 12\n" in service.prompts[1]
-    assert "### 条目 11\n" not in service.prompts[1]
+    assert "### 条目 5\n" in service.prompts[0]
+    assert "### 条目 5\n" not in service.prompts[1]
+    assert "### 条目 6\n" in service.prompts[1]
+    assert "### 条目 10\n" in service.prompts[1]
+    assert "### 条目 10\n" not in service.prompts[2]
+    assert "### 条目 11\n" in service.prompts[2]
+    assert "### 条目 14\n" in service.prompts[2]
 
 
 def test_review_batch_max_tokens_capped():
@@ -649,6 +676,24 @@ def test_retranslate_repairs_multiline_candidate():
         app_dir=Path("."))
     assert outcome == "converged"
     assert entry.translation == "爱心"
+
+
+def test_repair_multiline_rejects_metadata_echo():
+    """0.39.1 fromivan：多行候选首行是提示词元数据回显时拒绝修复——
+    「[来源文件] …」是模型复述 prompt 结构而非译文，写回即污染。"""
+    from hanhua.core.reviewer import _repair_multiline_candidate
+    # 元数据回显 → 拒绝（返回空串，走重试/人工）
+    assert _repair_multiline_candidate(
+        "Start", "[来源文件] From Ivan_Data/resources.assets\n开始游戏") == ""
+    assert _repair_multiline_candidate(
+        "Start", "原文：Start\n译文：开始") == ""
+    assert _repair_multiline_candidate(
+        "Start", "[定位键] xxx\n开始") == ""
+    # 正常双候选 → 仍修复
+    assert _repair_multiline_candidate("Hearts", "爱心\n红心") == "爱心"
+    # 单行候选 / 多行原文 → 原本就拒绝
+    assert _repair_multiline_candidate("Hearts", "爱心") == ""
+    assert _repair_multiline_candidate("a\nb", "甲\n乙") == ""
 
 
 def test_reason_claims_missing_translation():

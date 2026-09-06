@@ -310,9 +310,13 @@ _FONT_RENDERING_MODE_SMOOTH = 0
 def _patch_font_object(env, font_obj, ttf_bytes: bytes) -> bool:
     """把单个 Font 对象的内嵌 TTF 换成目标 TTF。返回是否替换。
 
-    同时按目标 TTF 的真实度量修正 m_Ascent/m_Descent/m_LineSpacing，
-    并把像素字体渲染模式（HintedRaster）改为 Smooth——原字体指标
-    与替换 TTF 不匹配是「汉化后字体模糊」的直接根因。
+    度量换算（0.40.0 fromivan 修正）：等比缩放替换 TTF 的自然度量，
+    使 m_LineSpacing 对齐原字体声明值——度量间比例保持替换 TTF 的
+    自然比（deadbeat 模糊根因是比例失真，不复现），幅度对齐原字体
+    行距（布局节奏/BestFit 拟合口径不变）。此前直接写替换 TTF 自然值，
+    CJK 字体行距 1.437em 把原紧凑字体（0.93em）放大 1.55 倍 → BestFit
+    组件字号被压到极小（「部分文本非常小」根因）。
+    并把像素字体渲染模式（HintedRaster）改为 Smooth——矢量 TTF 锯齿。
     """
     tree = font_obj.read_typetree()
     font_data = tree.get("m_FontData")
@@ -329,10 +333,19 @@ def _patch_font_object(env, font_obj, ttf_bytes: bytes) -> bool:
     if metrics is not None:
         ascent, descent, line_gap = metrics
         font_size = tree.get("m_FontSize") or 16
-        tree["m_Ascent"] = round(ascent * font_size, 2)
-        tree["m_Descent"] = round(descent * font_size, 2)
-        tree["m_LineSpacing"] = round(
-            (ascent - descent + line_gap) * font_size, 2)
+        natural_line = (ascent - descent + line_gap) * font_size
+        orig_line = tree.get("m_LineSpacing")
+        if (isinstance(orig_line, (int, float)) and orig_line > 0
+                and natural_line > 0):
+            scale = orig_line / natural_line
+            tree["m_Ascent"] = round(ascent * font_size * scale, 2)
+            tree["m_Descent"] = round(descent * font_size * scale, 2)
+            tree["m_LineSpacing"] = round(natural_line * scale, 2)
+        else:
+            # 原字体无行距声明（异常资产）→ 退回替换 TTF 自然度量
+            tree["m_Ascent"] = round(ascent * font_size, 2)
+            tree["m_Descent"] = round(descent * font_size, 2)
+            tree["m_LineSpacing"] = round(natural_line, 2)
         if tree.get("m_FontRenderingMode") == _FONT_RENDERING_MODE_HINTED_RASTER:
             tree["m_FontRenderingMode"] = _FONT_RENDERING_MODE_SMOOTH
     tree["m_FontData"] = list(ttf_bytes)

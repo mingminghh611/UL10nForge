@@ -161,6 +161,11 @@ class TranslatePage(QWidget):
         self._dry_run_running = False
         self._write_terminal_message = ""
         self._last_stats = None
+        # P4（2026-09-06 fromivan）：本轮语义审核的完整汇总 dict（
+        # review_entries 返回值）——写回后导出记录时传入 export_records，
+        # 让 review/review-report.md 与 summary §3.5 随记录落盘（此前
+        # 审核内容只在运行日志临时出现，记录文档不含审核明细）。
+        self._last_review_summary: dict | None = None
         self._stream_last_done = 0
         self._last_review: tuple[int, int] | None = None
         self._last_review_emit = 0.0
@@ -1073,6 +1078,12 @@ class TranslatePage(QWidget):
                             online_review_cfg=(
                                 self.state.settings.api_config("review")
                                 if api.mode == "api" else None))
+                    # P4：无论 used 与否都暂存完整汇总——写回后导出记录时
+                    # 传入 export_records（review/review-report.md +
+                    # summary §3.5 随记录落盘）。used=False 时 detail
+                    # 为空，记录侧自然跳过。
+                    if review_summary is not None:
+                        self._last_review_summary = review_summary
                     if review_summary and review_summary["used"]:
                         flagged = review_summary["flagged"]
                         added = review_summary["pairs_added"]
@@ -1440,13 +1451,26 @@ class TranslatePage(QWidget):
                     getattr(self.state.project, "game_dir", None),
                     "name", "") or ""))
         try:
+            # P4：本轮语义审核汇总暂存传入——review/review-report.md 与
+            # summary §3.5 随记录落盘；locators 把 entry_id 映射回
+            # file_id:key_path，与 translated.txt/blocked.txt 同键。
+            review_results = None
+            review_summary = getattr(self, "_last_review_summary", None)
+            if review_summary:
+                locators = review_summary.get("locators") or {}
+                review_results = {
+                    locators.get(eid, eid): rr
+                    for eid, rr in (review_summary.get("results") or {}).items()
+                }
             return export_records(
                 self.state.project, out_root,
                 write_result=write_result,
                 error_title=error_title, error_detail=error_detail,
                 model_name=model_name,
                 agent_report=agent_report,
-                run_stats=getattr(self, "_last_stats", None))
+                run_stats=getattr(self, "_last_stats", None),
+                review_results=review_results or None,
+                review_summary=review_summary)
         except Exception as exc:  # noqa: BLE001 记录导出不阻断写回主流程
             Toast.show(self, f"记录导出失败：{exc}", "error")
             return None
@@ -1703,6 +1727,8 @@ class TranslatePage(QWidget):
                 audit_res = audit_writeback(
                     project.store, project.game_dir, project.out_dir,
                     run_model=True, app_dir=self.state.resource_dir,
+                    online_cfg=(self.state.settings.api_config("review")
+                                if self.state.api.mode == "api" else None),
                     font_enabled=bool(getattr(font_config, "enabled", False)),
                     v2_result=result.get("v2") if result else None,
                     on_note=lambda s: signals.audit.emit("info", s)
@@ -2156,6 +2182,7 @@ class TranslatePage(QWidget):
         self._write_terminal_message = ""
         self._worker = None
         self._last_stats = None
+        self._last_review_summary = None
         self._stream_last_done = 0
         self._last_review = None
         self.start_btn.setEnabled(self._active_run is None)
