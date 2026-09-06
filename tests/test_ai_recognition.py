@@ -251,6 +251,37 @@ def test_verify_upgradeable_blocks_key_style_and_structural():
     assert not _verify_upgradeable(entry("12345"))
 
 
+def test_verify_upgradeable_blocks_code_heavy_engine_method_word():
+    """B24（fake-it 实证）：code_heavy 对象（≥2 代码信号）里的单 token
+    引擎方法词是 UnityEvent 持久调用绑定/枚举值，模型无权重判——
+    SurveyObject/AnalysisObject/RedactionObject/PublishObject 4 条
+    'Play' 被从 code_heavy_identifier 召回面误升格的回归锚点。
+    真按钮 'Play' 必有 UI 证据，在提取层 has_ui_evidence 路径已放行，
+    到不了召回面——这里的 code_heavy 'Play' 必然是事件绑定。"""
+    def entry(text, *, code_heavy=False):
+        meta = {"kind": "rawstr", "role": "structural",
+                "reason": "code_heavy_identifier"}
+        if code_heavy:
+            meta["obj_is_code_heavy"] = True
+        return TextEntry(file_id="f", key_path="k", original=text,
+                         status=STATUS_SKIPPED, meta=meta)
+
+    # code_heavy + 引擎方法词 → 拒绝（大小写不敏感）
+    assert not _verify_upgradeable(entry("Play", code_heavy=True))
+    assert not _verify_upgradeable(entry("STOP", code_heavy=True))
+    assert not _verify_upgradeable(entry(" SetActive ", code_heavy=True))
+    # 对照组 1：非 code_heavy 对象的 'Play'（提取层无代码信号压制，
+    # 模型有权判显示文本）
+    assert _verify_upgradeable(entry("Play"))
+    # 对照组 2：code_heavy 对象里的真文本（含空格词组）照常可升格
+    # ——code_heavy 召回面本来就有 '[E] Talk Shopkeeper' 这类真交互提示
+    assert _verify_upgradeable(entry("[E] Talk Shopkeeper",
+                                     code_heavy=True))
+    # 对照组 3：code_heavy 对象里的按钮标签词（Close/Cancel 是真按钮
+    # 高频词）不在引擎方法词族，模型有权判
+    assert _verify_upgradeable(entry("Close", code_heavy=True))
+
+
 def test_upgraded_entry_passes_actionable_gate():
     """升格后的条目必须真正进入翻译池（is_actionable_translation）。"""
     entry = TextEntry(

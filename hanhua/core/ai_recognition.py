@@ -73,6 +73,24 @@ _RAWSTR_RECALL_REASONS = frozenset({
     "prefilter_high_frequency",
 })
 
+# B24（fake-it 实证）：code_heavy 对象（≥2 代码信号）里的单 token 引擎
+# 方法词是 UnityEvent 持久调用绑定/序列化枚举值，不是显示文本——
+# SurveyObject/AnalysisObject 等 MonoBehaviour 的 'Play' 与 'SetActive'、
+# 'UnityEngine.Object, UnityEngine' 同块布局（事件绑定标准形态），却被
+# AI 从 code_heavy_identifier 召回面升格。真按钮 'Play' 必有 UI 证据
+# （control_states/interaction_prompt/ui_control_signal），在提取层
+# code_heavy 分支的 has_ui_evidence 路径已放行，不会进召回面——能走到
+# 召回面的 code_heavy 'Play' 必然是事件绑定。确定性闸门，模型无权重判。
+# 词族只收引擎方法名（UnityEvent 目标方法命名域），不收按钮标签词
+# （Close/Cancel/Back/Exit 是真按钮高频词，code_heavy 对象里也可能
+# 是真显示文本，宁可多问模型）。
+_ENGINE_METHOD_WORDS = frozenset({
+    "play", "stop", "pause", "enable", "disable", "show", "hide",
+    "toggle", "fade", "reset", "init", "trigger", "start", "setactive",
+    "destroy", "spawn", "kill", "lock", "unlock", "select", "deselect",
+    "activate", "deactivate", "invoke", "fire", "execute", "run",
+})
+
 # 单次批量分类条数上限：Qwen3.5-4B ctx 8192 预算——识别 prompt 固定
 # 部分 ≈300 token，每条目 ≤120 token（索引+原文截断 120 字符），40 条
 # ≈5k 输出 JSON ≈40×15=600 token，安全余量 >2k。与审校 review_batch_
@@ -385,11 +403,19 @@ def _verify_upgradeable(entry: TextEntry) -> bool:
 
     1. is_key_style_identifier —— 键风格标识符模型无权推翻（写回
        immutable_field_protected 反正会拦，但提前拦省一次翻译）；
-    2. is_actionable_translation 终检（含 _final_structural_backstop 的
+    2. B24 引擎方法词闸门 —— code_heavy 对象（≥2 代码信号）里的
+       单 token 引擎方法名是 UnityEvent 事件绑定/枚举值，模型无权
+       重判（见 _ENGINE_METHOD_WORDS 注释：真按钮文本在提取层
+       has_ui_evidence 路径已放行，到不了这里）；
+    3. is_actionable_translation 终检（含 _final_structural_backstop 的
        URL/路径/GUID/程序集名/引擎串判定）——构造升格后的假想条目
        判定，任何命中都不落库。
     """
-    if is_key_style_identifier(entry.original or ""):
+    original = entry.original or ""
+    if is_key_style_identifier(original):
+        return False
+    if (entry.meta.get("obj_is_code_heavy")
+            and original.strip().casefold() in _ENGINE_METHOD_WORDS):
         return False
     upgraded = TextEntry(
         file_id=entry.file_id, key_path=entry.key_path,
