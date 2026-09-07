@@ -106,6 +106,35 @@ _PROMPT_TEXT_LIMIT = 120
 # 只问最可能漏的——上限内覆盖绝大多数真实显示文本。
 _MAX_CANDIDATES_PER_RUN = 2000
 
+# B25（drova 实证）：同签名分组去重。召回面里同一形态的串会重复
+# 成千上万条——drova 召回面 12757 条中 'Self' 4480 条、程序集类型
+# 引用 'AI.AI_Node, Assembly-CSharp…' 3451 条，逐条送 4B 模型是
+# 319 个批次请求的纯浪费，且这些高频噪声把 'Equipment'(112)/德语
+# 装备词等真文本挤出 _MAX_CANDIDATES_PER_RUN 上限（drova 实测
+# Schwert/Heiltrank 落在 rank 4000+，永远到不了模型面前）。
+# 分组签名：casefold 原文 + script_class + obj_is_code_heavy +
+# obj_has_values + reason——drova 12757 条去重后仅 148 组，模型
+# 判定一次、广播全组（display→全组升格 / structural→全组 muted）。
+# 组数仍是排序后截断（_MAX_CANDIDATES_PER_RUN 不变——按组取头
+# 部，等价于覆盖上限内的全部签名形态）。
+_GROUP_SIG_FIELDS = ("script_class", "obj_is_code_heavy",
+                     "obj_has_values", "reason")
+
+
+def _group_signature(entry: TextEntry) -> tuple:
+    """同签名判定键：原文 casefold + 四个判定语境字段。
+
+    script_class/reason/code_heavy/has_values 都会改变模型语境与
+    预校验结论（B24 闸门看 obj_is_code_heavy），所以进签名——
+    签名不同就不是「同一形态」，必须分开问。
+    """
+    meta = entry.meta
+    return ((entry.original or "").strip().casefold(),
+            str(meta.get("script_class") or ""),
+            bool(meta.get("obj_is_code_heavy")),
+            bool(meta.get("obj_has_values")),
+            str(meta.get("reason") or ""))
+
 # muted 短路：ai_verdict 已判定过的条目不再询问
 _MUTED = "ai_verdict"
 
@@ -153,10 +182,13 @@ def _rank_key(entry: TextEntry) -> tuple:
       文本所在对象通常有其他 display 叶子，已随对象升格；孤条候选漏网
       概率最高；
     - 原文含空格（词组形态）优先——单词/短 token 是键的概率远高于词组。
+    - B25：组员规模大的靠前——同一形态出现上千次（drova 'Self'）几乎
+      必是程序集枚举噪声；小组（1-2 条）更可能是孤例真文本漏网。
     """
     has_values = bool(entry.meta.get("obj_has_values"))
     spaced = " " in (entry.original or "").strip()
-    return (has_values, not spaced, entry.key_path)
+    group_size = int(entry.meta.get("ai_group_size") or 1)
+    return (has_values, not spaced, min(group_size, 8), entry.key_path)
 
 
 def _is_recall_candidate(meta: dict) -> bool:
@@ -177,7 +209,7 @@ def _is_recall_candidate(meta: dict) -> bool:
 
 def collect_candidates(rows: list[dict], *, limit: int = _MAX_CANDIDATES_PER_RUN,
                        ) -> list[TextEntry]:
-    """从 store 行中筛出 AI 可判定的候选条目（排序 + 截断）。
+    """从 store 行中筛出 AI 可判定的候选条目（分组去重 + 排序 + 截断）。
 
     收两类（B22 优先级 2 扩面后）：
     1. typetree 候选层：meta.kind ∈ _CANDIDATE_KINDS ∧ role=candidate
@@ -186,8 +218,14 @@ def collect_candidates(rows: list[dict], *, limit: int = _MAX_CANDIDATES_PER_RUN
        _RAWSTR_RECALL_REASONS ∧ status=skipped（弱形态判定，确定性
        证据不足——AI 二次分类的正当场景）。
     共同约束：未 muted（meta.ai_verdict 缺失）∧ 原文非空。
+
+    B25：同签名分组（见 _group_signature）——返回值是每组一个代表
+    条目，调用方（run_ai_recognition）通过 entry.meta["ai_group_*
+    "] 拿到组员 key_path 列表做 verdict 广播。drova 12757→148 组。
+    limit 语义从「条数」变为「组数」（排序后取头部，覆盖上限内
+    全部签名形态）。
     """
-    picked: list[TextEntry] = []
+    groups: dict[tuple, dict] = {}
     for row in rows:
         if row.get("status") != STATUS_SKIPPED:
             continue
@@ -217,7 +255,18 @@ def collect_candidates(rows: list[dict], *, limit: int = _MAX_CANDIDATES_PER_RUN
         entry = entry_from_row(row)
         if not (entry.original or "").strip():
             continue
-        picked.append(entry)
+        sig = _group_signature(entry)
+        group = groups.get(sig)
+        if group is None:
+            # 代表条目带组员清单（含自己），供 verdict 广播
+            entry.meta["ai_group_members"] = [entry.key_path]
+            entry.meta["ai_group_size"] = 1
+            groups[sig] = {"entry": entry,
+                           "members": entry.meta["ai_group_members"]}
+        else:
+            group["members"].append(entry.key_path)
+            group["entry"].meta["ai_group_size"] = len(group["members"])
+    picked = [g["entry"] for g in groups.values()]
     picked.sort(key=_rank_key)
     return picked[:max(0, int(limit))]
 
@@ -374,6 +423,7 @@ def _upgrade_meta(entry: TextEntry, note: dict) -> dict:
     条目在 v2 尾部循环被拒 "locator_not_found_or_unchanged"——AI 识别
     升格 0.38.0 上线以来全部无法写回的根因（B22）。重复收进候选池由
     status→pending + role→display + _MUTED 三重阻断，无需改 kind。
+    B25：ai_group_members/ai_group_size 是收集期临时字段，不落库。
     """
     base_kind = entry.meta.get("kind") or "typetree"
     if base_kind not in ("typetree", "rawstr"):
@@ -437,33 +487,45 @@ class _PendingWrites:
 
 def _apply_verdicts(items: list[TextEntry], verdicts: dict[int, dict],
                     pending: _PendingWrites) -> None:
-    """把一批 verdict 转成落库缓冲（只缓冲，不直接写——单 commit 批量）。"""
+    """把一批 verdict 转成落库缓冲（只缓冲，不直接写——单 commit 批量）。
+
+    B25：每条代表条目带组员清单（meta.ai_group_members），verdict
+    广播到组内全部成员——同签名（同原文/类名/代码信号/值证据/reason）
+    是同一形态，模型判定一次全组生效。
+    """
     for index, entry in enumerate(items):
         verdict_item = verdicts.get(index)
         if verdict_item is None:
             continue  # 模型漏判：维持原状（宁漏勿坏）
         verdict = verdict_item.get("v")
+        members = list(entry.meta.get("ai_group_members")
+                       or [entry.key_path])
+        member_pairs = [(entry.file_id, kp) for kp in members]
         if verdict == VERDICT_DISPLAY:
             if not _verify_upgradeable(entry):
                 # 键风格/结构终检拦下：记录 muted 防重复询问，状态不动
-                pending.meta_rows.append((entry.file_id, entry.key_path, {
-                    _MUTED: VERDICT_STRUCTURAL,
-                    "ai_precheck": "key_style_or_structural",
-                }))
-                pending.precheck_blocked += 1
+                for file_id, key_path in member_pairs:
+                    pending.meta_rows.append((file_id, key_path, {
+                        _MUTED: VERDICT_STRUCTURAL,
+                        "ai_precheck": "key_style_or_structural",
+                    }))
+                pending.precheck_blocked += len(member_pairs)
                 continue
-            pending.meta_rows.append((
-                entry.file_id, entry.key_path,
-                _upgrade_meta(entry, {"ai_model_verdict": VERDICT_DISPLAY,
-                                      "ai_text_type":
-                                          verdict_item.get("t") or ""})))
-            pending.status_rows.append((entry.file_id, entry.key_path,
-                                        STATUS_PENDING))
-            pending.upgraded += 1
+            for file_id, key_path in member_pairs:
+                pending.meta_rows.append((
+                    file_id, key_path,
+                    _upgrade_meta(entry, {
+                        "ai_model_verdict": VERDICT_DISPLAY,
+                        "ai_text_type": verdict_item.get("t") or "",
+                        "ai_group_size": len(member_pairs)})))
+                pending.status_rows.append((file_id, key_path,
+                                            STATUS_PENDING))
+            pending.upgraded += len(member_pairs)
         else:
-            pending.meta_rows.append((entry.file_id, entry.key_path, {
-                _MUTED: VERDICT_STRUCTURAL}))
-            pending.confirmed += 1
+            for file_id, key_path in member_pairs:
+                pending.meta_rows.append((file_id, key_path, {
+                    _MUTED: VERDICT_STRUCTURAL}))
+            pending.confirmed += len(member_pairs)
 
 
 def run_ai_recognition(store, app_dir, *, on_log=None,
@@ -507,8 +569,9 @@ def run_ai_recognition(store, app_dir, *, on_log=None,
             report.error = str(exc)[:200]
             return report
 
-    log(f"AI 辅助识别：{len(candidates)} 条候选进入二次分类"
-        f"（批量 {_BATCH_SIZE}）")
+    log(f"AI 辅助识别：{len(candidates)} 组候选（覆盖 "
+        f"{sum(int(e.meta.get('ai_group_size') or 1) for e in candidates)}"
+        f" 条）进入二次分类（批量 {_BATCH_SIZE}）")
     for offset in range(0, len(candidates), _BATCH_SIZE):
         batch = candidates[offset:offset + _BATCH_SIZE]
         report.asked += len(batch)

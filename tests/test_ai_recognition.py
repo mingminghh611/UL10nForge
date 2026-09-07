@@ -139,6 +139,113 @@ def test_collect_candidates_respects_limit():
     assert len(collect_candidates(rows, limit=10)) == 10
 
 
+# ── B25：同签名分组去重 ─────────────────────────────────────────────────
+
+def _rawstr_row(key_path, original, *, reason, code_heavy=False,
+                has_values=False, script_class=None):
+    meta = {"kind": "rawstr", "role": "structural", "reason": reason,
+            "obj_is_code_heavy": code_heavy, "obj_has_values": has_values}
+    if script_class:
+        meta["script_class"] = script_class
+    return {"file_id": "f1", "key_path": key_path, "original": original,
+            "status": "skipped", "meta": meta}
+
+
+def test_collect_candidates_groups_identical_signature():
+    """B25（drova 实证）：召回面 12757 条里 'Self'×4480、程序集类型
+    引用×3451——同签名必须合并成组只问一次，否则真文本（Equipment×112/
+    德语装备词）被高频噪声挤出 2000 组上限。"""
+    rows = (
+        [_rawstr_row(f"self{i}", "Self",
+                     reason="prefilter_high_frequency") for i in range(100)]
+        + [_rawstr_row("eq1", "Equipment",
+                       reason="prefilter_high_frequency"),
+           _rawstr_row("eq2", "Equipment",
+                       reason="prefilter_high_frequency")]
+    )
+    picked = collect_candidates(rows)
+    assert len(picked) == 2  # 两组：Self 组 + Equipment 组
+    by_orig = {e.original: e for e in picked}
+    assert by_orig["Self"].meta["ai_group_size"] == 100
+    assert by_orig["Self"].meta["ai_group_members"][0] == "self0"
+    assert len(by_orig["Self"].meta["ai_group_members"]) == 100
+    assert by_orig["Equipment"].meta["ai_group_size"] == 2
+
+
+def test_collect_candidates_signature_includes_context_fields():
+    """签名必须含 script_class/code_heavy/has_values/reason——语境不同
+    不是同一形态（B24 闸门看 obj_is_code_heavy），分开问。"""
+    rows = [
+        _rawstr_row("a", "Play", reason="code_heavy_identifier",
+                    code_heavy=True),
+        _rawstr_row("b", "Play", reason="code_heavy_identifier",
+                    code_heavy=False),
+        _rawstr_row("c", "Play", reason="code_heavy_identifier",
+                    code_heavy=True, script_class="OtherClass"),
+        _rawstr_row("d", "Play", reason="code_heavy_identifier",
+                    code_heavy=True, has_values=True),
+    ]
+    picked = collect_candidates(rows)
+    assert len(picked) == 4
+    assert all(e.meta["ai_group_size"] == 1 for e in picked)
+
+
+def test_apply_verdicts_broadcasts_to_group_members():
+    """verdict 广播：代表条目判 display → 组内全部成员升格；
+    判 structural → 全组 muted；预校验拦下也全组留档。"""
+    def grouped(key_paths, original, *, code_heavy=False):
+        meta = {"kind": "rawstr", "role": "structural",
+                "reason": "code_heavy_identifier",
+                "ai_group_members": list(key_paths),
+                "ai_group_size": len(key_paths)}
+        if code_heavy:
+            meta["obj_is_code_heavy"] = True
+        return TextEntry(file_id="f", key_path=key_paths[0],
+                         original=original, status=STATUS_SKIPPED,
+                         meta=meta)
+
+    items = [
+        grouped(["g1", "g2", "g3"], "Talk to Shopkeeper"),
+        grouped(["g4", "g5"], "MENU_PLAY"),
+        grouped(["g6", "g7"], "AI.AI_Node, Assembly-CSharp, "
+                              "Version=0.0.0.0, Culture=neutral"),
+    ]
+    pending = _PendingWrites()
+    _apply_verdicts(items, {0: {"v": "display"},
+                            1: {"v": "display"},
+                            2: {"v": "structural"}}, pending)
+    # g1-g3 全组升格
+    upgraded_kps = {kp for _, kp, _ in pending.status_rows}
+    assert upgraded_kps == {"g1", "g2", "g3"}
+    assert pending.upgraded == 3
+    # g4-g5 全组被预校验拦下（键风格）
+    assert pending.precheck_blocked == 2
+    assert not any(kp in ("g4", "g5") for _, kp, _ in pending.status_rows)
+    # g6-g7 全组确认跳过
+    assert pending.confirmed == 2
+    muted_kps = {kp for _, kp, m in pending.meta_rows
+                 if m.get("ai_verdict") == "structural"}
+    assert muted_kps == {"g4", "g5", "g6", "g7"}
+
+
+def test_group_broadcast_respects_b24_gate():
+    """B24 闸门在广播路径同样生效：code_heavy 'Play' 组代表被拦 →
+    全组不升格、全组 muted 留档（fake-it 4 条 'Play' 的组化回归锚点）。"""
+    meta = {"kind": "rawstr", "role": "structural",
+            "reason": "code_heavy_identifier",
+            "obj_is_code_heavy": True,
+            "ai_group_members": ["p1", "p2"], "ai_group_size": 2}
+    items = [TextEntry(file_id="f", key_path="p1", original="Play",
+                       status=STATUS_SKIPPED, meta=meta)]
+    pending = _PendingWrites()
+    _apply_verdicts(items, {0: {"v": "display"}}, pending)
+    assert pending.upgraded == 0
+    assert pending.precheck_blocked == 2
+    assert not pending.status_rows
+    assert all(m.get("ai_precheck") == "key_style_or_structural"
+               for _, _, m in pending.meta_rows)
+
+
 # ── B22 优先级 2：rawstr 弱形态召回面 ───────────────────────────────────
 
 def test_collect_candidates_rawstr_recall_reasons_picked():
