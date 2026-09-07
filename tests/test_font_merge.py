@@ -107,3 +107,25 @@ def test_merge_primary_preferred():
 def test_merge_invalid_font_raises():
     with pytest.raises(ValueError):
         merge_fonts(b"not a font", b"not a font", {"A"})
+
+
+def test_merge_glyph_order_synced_after_copy():
+    """A10（0.46.0）：fallback 复制的字形必须并入全局 glyphOrder。
+
+    CFF 主字体经 _ensure_glyf 后全局序只含转换字形；复制新字形只 append
+    进 glyf 表序——cmap/loca 编译按全局序查键，缺了 KeyError
+    （fake-it 内嵌 OTTO 字体 'uni3002' 实证）。TTF 主字体同构验证。
+    """
+    primary = _make_font("AC中", "Primary")
+    fallback = _make_font("BD文", "Fallback")
+    needed = collect_needed_chars(["AB中文"])
+    merged = merge_fonts(primary, fallback, needed)
+    font = TTFont(io.BytesIO(merged))
+    # 从 fallback 复制的字形在全局 glyphOrder 中（编译不炸即证序一致，
+    # 再显式断言字符可达）
+    cmap = font.getBestCmap()
+    for ch in "AB中文":
+        assert ord(ch) in cmap
+        name = cmap[ord(ch)]
+        assert name in font.getGlyphOrder()
+

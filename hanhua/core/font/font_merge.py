@@ -239,6 +239,16 @@ def _merge(primary: TTFont, fallback: TTFont, needed_chars: set[str],
                 is_unicode = True
             if is_unicode:
                 subtable.cmap.update(added_codes)
+    # 字形序同步（A10 0.46.0 实证修复）：CFF 主字体经 _ensure_glyf 后，
+    # font 全局 glyphOrder 只含转换字形；上面从 fallback 复制进 glyf 表的
+    # 新字形只 append 进 glyf 表自身顺序——cmap/loca 编译按全局
+    # glyphOrder 查键，缺了就 KeyError（fake-it sharedassets4 内嵌
+    # OTTO 字体 'uni3002'/'uni5141' 实证）。所有新增字形并入全局序。
+    _go = primary.getGlyphOrder()
+    _table_order = list(getattr(p_glyf, "glyphOrder", None) or [])
+    _new = [n for n in _table_order if n not in set(_go)]
+    if _new:
+        primary.setGlyphOrder(list(_go) + _new)
     # 重命名（防重复字体名冲突）——仅 ASCII 值（中文名表记录是
     # UTF-16，直接改 string 会破坏编码；跳过非 ASCII 防损坏）
     name_table = primary["name"]

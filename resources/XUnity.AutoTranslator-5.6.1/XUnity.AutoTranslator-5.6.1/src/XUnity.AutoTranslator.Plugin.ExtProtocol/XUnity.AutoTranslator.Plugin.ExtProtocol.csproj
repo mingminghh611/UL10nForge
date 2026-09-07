@@ -1,0 +1,26 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Title>XUnity AutoTranslator ExtProtocol</Title>
+    <Description>Package that contains a simple inter-process protocol format used in XUnity.</Description>
+    <Authors>gravydevsupreme</Authors>
+    <PackageTags>unity;xunity</PackageTags>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <DevelopmentDependency>True</DevelopmentDependency>
+    <TargetFramework>net35</TargetFramework>
+    <Version>$(VersionExtProtocol)</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Update="*.ps1" CopyToOutputDirectory="Always" Pack="true" PackagePath="tools" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+     <DocumentationFile>bin\Release\net35\XUnity.AutoTranslator.Plugin.ExtProtocol.xml</DocumentationFile>
+  </PropertyGroup>
+
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+    <Exec Command="if $(ConfigurationName) == Release (&#xD;&#xA;   XCOPY /Y /I &quot;$(TargetDir)$(TargetName)$(TargetExt)&quot; &quot;$(SolutionDir)dist\Translators\FullNET\&quot;&#xD;&#xA;)" />
+  </Target>
+
+</Project>

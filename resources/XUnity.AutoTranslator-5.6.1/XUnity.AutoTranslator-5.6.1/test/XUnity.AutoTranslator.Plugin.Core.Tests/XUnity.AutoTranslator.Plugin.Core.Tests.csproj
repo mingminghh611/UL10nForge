@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net471</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="16.0.1" />
+    <PackageReference Include="xunit" Version="2.4.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.4.1">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Translators\BingTranslateLegitimate\BingTranslateLegitimate.csproj" />
+    <ProjectReference Include="..\..\src\Translators\BingTranslate\BingTranslate.csproj" />
+    <ProjectReference Include="..\..\src\Translators\Common.ExtProtocol.Executor\Common.ExtProtocol.Executor.csproj" />
+    <ProjectReference Include="..\..\src\Translators\DeepLTranslate.ExtProtocol\DeepLTranslate.ExtProtocol.csproj" />
+    <ProjectReference Include="..\..\src\Translators\DeepLTranslate\DeepLTranslate.csproj" />
+    <ProjectReference Include="..\..\src\Translators\GoogleTranslate\GoogleTranslate.csproj" />
+    <ProjectReference Include="..\..\src\XUnity.AutoTranslator.Plugin.Core\XUnity.AutoTranslator.Plugin.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="UnityEngine">
+      <HintPath>..\..\libs\UnityEngine.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>

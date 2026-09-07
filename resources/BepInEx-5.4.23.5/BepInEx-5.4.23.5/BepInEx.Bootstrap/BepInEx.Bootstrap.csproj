@@ -1,0 +1,11 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <Product>BepInEx.Bootstrap</Product>
+        <TargetFramework>net35</TargetFramework>
+        <Version>1.0.0.0</Version>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\BepInEx\BepInEx.csproj" Private="false" IncludeAssets="compile"/>
+    </ItemGroup>
+</Project>

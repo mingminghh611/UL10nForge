@@ -1,0 +1,32 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Target Name="ILRepacker" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <Move SourceFiles="$(OutputPath)\$(AssemblyName).exe" DestinationFiles="$(OutputPath)\$(AssemblyName)1.exe"/>
+
+    <ItemGroup>
+      <InputAssemblies Include="$(OutputPath)\$(AssemblyName)1.exe" />
+      <InputAssemblies Include="$(OutputPath)\Mono.Cecil.dll" />
+    </ItemGroup>
+
+    <ILRepack
+      Parallel="true"
+      Internalize="true"
+      DebugInfo="true"
+      InputAssemblies="@(InputAssemblies)"
+      TargetKind="Exe"
+      OutputFile="$(OutputPath)\$(AssemblyName).exe" />
+
+    <ItemGroup>
+      <FilesToDelete Include="@(InputAssemblies)" />
+      <FilesToDelete Include="$(OutputPath)\Mono.Cecil*.dll" />
+    </ItemGroup>
+    <Delete Files="@(FilesToDelete)" />
+  </Target>
+
+  <Target Name="RemoveMonoCecilFromPublish" AfterTargets="ComputeResolvedFilesToPublishList" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish->WithMetadataValue('NuGetPackageId', 'Mono.Cecil'))"/>
+    </ItemGroup>
+  </Target>
+</Project>

@@ -72,7 +72,9 @@ def restore_non_display_objects(
                 if pid in o:
                     w[pid].set_raw_data(o[pid].get_raw_data())
             af = next(iter(env_w.objects)).assets_file
-            data = af.save(packer="original")
+            # A10 0.46.0：gen 9-21 data_offset 布局保真（与 writer 统一）
+            from hanhua.core.unity.serialized_layout import restore_from_path
+            data = restore_from_path(af, wp)
             with open(wp, "wb") as f:
                 f.write(data)
             restored += len(to_restore)

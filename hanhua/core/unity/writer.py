@@ -1711,7 +1711,11 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
             if type(container).__name__ == "BundleFile":
                 saved.write_bytes(container.save(packer="original"))
             else:
-                saved.write_bytes(container.save())
+                # A10：gen 9-21 SerializedFile 保存后恢复原 data_offset
+                # 布局（UnityPy 重算丢弃原 4096 页对齐——最小变更破坏）
+                from hanhua.core.unity.serialized_layout import (
+                    restore_from_path)
+                saved.write_bytes(restore_from_path(container, path))
             # 工具移植任务 2（UABEA patchcrc 等价）：UnityFS header 校验
             # 字段（hash/crc）检测——UnityPy 写回保留旧值，内容已变；
             # Unity 加载默认不校验，但严格路径（显式 crc 校验/第三方

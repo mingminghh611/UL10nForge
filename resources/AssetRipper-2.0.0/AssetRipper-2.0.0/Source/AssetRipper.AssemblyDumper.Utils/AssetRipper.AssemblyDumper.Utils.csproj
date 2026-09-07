@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputPath>..\0Bins\Other\AssetRipper.AssemblyDumper.Utils\$(Configuration)\</OutputPath>
+		<IntermediateOutputPath>..\0Bins\obj\AssetRipper.AssemblyDumper.Utils\$(Configuration)\</IntermediateOutputPath>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="AssetRipper.Primitives" Version="3.2.0" />
+		<PackageReference Include="System.Text.Json" Version="11.0.0-preview.6.26359.118" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\AssetRipper.Numerics\AssetRipper.Numerics.csproj" />
+	</ItemGroup>
+
+</Project>

@@ -1,0 +1,73 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<Title>XUnity Resource Redirector for Unity</Title>
+		<Description>Main development dependency for XUnity Resource Redirector.</Description>
+		<Authors>gravydevsupreme</Authors>
+		<PackageTags>unity;xunity;resource redirection</PackageTags>
+		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+		<DevelopmentDependency>True</DevelopmentDependency>
+		<TargetFrameworks>net35;net6.0</TargetFrameworks>
+		<LangVersion>latest</LangVersion>
+		<Version>$(VersionRedirector)</Version>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Update="*.ps1" CopyToOutputDirectory="Always" Pack="true" PackagePath="tools" />
+	</ItemGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+		<DocumentationFile>bin\Release\net35\XUnity.ResourceRedirector.xml</DocumentationFile>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(TargetFramework)'=='net35'">
+		<DefineConstants>MANAGED</DefineConstants>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(TargetFramework)'=='net6.0'">
+		<DefineConstants>IL2CPP</DefineConstants>
+	</PropertyGroup>
+
+	<ItemGroup Condition="'$(TargetFramework)'=='net35'">
+		<ProjectReference Include="..\UnityEngine\UnityEngine.csproj" />
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(TargetFramework)'=='net6.0'">
+		<Reference Include="Il2Cppmscorlib">
+			<HintPath>..\..\libs\Proxies\Il2Cppmscorlib.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppInterop.Runtime">
+			<HintPath>..\..\libs\Unhollower\Il2CppInterop.Runtime.dll</HintPath>
+		</Reference>
+		<Reference Include="Il2CppInterop.Common">
+			<HintPath>..\..\libs\Unhollower\Il2CppInterop.Common.dll</HintPath>
+		</Reference>
+
+		<Reference Include="UnityEngine.CoreModule">
+			<HintPath>..\..\libs\Proxies\UnityEngine.CoreModule.dll</HintPath>
+		</Reference>
+		<Reference Include="UnityEngine.AssetBundleModule">
+			<HintPath>..\..\libs\Proxies\UnityEngine.AssetBundleModule.dll</HintPath>
+		</Reference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\XUnity.Common\XUnity.Common.csproj" PrivateAssets="All" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Compile Update="Properties\Resources.Designer.cs">
+			<DesignTime>True</DesignTime>
+			<AutoGen>True</AutoGen>
+			<DependentUpon>Resources.resx</DependentUpon>
+		</Compile>
+	</ItemGroup>
+
+	<ItemGroup>
+		<EmbeddedResource Update="Properties\Resources.resx">
+			<Generator>ResXFileCodeGenerator</Generator>
+			<LastGenOutput>Resources.Designer.cs</LastGenOutput>
+		</EmbeddedResource>
+	</ItemGroup>
+
+</Project>

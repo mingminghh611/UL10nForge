@@ -1,0 +1,31 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <Product>BepInEx.Patcher</Product>
+        <Copyright>Copyright © Bepis 2018</Copyright>
+        <TargetFramework>net35</TargetFramework>
+        <OutputType>Exe</OutputType>
+        <Version>5.0.0.0</Version>
+    </PropertyGroup>
+
+    <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+        <DebugSymbols>true</DebugSymbols>
+        <DebugType>embedded</DebugType>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <StartupObject>BepInEx.Patcher.Program</StartupObject>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\BepInEx.Bootstrap\BepInEx.Bootstrap.csproj" ReferenceOutputAssembly="false"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <EmbeddedResource Include="..\BepInEx.Bootstrap\$(OutputPath)\BepInEx.Bootstrap.dll"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.33" PrivateAssets="all"/>
+        <PackageReference Include="Mono.Cecil" Version="0.10.4"/>
+    </ItemGroup>
+</Project>

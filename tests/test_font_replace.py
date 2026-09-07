@@ -217,6 +217,22 @@ def test_patch_font_object_skips_empty():
     assert _patch_font_object(None, obj, _make_font_ttf()) is False
 
 
+def test_patch_font_object_rejects_font_bloat():
+    """A10（0.46.0）：全量 CJK 字库写入小内嵌字体 = 资产暴涨（fake-it
+    sharedassets 2.6MB→212MB 实证根因）。超出 12 倍增长上限必须拒绝——
+    ValueError 由调用方 except 捕获记入 skipped（宁漏勿坏）。"""
+    import pytest as _pytest
+    from hanhua.core.unity.font_replace import _FONT_DATA_MAX_GROWTH
+    obj = _StubFontObj(list(_make_font_ttf(4096)))   # 原字体 4KB
+    huge = _make_font_ttf(4096 * (_FONT_DATA_MAX_GROWTH + 1))
+    with _pytest.raises(ValueError, match="倍"):
+        _patch_font_object(None, obj, huge)
+    # 边界内（正好 12 倍）仍正常替换
+    ok = _make_font_ttf(4096 * _FONT_DATA_MAX_GROWTH)
+    assert _patch_font_object(None, obj, ok) is True
+    assert bytes(obj.saved["m_FontData"]) == ok
+
+
 # ── TMP 字段复制 ────────────────────────────────────────────
 
 def _payload(layout, fields):

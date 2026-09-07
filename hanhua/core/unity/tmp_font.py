@@ -263,7 +263,9 @@ def retarget_component_refs(
             total += c
     if changed:
         af = next(iter(env.objects)).assets_file
-        raw = af.save(packer="original")
+        # A10 0.46.0：gen 9-21 data_offset 布局保真（与 writer 统一）
+        from hanhua.core.unity.serialized_layout import restore_from_path
+        raw = restore_from_path(af, path)
         with open(path, "wb") as f:
             f.write(raw)
     return total

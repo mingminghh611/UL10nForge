@@ -386,6 +386,56 @@ def _ttf_metrics(data: bytes) -> tuple[float, float, float] | None:
 _FONT_RENDERING_MODE_HINTED_RASTER = 2
 _FONT_RENDERING_MODE_SMOOTH = 0
 
+# A10（0.46.0）：目标 TTF 相对原内嵌字体的最大膨胀倍数。游戏内嵌
+# Font 常是 30-110KB 的拉丁字体，白名单 CJK 全字库 52.6MB——无上限
+# 全量写入是 fake-it 黑屏排查中确认的资产暴涨根因（sharedassets4
+# 2.6MB→212MB）。裁剪字体（subset）通常 1-2MB，允许 12 倍裕量：
+# 覆盖小原字体 + 需求字符集扩展的正常场景，拒绝整字库量级的写入。
+_FONT_DATA_MAX_GROWTH = 12
+
+
+def _font_subset_bytes(font_obj, ttf_bytes: bytes,
+                       required_chars: set[int],
+                       cache: dict[int, bytes]) -> bytes | None:
+    """A10（0.46.0）：按需求集构建 legacy Font 的裁剪替换字体。
+
+    全量 TTF 在 _FONT_DATA_MAX_GROWTH 上限内时直接返回 None（调用方
+    用全量——零行为变化）。超限时用 merge_fonts 以**原内嵌字体为
+    primary、目标 TTF 为 fallback** 构建 subset：原字体字形全保留
+    （拉丁/数字/UI 符号不回退），目标字体只补需求字符中缺失部分，
+    并裁剪到需求集。
+
+    subset 按「原字体内容」缓存（同容器多 Font 对象共享，键 = 原字体
+    字节长度——同长度不同内容的碰撞会导致错误复用，但同容器内嵌字体
+    重复共享是常态，碰撞概率与代价（字符集略偏）可接受）。
+
+    任何失败（fontTools 缺失/解析失败/产物仍超限）→ 返回 None 交调用
+    方走全量路径（_patch_font_object 会再拦一次，最终进 skipped 诚实
+    记录）。绝不抛出——字体是增强项不阻断写回。
+    """
+    try:
+        tree = font_obj.read_typetree()
+        font_data = tree.get("m_FontData")
+        if not isinstance(font_data, list) or len(font_data) < 256:
+            return None
+        current = bytes(font_data)
+        if not _ttf_has_magic(current):
+            return None
+        if len(ttf_bytes) <= len(current) * _FONT_DATA_MAX_GROWTH:
+            return None  # 全量在上限内——不需要 subset
+        key = len(current)
+        if key not in cache:
+            from hanhua.core.font.font_merge import merge_fonts
+            needed = set(chr(c) for c in required_chars)
+            merged = merge_fonts(current, ttf_bytes, needed)
+            # 产物仍超限 → 不用（宁漏勿坏）
+            if len(merged) > len(current) * _FONT_DATA_MAX_GROWTH:
+                return None
+            cache[key] = merged
+        return cache[key]
+    except Exception:  # noqa: BLE001
+        return None
+
 
 def _patch_font_object(env, font_obj, ttf_bytes: bytes) -> bool:
     """把单个 Font 对象的内嵌 TTF 换成目标 TTF。返回是否替换。
@@ -397,6 +447,12 @@ def _patch_font_object(env, font_obj, ttf_bytes: bytes) -> bool:
     CJK 字体行距 1.437em 把原紧凑字体（0.93em）放大 1.55 倍 → BestFit
     组件字号被压到极小（「部分文本非常小」根因）。
     并把像素字体渲染模式（HintedRaster）改为 Smooth——矢量 TTF 锯齿。
+
+    A10（0.46.0）：全量 TTF 无上限写入是资产暴涨根因——白名单字体
+    52.6MB 写进每个 36KB 级的内嵌 Font，fake-it sharedassets4 从
+    2.6MB 涨到 212MB。目标 TTF 超出原内嵌字体 _FONT_DATA_MAX_GROWTH
+    倍时拒绝替换（宁漏勿坏：超大字体不做静态替换，交给 TMP/发布
+    验证兜底，绝不无声撑爆资产文件）。
     """
     tree = font_obj.read_typetree()
     font_data = tree.get("m_FontData")
@@ -406,6 +462,12 @@ def _patch_font_object(env, font_obj, ttf_bytes: bytes) -> bool:
     current = bytes(font_data)
     if not _ttf_has_magic(current):
         return False
+    # A10 尺寸守恒闸门：全量替换目标必须与原内嵌字体同量级
+    if len(ttf_bytes) > len(current) * _FONT_DATA_MAX_GROWTH:
+        raise ValueError(
+            f"目标 TTF {len(ttf_bytes) // 1024}KB 超出原内嵌字体 "
+            f"{len(current) // 1024}KB 的 {_FONT_DATA_MAX_GROWTH} 倍"
+            "——拒绝替换（资产暴涨防线，详见问题集 A10）")
     # 注意：不在此处跳过 current == ttf_bytes —— UnityPy typetree 解析器
     # 对同类型对象可能返回共享缓存，前一个对象已改则后续读到的就是目标字节；
     # 跳过会漏计数（替换本身无害）。save_typetree 幂等。
@@ -450,14 +512,14 @@ def _replace_and_swap(path: Path, env, verify_fn=None) -> None:
         raise ValueError(
             f"预期恰好一个顶层 Unity 容器，实际为 {len(containers)}: {path.name}")
     container = next(iter(containers.values()))
+    from hanhua.core.unity.serialized_layout import restore_from_path
     with tempfile.TemporaryDirectory(
         prefix=f".{path.name}.", dir=path.parent,
     ) as tmp:
         saved = Path(tmp) / path.name
-        if type(container).__name__ == "BundleFile":
-            saved.write_bytes(container.save(packer="original"))
-        else:
-            saved.write_bytes(container.save())
+        # A10：gen 9-21 SerializedFile 保存后恢复原 data_offset 布局
+        # （UnityPy 重算 4096→3904 破坏最小变更；零填充重建已实证恒等）
+        saved.write_bytes(restore_from_path(container, path))
         if verify_fn is not None:
             verify_fn(saved)
         _dispose_environment(env)
@@ -551,11 +613,17 @@ def _verify_object_baseline(verify, baseline: dict, patched_keys: set,
 def _verify_legacy_saved(saved: Path, ttf_bytes: bytes, replaced: int,
                          source_dir: Path | None = None,
                          baseline: dict | None = None,
-                         patched_keys: set | None = None) -> None:
+                         patched_keys: set | None = None,
+                         expected_fonts: set[bytes] | None = None
+                         ) -> None:
     """重开临时容器验证全部 Font 的 m_FontData 均已被替换。
 
     0.45.0：baseline 给定时追加全对象基线比对——除被替换的 Font 对象外，
     容器内任何对象不得增删或字节变化（整容器重建防非预期改动）。
+
+    0.46.0（A10）：subset 路径下不同 Font 对象可能写入不同 TTF 字节
+    （各自原内嵌字体为 primary 的裁剪产物）。ttf_bytes 单一比对改为
+    expected_fonts 集合匹配——全量路径集合只有一个元素，行为等价。
     """
     from UnityPy import Environment
     verify = Environment()
@@ -574,7 +642,13 @@ def _verify_legacy_saved(saved: Path, ttf_bytes: bytes, replaced: int,
             seen.add(key)
             tree = obj.read_typetree()
             fd = tree.get("m_FontData")
-            if isinstance(fd, list) and bytes(fd) == ttf_bytes:
+            if not (isinstance(fd, list) and fd):
+                continue
+            data = bytes(fd)
+            if expected_fonts is not None:
+                if data in expected_fonts:
+                    matched += 1
+            elif data == ttf_bytes:
                 matched += 1
         if matched < replaced:
             raise ValueError(
@@ -593,6 +667,7 @@ def replace_legacy_fonts_in_container(
     progress: int = 0,
     typetree_generator: Any | None = None,
     source_dir: Path | None = None,
+    required_chars: set[int] | None = None,
 ) -> tuple[int, list[str], list]:
     """替换单个 Unity 容器（.assets/level/bundle）内全部 Font 对象的内嵌 TTF。
 
@@ -603,6 +678,12 @@ def replace_legacy_fonts_in_container(
     source_dir：外部引用解析根（写回副本路径时传原游戏目录——副本临时
     替换文件同目录无兄弟文件，Mono 游戏 m_Script PPtr deref 需在原目录
     解析 external；与 writer._verify_saved_bundle 同语义）。
+
+    required_chars（A10 0.46.0）：本次翻译真实需求码点集。提供时对每个
+    Font 对象先试全量 TTF；全量超出 _FONT_DATA_MAX_GROWTH 倍上限时按
+    「原内嵌字体优先 + 目标 TTF 补缺 + 裁剪到需求集」构建 subset 再试
+    ——原字体字形保留（拉丁/数字/UI 符号不回退），目标字体只补 CJK。
+    subset 仍超限或构建失败 → 跳过并记录（宁漏勿坏），绝不无声撑爆。
     """
     from hanhua.core.font import FontConsumer
     from hanhua.core.font.ttf_charset import ttf_charset
@@ -611,6 +692,8 @@ def replace_legacy_fonts_in_container(
     skipped: list[str] = []
     consumers: list[FontConsumer] = []
     ttf_chars: frozenset[int] = ttf_charset(ttf_bytes)
+    subset_cache: dict[int, bytes] = {}   # 原字体长度 → subset 字节
+    used_fonts: set[bytes] = set()        # 实际写入的字体字节集合
     try:
         env.load([str(path)])
         # 打补丁前采集全对象字节基线（0.45.0 写回安全闸门）
@@ -625,14 +708,24 @@ def replace_legacy_fonts_in_container(
                 continue
             seen.add(key)
             try:
-                if _patch_font_object(env, obj, ttf_bytes):
+                used = None
+                if required_chars is not None:
+                    used = _font_subset_bytes(
+                        obj, ttf_bytes, required_chars, subset_cache)
+                effective = used or ttf_bytes
+                if _patch_font_object(env, obj, effective):
                     replaced += 1
+                    used_fonts.add(effective)
                     patched_keys.add(_object_key(obj))
                     consumers.append(FontConsumer(
                         f"{path.name}#Font#{obj.path_id}", "legacy_font",
-                        static_replaced=True, font_scalars=ttf_chars,
+                        static_replaced=True,
+                        font_scalars=frozenset(required_chars)
+                        if used is not None else ttf_chars,
                         atlas_resolved=True,
-                        ref="内嵌 TTF 已替换 · 字符集按 cmap 解析"))
+                        ref="内嵌 TTF 已替换（"
+                        + ("按需求集裁剪" if used is not None
+                           else "字符集按 cmap 解析") + "）"))
                     continue
             except Exception as exc:  # noqa: BLE001
                 skipped.append(f"{path.name}#Font#{obj.path_id}: {exc}")
@@ -646,7 +739,8 @@ def replace_legacy_fonts_in_container(
             path, env,
             verify_fn=lambda saved: _verify_legacy_saved(
                 saved, ttf_bytes, replaced, source_dir=source_dir,
-                baseline=baseline, patched_keys=patched_keys),
+                baseline=baseline, patched_keys=patched_keys,
+                expected_fonts=used_fonts or None),
         )
     finally:
         _dispose_environment(env)
@@ -1156,7 +1250,8 @@ def install_static_fonts(out_dir, config, *, unity_version=None,
             try:
                 parts = replace_legacy_fonts_in_container(
                     asset, ttf_bytes, typetree_generator=typetree_generator,
-                    source_dir=source_dir)
+                    source_dir=source_dir,
+                    required_chars=required_scalars)
             except Exception as exc:  # noqa: BLE001
                 result.warnings.append(f"{asset.name}: {exc}")
                 continue

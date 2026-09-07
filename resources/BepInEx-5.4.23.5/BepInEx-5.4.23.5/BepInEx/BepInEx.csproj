@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Product>BepInEx</Product>
+    <Description>Unity plugin injection framework</Description>
+    <Copyright>Copyright © Bepis 2018</Copyright>
+    <TargetFramework>net35</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <CopyDocumentationFilesFromPackages>true</CopyDocumentationFilesFromPackages>
+    <VersionPrefix>$(BepInExVersionPrefix)</VersionPrefix>
+    <VersionSuffix>$(BepInExVersionSuffix)</VersionSuffix>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- https://github.com/dotnet/msbuild/issues/1916 -->
+    <ProjectReference Include="..\submodules\BepInEx.Harmony\BepInEx.Harmony\BepInEx.Harmony.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <OutputItemType>Content</OutputItemType>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Targets>Build;DocumentationProjectOutputGroup</Targets>
+    </ProjectReference>
+    <ProjectReference Include="..\submodules\BepInEx.Harmony\HarmonyX2Interop\HarmonyX2Interop.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <OutputItemType>Content</OutputItemType>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Targets>Build</Targets>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="HarmonyX" Version="2.9.0"/>
+    <PackageReference Include="Mono.Cecil" Version="0.10.4"/>
+    <PackageReference Include="MonoMod.RuntimeDetour" Version="22.1.29.1"/>
+    <PackageReference Include="MonoMod.Utils" Version="22.1.29.1"/>
+    <PackageReference Include="UnityEngine" Version="5.6.1" IncludeAssets="compile"/>
+  </ItemGroup>
+
+  <Target Name="DeletePdbFromPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <FilesToDelete Include="$(PublishDir)*.pdb"/>
+    </ItemGroup>
+    <Delete Files="@(FilesToDelete)"/>
+  </Target>
+</Project>

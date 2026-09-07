@@ -1,0 +1,117 @@
+﻿using AssetRipper.Assets.Generics;
+using AssetRipper.SourceGenerated.Extensions.Enums.Shader.GpuProgramType;
+using AssetRipper.SourceGenerated.Subclasses.SerializedPlayerSubProgram;
+using AssetRipper.SourceGenerated.Subclasses.SerializedProgram;
+using AssetRipper.SourceGenerated.Subclasses.SerializedSubProgram;
+
+namespace AssetRipper.SourceGenerated.Extensions;
+
+public static class SerializedProgramExtensions
+{
+	public static int GetTierCount(this ISerializedProgram program)
+	{
+		int tierCount = 1;
+		if (program.Has_PlayerSubPrograms())
+		{
+			// where is tier in PlayerSubProgram?
+		}
+		else if (program.SubPrograms.Count > 0)
+		{
+			int tier = program.SubPrograms[0].ShaderHardwareTier;
+			for (int i = 1; i < program.SubPrograms.Count; i++)
+			{
+				if (program.SubPrograms[i].ShaderHardwareTier <= tier)
+				{
+					break;
+				}
+
+				tierCount++;
+			}
+		}
+
+		return tierCount;
+	}
+
+	public static int GetSubProgramCount(this ISerializedProgram program)
+	{
+		return program.Has_PlayerSubPrograms() ? program.PlayerSubPrograms.Count : program.SubPrograms.Count;
+	}
+
+	public static IReadOnlyList<ISerializedPlayerSubProgram> GetPlayerSubPrograms(this ISerializedProgram program)
+	{
+		if (program.Has_PlayerSubPrograms())
+		{
+			for (int i = 0; i < program.PlayerSubPrograms.Count; i++)
+			{
+				if (program.PlayerSubPrograms[i].Count > 0)
+				{
+					return program.PlayerSubPrograms[i];
+				}
+			}
+		}
+		return [];
+	}
+
+	public static IReadOnlyList<uint> GetParameterBlobIndices(this ISerializedProgram program)
+	{
+		if (program.Has_ParameterBlobIndices())
+		{
+			for (int i = 0; i < program.ParameterBlobIndices.Count; i++)
+			{
+				if (program.ParameterBlobIndices[i].Count > 0)
+				{
+					return program.ParameterBlobIndices[i];
+				}
+			}
+		}
+		return [];
+	}
+
+	public static IEnumerable<(ISerializedPlayerSubProgram SubProgram, uint ParameterBlobIndex)> GetPlayerSubProgramsWithParameterBlobIndices(this ISerializedProgram program)
+	{
+		if (!program.Has_PlayerSubPrograms())
+		{
+			yield break;
+		}
+
+		if (program.ParameterBlobIndices.Count != program.PlayerSubPrograms.Count)
+		{
+			yield break;
+		}
+
+		for (int i = 0; i < program.PlayerSubPrograms.Count; i++)
+		{
+			AssetList<SerializedPlayerSubProgram> serializedPlayerSubPrograms = program.PlayerSubPrograms[i];
+			AssetList<uint> playerBlobIndices = program.ParameterBlobIndices[i];
+			if (serializedPlayerSubPrograms.Count != playerBlobIndices.Count)
+			{
+				continue;
+			}
+
+			for (int j = 0; j < serializedPlayerSubPrograms.Count; j++)
+			{
+				yield return (serializedPlayerSubPrograms[j], playerBlobIndices[j]);
+			}
+		}
+	}
+
+	public static int MaxShaderModelVersion(this ISerializedProgram program, UnityVersion version)
+	{
+		int maxVersion = 0;
+		if (program.Has_PlayerSubPrograms())
+		{
+			foreach (ISerializedPlayerSubProgram subProgram in program.GetPlayerSubPrograms())
+			{
+				maxVersion = int.Max(maxVersion, subProgram.GetProgramType(version).ToShaderModelVersion());
+			}
+		}
+		else
+		{
+			foreach (ISerializedSubProgram subProgram in program.SubPrograms)
+			{
+				maxVersion = int.Max(maxVersion, subProgram.GetProgramType(version).ToShaderModelVersion());
+			}
+		}
+		return maxVersion;
+	}
+}
