@@ -758,6 +758,11 @@ _LOCALE_CODE = re.compile(r"^[a-z]{2}$")   # en/ru/zh/ja… 语言代码
 # 单词式写法（TitleCase / ALL-CAPS，可含单连字符）：CREDITOS、Settings、V-SYNC
 # 是显示文本（任意语言的 UI 标签），不是键——键采用 snake/camel/下划线等编程命名。
 _WORD_CASE = re.compile(r"^[A-Z]+(?:-[A-Z]+)*$|^[A-Z][a-z]+(?:-[A-Z][a-z]+)*$")
+# B26（dead-catch 实证）：单个单词 + 句尾点号 = 自然语言短句（对话行
+# 'Listen.'/'Alright.'/'Good.'/'listen.'）。_IDENTIFIER 把句尾点当标识符
+# 字符导致整词被误判键风格；键名/标识符不会以句号结尾。多段点名
+# （Assets.Scripts.Foo）中间带点不匹配此形态，仍按键处理。
+_SENTENCE_WORD = re.compile(r"^[A-Za-z][a-z]{1,15}\.$")
 
 # 显示单词白名单：标识符形态但确实是游戏显示文本（UI 标签/短对话）。
 # 仅这些无空格单词允许翻译；其余标识符一律视为键名跳过。
@@ -845,6 +850,11 @@ def is_key_style_identifier(text: str) -> bool:
     # （'Leaving...'/'Connecting...'/'Username...'）——'...' 不是标识符
     # 点号，是省略号形态（_IDENTIFIER 把点当标识符字符导致误匹配）
     if s.endswith("..."):
+        return False
+    # B26（dead-catch 实证）：单词 + 句尾点号（'Listen.'/'Alright.'/'Good.'）
+    # 是自然语言短句——对话行 dialogueLines[N].text 的常见形态。键名
+    # 不会以句号结尾，多段限定名（Assets.Scripts.Foo）不匹配此形态。
+    if _SENTENCE_WORD.match(s):
         return False
     if not _IDENTIFIER.match(s):
         return False

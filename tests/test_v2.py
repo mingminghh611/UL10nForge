@@ -195,6 +195,18 @@ def test_downgrade_gate_hard_structural_always_downgrades():
     assert not _should_downgrade_pending(entry)
 
 
+def test_downgrade_gate_keeps_sentence_word_dialogue():
+    """B26（dead-catch 实证）：对话行 'Listen.'/'Alright.'/'Good.' 进 pending
+    后被 key_style 软猜测降级 skipped——句尾点号被 _IDENTIFIER 当标识符字符。
+    修复后句子词形态不再是键风格，UI 字段证据不被推翻。"""
+    assert not _should_downgrade_pending(_pending_entry("Listen."))
+    assert not _should_downgrade_pending(_pending_entry("Alright."))
+    assert not _should_downgrade_pending(_pending_entry("Good."))
+    # 对照：真键名（带分隔符/多段点分）在显示字段仍降级
+    assert _should_downgrade_pending(_pending_entry("ui_newGame"))
+    assert _should_downgrade_pending(_pending_entry("MainMenu.SubTitle"))
+
+
 def test_typetree_m_name_is_never_a_display_text():
     # doubleshake 实证：m_Name 是 Unity 对象标识名（Inspector 标题/Find 键），
     # 即使对象有值证据也绝不能升格 display——否则写回被

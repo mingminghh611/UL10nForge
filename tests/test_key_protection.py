@@ -66,6 +66,28 @@ def test_key_style_not_plain_text():
     assert not is_key_style_identifier("[LMB] Next")
 
 
+def test_sentence_word_with_period_not_key_style():
+    """B26（dead-catch 实证）：单词 + 句尾点号是自然语言短句（对话行
+    'Listen.'/'Alright.'/'Good.'），不是键名——_IDENTIFIER 把句尾点当
+    标识符字符导致误杀，进入 pending 后被 _should_downgrade_pending
+    二次降级 skipped。键名不会以句号结尾。"""
+    assert not is_key_style_identifier("Listen.")
+    assert not is_key_style_identifier("Alright.")
+    assert not is_key_style_identifier("Good.")
+    assert not is_key_style_identifier("Okay.")
+    assert not is_key_style_identifier("Sure.")
+    assert not is_key_style_identifier("listen.")   # 小写同理
+    assert not should_skip("Listen.")
+    assert not should_skip("Alright.")
+    # 对照 1：多段限定名（中间带点）不匹配句子形态，仍是键
+    assert is_key_style_identifier("Assets.Scripts.Foo")
+    assert is_key_style_identifier("MainMenu.SubTitle")
+    # 对照 2：两字母缩写点（'e.g.'/'i.e.'）不是句子词形态（中间也带点），
+    # 仍按键处理
+    assert is_key_style_identifier("e.g.")
+    assert is_key_style_identifier("i.e.")
+
+
 def test_should_skip_uses_key_style():
     assert should_skip("ui_newGame")
     assert should_skip("MENU_PLAY")
