@@ -389,6 +389,32 @@ def test_verify_upgradeable_blocks_code_heavy_engine_method_word():
     assert _verify_upgradeable(entry("Close", code_heavy=True))
 
 
+def test_verify_upgradeable_blocks_control_state_word():
+    """B28（drova 实证）：Unity 视觉状态词（Normal/Highlighted/Pressed/
+    Selected/Disabled）是控件动画状态名，确定性结构——提取层 2054 行硬
+    拦截只作用于本次判定链，存量库弱形态 reason（identifier_without_
+    display_evidence/prefilter_high_frequency）条目绕过它进召回面，
+    'Normal'/'Highlighted'×15 被模型判 display 升格。无论语境多像 UI
+    （TMP_InputField 类名在场），状态名翻不得。"""
+    def entry(text, script_class=""):
+        meta = {"kind": "rawstr", "role": "structural",
+                "reason": "prefilter_high_frequency"}
+        if script_class:
+            meta["script_class"] = script_class
+        return TextEntry(file_id="f", key_path="k", original=text,
+                         status=STATUS_SKIPPED, meta=meta)
+
+    for word in ("Normal", "Highlighted", "Pressed", "Selected",
+                 "Disabled"):
+        # 即使带 UI 组件类名（最强放行语境）也拦
+        assert not _verify_upgradeable(
+            entry(word, script_class="TMPro.TMP_InputField"))
+        assert not _verify_upgradeable(entry(word))
+    # 对照：同语境下真 UI 文本照常可升格（B27 修复的目标场景）
+    assert _verify_upgradeable(
+        entry("Complete Bow", script_class="TMPro.TextMeshProUGUI"))
+
+
 def test_upgraded_entry_passes_actionable_gate():
     """升格后的条目必须真正进入翻译池（is_actionable_translation）。"""
     entry = TextEntry(

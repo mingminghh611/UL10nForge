@@ -229,3 +229,36 @@ def test_f44_no_ui_evidence_word_case_stays_skipped():
     by = {e.original: e for e in entries}
     assert by["Jugar"].status == "skipped"
     assert by["Jugar"].meta["reason"] == "code_heavy_identifier"
+
+
+# ── B27（drova 实证 2026-09-07）──
+# _prefilter_entry 样本此前不带 script_class——prefilter_high_frequency
+# 恰是 AI 识别召回面（_RAWSTR_RECALL_REASONS），_item_context 给模型的
+# 语境零类名 → TMPro.TextMeshProUGUI 对象里的真 UI 文本 'Complete Bow'
+# 被模型判 structural 假阴。主链 1744 行已写 script_class，样本分支补齐。
+
+def test_b27_prefilter_samples_carry_script_class():
+    """prefilter 留档样本必须带 script_class（AI 召回面语境）。"""
+    raw = _scriptable_object_raw("Complete Bow", "_input", "_choices 0")
+    freq = {"Complete Bow": 15, "_input": 40}
+    entries = _raw_string_entries("f1", 1945, raw, freq, "level16",
+                                  script_class="TMPro.TextMeshProUGUI")
+    pf = [e for e in entries
+          if e.meta.get("reason", "").startswith("prefilter_")]
+    assert pf, "必须有 prefilter 留档样本"
+    for e in pf:
+        assert e.meta.get("script_class") == "TMPro.TextMeshProUGUI", \
+            f"B27: prefilter 样本 {e.original!r} 缺 script_class"
+
+
+def test_b27_prefilter_samples_no_empty_placeholder():
+    """script_class 为空（解析失败）时不写空串占位字段。"""
+    raw = _scriptable_object_raw("Complete Bow", "_input", "_choices 0")
+    freq = {"Complete Bow": 15, "_input": 40}
+    entries = _raw_string_entries("f1", 1945, raw, freq, "level16")
+    pf = [e for e in entries
+          if e.meta.get("reason", "").startswith("prefilter_")]
+    assert pf
+    for e in pf:
+        assert not e.meta.get("script_class"), \
+            f"{e.original!r} 不应带空 script_class"

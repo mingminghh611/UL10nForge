@@ -73,6 +73,16 @@ _RAWSTR_RECALL_REASONS = frozenset({
     "prefilter_high_frequency",
 })
 
+# B28（drova 实证）：Unity 视觉状态词是确定性结构，AI 无权重判——
+# 提取层 2054 行有同款硬拦截（unity_control_state），但 AI 召回面走
+# 弱形态 reason（identifier_without_display_evidence/prefilter_high_
+# frequency）的存量条目绕过了它，'Normal'/'Highlighted'×15 被模型判
+# display 升格 pending。控件状态名翻译写回 = 按钮动画状态切换断裂
+# （与提取层 _UNITY_CONTROL_STATE_NAMES 同一知识源）。
+_VERDICT_CONTROL_STATE_WORDS = frozenset({
+    "normal", "highlighted", "pressed", "selected", "disabled",
+})
+
 # B24（fake-it 实证）：code_heavy 对象（≥2 代码信号）里的单 token 引擎
 # 方法词是 UnityEvent 持久调用绑定/序列化枚举值，不是显示文本——
 # SurveyObject/AnalysisObject 等 MonoBehaviour 的 'Play' 与 'SetActive'、
@@ -463,6 +473,11 @@ def _verify_upgradeable(entry: TextEntry) -> bool:
     """
     original = entry.original or ""
     if is_key_style_identifier(original):
+        return False
+    # B28：控件状态词确定性拦截（与提取层 _UNITY_CONTROL_STATE_NAMES
+    # 同源）——无论模型语境多像 UI，状态名翻不得
+    if (entry.original or "").strip().casefold() \
+            in _VERDICT_CONTROL_STATE_WORDS:
         return False
     if (entry.meta.get("obj_is_code_heavy")
             and original.strip().casefold() in _ENGINE_METHOD_WORDS):

@@ -1324,13 +1324,20 @@ def _skipped_sample_entry(file_id: str, key_path: str, text: str, *,
 
 def _prefilter_entry(file_id: str, obj_path_id: int, idx: int, offset: int,
                      text: str, prefilter: str, count: int,
-                     asset_file_name: str = "") -> TextEntry:
+                     asset_file_name: str = "",
+                     script_class: str = "") -> TextEntry:
     """预过滤留档条目（审计 R5）：被引擎串/键标识符/高频串过滤的字符串
     不再静默丢弃，产生限量样本（status=skipped，role=structural）供审计。
 
     count = 该对象内同 prefilter 原因的累计跳过数；提取函数末尾统一
     回写为最终计数（_finalize_skipped_counts），报告按单元取 max 聚合
     即真实总数（样本数不等于总数）。
+
+    B27（drova 实证 2026-09-07）：样本必须带 script_class——prefilter_
+    high_frequency 恰是 AI 识别召回面（_RAWSTR_RECALL_REASONS），此前
+    样本不带类名 → _item_context 零类名语境，TMPro.TextMeshProUGUI
+    对象里的真 UI 文本 'Complete Bow' 被模型判 structural 假阴。主链
+    （非 prefilter 条目）在 1744 行已写 script_class，样本分支在此补齐。
     """
     prefix = (f"asset#{asset_file_name}#{obj_path_id}"
               if asset_file_name else f"asset#{obj_path_id}")
@@ -1342,6 +1349,8 @@ def _prefilter_entry(file_id: str, obj_path_id: int, idx: int, offset: int,
         "prefilter": prefilter,
         "skipped_count": count,
     }
+    if script_class:
+        meta["script_class"] = script_class
     if asset_file_name:
         meta["asset_file"] = asset_file_name
     return TextEntry(file_id=file_id, key_path=f"{prefix}/str/{idx}",
@@ -1723,7 +1732,7 @@ def _raw_string_entries(file_id: str, obj_path_id: int, raw: bytes,
             if count <= _PREFILTER_SAMPLE_LIMIT:
                 entries.append(_prefilter_entry(
                     file_id, obj_path_id, idx, offset, s,
-                    prefilter, count, asset_file_name))
+                    prefilter, count, asset_file_name, script_class))
             continue
         # 非键风格显示文本每次出现都 pending。原“首键末值”规则（首次=键、
         # 末次=值）只对 I2/Localization 字典（has_marker）有意义——其键是
