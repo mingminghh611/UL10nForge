@@ -352,11 +352,12 @@ def test_write_all_v1_skips_v2_files(monkeypatch):
     real_render = text_writer._render
 
     def reject_v2_render(src, file_record, entries, target_lang,
-                         normalize_fallback_punctuation=False):
+                         normalize_fallback_punctuation=False,
+                         skipped=None):
         if file_record["format"].startswith("v2_"):
             raise AssertionError("v2 resource reached the v1 renderer")
         return real_render(src, file_record, entries, target_lang,
-                           normalize_fallback_punctuation)
+                           normalize_fallback_punctuation, skipped)
 
     v2_result = WriteResult(files=1, entries=1)
 
@@ -379,6 +380,9 @@ def test_write_all_v1_skips_v2_files(monkeypatch):
         "written": 1,
         "rejected": [],
         "truncated": 0,
+        # P3（0.42.1）：文本路径逐条记账与 v2 writer_outcome 并列呈现
+        "text_attempted": 0,
+        "text_written": 0,
     }
     assert (proj.out_dir / "a" / "assets.bundle").read_bytes() == (
         b"synthetic binary resource"

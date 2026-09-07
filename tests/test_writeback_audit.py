@@ -464,3 +464,147 @@ def test_json_structure_broken_noise_suppressed():
         # STRUCTURE_BROKEN 被丢弃（确定性已确认结构完整），VALUE_INVERTED 保留
         assert "STRUCTURE_BROKEN" not in verdicts
         assert "VALUE_INVERTED" in verdicts
+
+
+# ── P4（0.42.1）：模型复核覆盖缺口统一策略 ────────────────────────
+
+def test_build_model_items_returns_truncation_count():
+    """P4c：超 max_pairs 抽样截断必须显式返回截断数，不再静默吞掉。"""
+    from hanhua.core.writeback_audit import _build_model_items
+    src_lines = "\n".join(f"line {i} EN" for i in range(100))
+    out_lines = "\n".join(f"line {i} 中文" for i in range(100))
+    items, truncated = _build_model_items(src_lines, out_lines, max_pairs=20)
+    assert len(items) <= 20
+    assert truncated == 100 - len(items) > 0
+    # 未超限 → 截断数为 0，行为不变
+    items2, truncated2 = _build_model_items("a\nb", "甲\n乙", max_pairs=400)
+    assert len(items2) == 2
+    assert truncated2 == 0
+
+
+def test_audit_model_missing_index_counted_not_default_pass():
+    """P4a：模型 JSON 漏掉 index → 计数 model_verdict_missing，
+    不再默认 PASS（未审就是未审）。max_tokens=512 截断输出漏尾是真实
+    形态——旧版 `verdicts.get(i, ("PASS", ""))` 把缺口吞成全 PASS。"""
+    import json as _json
+    import tempfile
+    from hanhua.core.writeback_audit import audit_model
+
+    class _FakeStore:
+        def __init__(self, files):
+            self._files = files
+        def get_files(self):
+            return self._files
+        def get_entries(self):
+            return []
+
+    class _FakeSvc:
+        """只回 index 0 的判定（模拟输出被 max_tokens 截断漏掉 1/2）。"""
+        def chat(self, prompt, max_tokens=512, timeout=120):
+            return _json.dumps(
+                [{"index": 0, "verdict": "PASS", "issue": ""}])
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "src"
+        out = Path(td) / "out"
+        src.mkdir()
+        out.mkdir()
+        (src / "a.txt").write_text("Hello\nWorld\n", encoding="utf-8")
+        (out / "a.txt").write_text("你好\n世界\n", encoding="utf-8")
+        store = _FakeStore([{"id": "f1", "rel_path": "a.txt",
+                             "format": "txt"}])
+        res = audit_model(store, src, out, {}, _FakeSvc(), batch_size=16)
+        # 2 行差异送审，模型只判了 0 → 1 条漏判被计数
+        assert res.model_verdict_missing == 1
+        # 漏判不产生 flag（未审 ≠ 有问题），也不硬阻断（软复核层，
+        # 硬阻断通道仍是 model_unavailable）
+        assert res.model_flags == []
+        assert res.model_unavailable is False
+
+
+def test_audit_model_truncation_counted():
+    """P4c：单文件行差异超 max_pairs → 截断数进 model_pairs_truncated。"""
+    import tempfile
+    from hanhua.core.writeback_audit import audit_model
+
+    class _FakeStore:
+        def __init__(self, files):
+            self._files = files
+        def get_files(self):
+            return self._files
+        def get_entries(self):
+            return []
+
+    class _FakeSvc:
+        def chat(self, prompt, max_tokens=512, timeout=120):
+            return "[]"                      # 空 JSON：全部漏判（另一形态）
+
+    with tempfile.TemporaryDirectory() as td:
+        src = Path(td) / "src"
+        out = Path(td) / "out"
+        src.mkdir()
+        out.mkdir()
+        n = 60
+        (src / "a.txt").write_text(
+            "\n".join(f"line {i} EN" for i in range(n)), encoding="utf-8")
+        (out / "a.txt").write_text(
+            "\n".join(f"line {i} 中文" for i in range(n)), encoding="utf-8")
+        store = _FakeStore([{"id": "f1", "rel_path": "a.txt",
+                             "format": "txt"}])
+        res = audit_model(store, src, out, {}, _FakeSvc(),
+                          batch_size=16, max_pairs_per_file=20)
+        assert res.model_pairs_truncated == 60 - 20
+        # 送审的 20 行全部漏判（空 JSON）→ 20 条计数
+        assert res.model_verdict_missing == 20
+
+
+def test_render_report_surfaces_coverage_gaps():
+    """P4a/P4b/P4c：覆盖缺口必须进报告——漏判计数 / 行截断 / 证据卡
+    超半数未送审 WARN。缺口静默 = 假装全 PASS，违反「未审就是未审」。"""
+    from hanhua.core.writeback_audit import AuditResult, render_audit_report
+
+    res = AuditResult()
+    res.model_verdict_missing = 3
+    res.model_pairs_truncated = 120
+    res.v2_cards_audited = 10
+    res.v2_cards_sampled = 40                # 80% 未送审 → 超半数 WARN
+    report = render_audit_report(res, "测试游戏")
+    assert "漏判 3 条" in report
+    assert "120 行差异超单文件上限" in report
+    assert "送审 10 张" in report
+    assert "截断 40 张未送审" in report
+    assert "未送审（超半数）" in report
+    # 少量截断（≤50%）→ 不触发超半数 WARN，但截断数仍呈现
+    res2 = AuditResult()
+    res2.v2_cards_audited = 80
+    res2.v2_cards_sampled = 20
+    report2 = render_audit_report(res2, "测试游戏")
+    assert "截断 20 张未送审" in report2
+    assert "超半数" not in report2
+
+
+def test_audit_v2_model_missing_index_counted():
+    """P4a（v2 侧）：证据卡批模型 JSON 漏 index → 计数不默认 PASS。"""
+    import json as _json
+    from hanhua.core.writeback_audit import _audit_v2_model
+
+    class _V2Result:
+        def __init__(self, cards):
+            self.object_evidence = cards
+
+    def _card(path_id):
+        return {"rel_path": "aa/x.bundle", "path_id": path_id,
+                "type": "T",
+                "changes": [("m_text", "Hello", "你好")]}
+
+    class _Svc:
+        def chat(self, prompt, *, max_tokens=512, timeout=120):
+            # 只判 index 0（漏 1）
+            return _json.dumps([{"index": 0, "verdict": "PASS", "issue": ""}])
+
+    res = _audit_v2_model(
+        _V2Result([_card(1), _card(2)]), _Svc(),
+        cards_per_batch=12, max_cards=400)
+    assert res.model_verdict_missing == 1
+    assert res.model_flags == []
+    assert res.model_unavailable is False

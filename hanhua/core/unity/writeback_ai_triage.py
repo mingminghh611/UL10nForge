@@ -414,11 +414,17 @@ def run_writeback_triage(candidates: list[dict], store=None, *,
                 for index, (entry, meta, pattern) in enumerate(batch):
                     verdict = verdicts.get(index)
                     if verdict in _VERDICTS:
-                        # 同组去重成员共用同一判定（证据完全一致）
+                        # 同组去重成员共用同一判定（证据完全一致）。
+                        # P5b（0.42.1 审计）：只有确定性结论（allow/reject）
+                        # 可入缓存——review 是「模型不确定」的保守跳过，
+                        # 缓存它会把一次保守判定永久化（后续轮次即使模型
+                        # 在场也不再重判，条目永远跳过）；reject 是明确的
+                        # 「不该写」结论，复用安全。
+                        cacheable = verdict in ("allow", "reject")
                         members = groups.get(_dedup_key(entry, meta, pattern),
                                              [(entry, meta, pattern)])
                         for member, _m, _p in members:
-                            _apply(member, verdict, "", True)
+                            _apply(member, verdict, "", cacheable)
                     else:
                         # 单条缺失/非法 → review（不缓存，下次再问）
                         _apply(entry, "review", ":invalid_output", False)

@@ -254,15 +254,52 @@ class TestRepeatConsistency:
         # 翻译条目被改回原文（保留原文防混排）
         assert items[0][0]["translation"] == "Splash"
 
-    def test_inconsistent_translations_revert_whole_group(self):
+    def test_inconsistent_translations_majority_unified(self):
+        """P5c（0.42.1 审计放宽）：译文不一致 → 多数派统一（不再全组回退）。
+
+        旧策略全组回退原文——同对象同原文多处出现因 1 处模型波动全部
+        不翻（doog Splash ×6 场景 6 处全弃）。新策略：出现次数最多的
+        译文写满全组，混排消除且覆盖率保留。
+        """
         from hanhua.core.unity.logic_audit import audit_repeat_consistency
         items = [
             self._entry("Splash", "画面", 100),
-            self._entry("Splash", "水花", 140),   # 模型波动：不同译文
+            self._entry("Splash", "画面", 120),
+            self._entry("Splash", "水花", 140),   # 模型波动：少数派
         ]
         records = audit_repeat_consistency(items)
-        assert records and records[0]["action"] == "all_reverted"
-        assert "译文不一致" in records[0]["reason"]
+        assert records and records[0]["action"] == "majority_unified"
+        assert records[0]["majority"] == "画面"
+        # 全组统一为多数派译文（含少数派被改写）
+        assert all(e["translation"] == "画面" for e, _ in items)
+
+    def test_inconsistent_translations_tie_takes_first(self):
+        """P5c：多数派并列 → 取首现译文（dict 保序 + max 稳定取先遍历者）。"""
+        from hanhua.core.unity.logic_audit import audit_repeat_consistency
+        items = [
+            self._entry("Splash", "画面", 100),
+            self._entry("Splash", "水花", 140),   # 并列 1:1 → 首现「画面」胜出
+        ]
+        records = audit_repeat_consistency(items)
+        assert records and records[0]["action"] == "majority_unified"
+        assert records[0]["majority"] == "画面"
+        assert all(e["translation"] == "画面" for e, _ in items)
+
+    def test_majority_unify_notifies_on_revert_per_changed_entry(self):
+        """P5c：多数派统一中被改写的条目逐条通知 on_revert（已是多数派
+        译文、未被改写的条目不通知）。"""
+        from hanhua.core.unity.logic_audit import audit_repeat_consistency
+        items = [
+            self._entry("Splash", "画面", 100),
+            self._entry("Splash", "画面", 120),   # 多数派 ×2 → 不改写
+            self._entry("Splash", "水花", 140),   # 少数派 → 被改写
+        ]
+        notified: list[tuple[str, str]] = []
+        audit_repeat_consistency(
+            items, on_revert=lambda e, r: notified.append((e["original"], r)))
+        assert len(notified) == 1
+        assert "majority_unify" in notified[0][1]
+        assert all(e["translation"] == "画面" for e, _ in items)
 
     def test_consistent_group_untouched(self):
         from hanhua.core.unity.logic_audit import audit_repeat_consistency

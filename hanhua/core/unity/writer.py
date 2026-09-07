@@ -320,10 +320,14 @@ def _fit_bytes(translation: str, capacity: int, encoding: str,
                         + TRUNCATION_ELLIPSIS).encode("utf-16-le"))
                > capacity):
             chars -= 1
-        # 截断点本身不得落在代理对中间（字符串内嵌孤立代理，如
-        # surrogatepass 解码产物）：高代理后多退一格
+        # 截断点本身不得落在代理对中间：str 内嵌孤立代理（surrogatepass
+        # 解码产物）1 码点编码即 2 字节，切在代理对中间会产生新的孤立
+        # 代理，CLR #US 解码器容忍度不确定——高代理后多退一格。
+        # P6b（0.42.1 审计）：旧写法单字符链式比较只匹配替换字符本身，
+        # 代理区判定从未生效——死代码；正确条件是截断点前一字符落在
+        # 代理区 U+D800-U+DFFF（高代理算半个代理对，退一格到低代理前）
         while (chars > 0
-               and "\ud800" <= translation[chars - 1:chars] <= "\udbff"):
+               and "\uD800" <= translation[chars - 1:chars] <= "\uDFFF"):
             chars -= 1
         data = (translation[:chars] + TRUNCATION_ELLIPSIS).encode("utf-16-le")[:capacity]
         if pad:
@@ -1528,8 +1532,12 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                     if expansion:
                         result.raw_expansions.append(expansion)
                 # 互斥一致性：同对象同原文多处出现（doog 实证 Splash ×6）——
-                # 任一位置是结构跳过（键身份）或各处译文不一致（模型波动），
-                # 全组保留原文，防「译文+原文」混排断链（代码按字典查原文）。
+                # 任一位置是结构跳过（键身份）→ 全组保留原文，防「译文+
+                # 原文」混排断链（代码按字典查原文）；各处译文不一致
+                # （模型波动）→ P5c（0.42.1）多数派统一（多数译文写满
+                # 全组，不再整组回退——同词 6 处因 1 处波动全部不翻的
+                # 宁漏勿坏过度）。被统一改写的条目走 on_revert 记账进
+                # 排除表（与旧回退同语义）。
                 consistency = audit_repeat_consistency(
                     raw_items,
                     # 一致性回退是主动决策：进逻辑回退记账（resolved +
@@ -1815,6 +1823,15 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
                 status=e["status"],
                 meta={**json.loads(e.get("meta") or "{}"), "kind": fmt}))
         changed = False
+        # P1a（0.42.1 假记账根治）：apply 层「实际应用条目集」——旧实现
+        # 只要任一格式组改了 body 就对全部 structured_items note_written，
+        # 而 apply_json/apply_csv 会静默跳过 key_style/行号失效条目（这些
+        # 条目从未落盘）→「审计通过但游戏里是英文」的确定性路径，且污染
+        # written_translations 发布闸门。改为：每格式组跑 apply 拿到
+        # skipped 集（按 key_path），只有真实落盘的条目记 written，其余
+        # 逐条记 rejected（带可定位原因）。
+        applied_keys: set[str] = set()
+        skipped_keys: dict[str, str] = {}
         for fmt, group in by_fmt.items():
             if fmt == "yaml":
                 # 行数守恒预检（Rendezvous 实证 2026-08-17）：旧库 yaml
@@ -1827,21 +1844,49 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
                     for e, _ in group:
                         result.note_rejected(e, "yaml_line_loss_guard")
                     continue
+            group_skipped: set[str] = set()
             try:
-                body = apply_format_text(fmt, group, text, {"kind": "textasset"})
+                body = apply_format_text(fmt, group, text,
+                                         {"kind": "textasset"},
+                                         skipped=group_skipped)
             except XmlRewriteUnsafeError:
                 # F7：XML 含 CDATA/DOCTYPE，重序列化会丢失结构——
                 # 整文件拒绝写回（零损坏），条目全部警示。
                 for e, _ in structured_items:
                     result.note_rejected(e, "xml_cdata_doctype_unsafe")
                 return script
+            for kp in group_skipped:
+                # 原因分类（审计可定位）：key_style = 键名/键字段保护跳过
+                # （安全跳过，原文保留）；其余 = 目标值/行号不匹配（旧库
+                # meta 过期），统一 apply_target_mismatch——修复入口在
+                # 重提取而非放宽校验
+                from hanhua.core.placeholders import is_key_style_identifier
+                skipped_keys[kp] = (
+                    "apply_silent_skip_key_style"
+                    if any(is_key_style_identifier(te.original)
+                           and te.key_path == kp for te in group)
+                    else "apply_target_mismatch")
+            group_keys = {te.key_path for te in group}
+            applied_keys |= (group_keys - group_skipped)
             if body != text:
                 changed = True
                 text = body
         if not changed:
+            # 整文件无变化（译文与原文同值/全部被静默跳过）——所有结构化
+            # 条目显式记账：落盘集为空，全部按 skipped 原因拒绝（不再笼统
+            # note_written 谎报成功）
+            for e, meta in structured_items:
+                kp = meta.get("inner_path") or e["key_path"]
+                result.note_rejected(
+                    e, skipped_keys.get(kp, "apply_not_written"))
             return script
-        for e, _ in structured_items:
-            result.note_written(e)
+        for e, meta in structured_items:
+            kp = meta.get("inner_path") or e["key_path"]
+            if kp in applied_keys:
+                result.note_written(e)
+            else:
+                result.note_rejected(
+                    e, skipped_keys.get(kp, "apply_not_written"))
         # 写回 C9：行级/结构化混合场景——同一对象既有结构化条目又有
         # 行级条目（老库条目与结构化条目聚合）。结构化重建后行号会
         # 移位（序列化格式变化），行级条目按「原文行内容」在重建文本
@@ -1856,7 +1901,7 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
             original_lines = script.decode(
                 "utf-8-sig", errors="replace").splitlines(keepends=True)
             target_lines = text.splitlines(keepends=True)
-            by_line: dict[int, dict] = {}
+            by_line: dict[int, tuple[dict, dict]] = {}
             for entry, meta in line_items:
                 # 审计 #6：重复行号后写覆盖前写，被覆盖条目静默丢失——
                 # 重复一律拒绝（与 _patch_metadata/_patch_dll 同构）
@@ -1866,8 +1911,8 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
                 if lineno in by_line:
                     result.note_rejected(entry, "textasset_duplicate_line")
                     continue
-                by_line[lineno] = entry
-            for lineno, entry in sorted(by_line.items()):
+                by_line[lineno] = (entry, meta)
+            for lineno, (entry, item_meta) in sorted(by_line.items()):
                 if not (0 <= lineno < len(original_lines)):
                     result.note_rejected(
                         entry, "textasset_line_out_of_range")
@@ -1892,7 +1937,7 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
                     continue
                 eol = target_lines[matched][
                     len(target_lines[matched].rstrip("\r\n")):]
-                if meta.get("msg_script") and "|" in orig_content:
+                if item_meta.get("msg_script") and "|" in orig_content:
                     # 消息脚本行：命令列原样保留，只替换 '|' 后的对话内容
                     cmd_part = orig_content.split("|", 1)[0]
                     t = entry["translation"]
@@ -1909,7 +1954,12 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
         if bom:
             data = b"\xef\xbb\xbf" + data
         return data
-    by_line: dict[int, dict] = {}
+    # P1b（0.42.1 假数据根治）：by_line 必须存 (entry, meta) 二元组——
+    # 旧实现只存 entry，第二循环引用的 meta 是第一循环最后一次迭代的
+    # 残留值（Python 循环变量不按作用域隔离）：真 msg_script 行丢命令列
+    # 保护（'RECEIVED_MSG|对话' 整行被译文覆盖 → 脚本解析坏），或普通行
+    # 被残留 msg_script 标记误走命令列剥取分支（译文 '|' 前段被吞）。
+    by_line: dict[int, tuple[dict, dict]] = {}
     for e, meta in _select_write_items(items, result, "textasset"):
         lineno = meta.get("line")
         if not isinstance(lineno, int):
@@ -1918,15 +1968,19 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
         if lineno in by_line:
             result.note_rejected(e, "textasset_duplicate_line")
             continue
-        by_line[lineno] = e
+        by_line[lineno] = (e, meta)
     if not by_line:
         return script
     new_lines = []
     for i, line in enumerate(text.splitlines(keepends=True)):
         content = line.rstrip("\r\n")
         eol = line[len(content):]
-        e = by_line.get(i)
-        if e is None or not e["translation"]:
+        hit = by_line.get(i)
+        if hit is None:
+            new_lines.append(line)
+            continue
+        e, item_meta = hit
+        if not e["translation"]:
             new_lines.append(line)
             continue
         # 消息脚本行（fromivan 实证 2026-09-01）：'RECEIVED_MSG|Hey, kiddo!'
@@ -1935,7 +1989,8 @@ def _patch_textasset(script: bytes, items: list[tuple[dict, dict]],
         # 只替换 '|' 后的对话内容（命令列+分隔符原样保留），无论模型
         # 怎么回显命令都不会破坏脚本解析。译文自身可能带 '|'（'HELLO|
         # 世界'）——只取 '|' 前部分，防命令列被译后写回时保留原命令。
-        if meta.get("msg_script"):
+        # P1b：判定用本条目自己的 meta（item_meta），不用循环外残留变量。
+        if item_meta.get("msg_script"):
             if "|" in content:
                 cmd_part, _sep, _rhs = content.partition("|")
                 t = e["translation"]
@@ -2008,16 +2063,24 @@ def _patch_dll(path: Path, entries: list[dict], result: WriteResult,
         # 按索引取参位置无关），恢复与容量合并处理：从正文尾部腾空间保
         # 占位符（Minato 24 条实证：旧路径补丁被二次截断削掉仍 reject）。
         # 物理放不下（占位符超容量）才拒绝，不写坏译文。
+        # P6a（0.42.1 记账可读性）：拒绝原因中的 {n} 字面量改为实际缺失的
+        # 占位符清单（审计报告此前显示「译文缺失 {n} 占位符」无法定位是
+        # 哪个占位符丢了；机械恢复失败 = 截断物理放不下，缺失集可从
+        # 恢复前译文精确计算）
+        _fitted_text = payload.decode("utf-16-le", errors="replace")
+        _missing = [p for p in _FORMAT_PLACEHOLDER.findall(e["original"])
+                    if p not in _fitted_text]
         restored = _restore_placeholders_capped(
-            e["original"], payload.decode("utf-16-le", errors="replace"),
-            capacity, "utf-16-le")
+            e["original"], _fitted_text, capacity, "utf-16-le")
         if restored is None:
-            result.note_rejected(e, "译文缺失 {n} 占位符")
+            result.note_rejected(
+                e, f"译文缺失占位符（放不下）：{''.join(_missing)}")
             continue
         payload = restored
         if not _placeholders_intact(
                 e["original"], payload.decode("utf-16-le", errors="replace")):
-            result.note_rejected(e, "译文缺失 {n} 占位符")
+            result.note_rejected(
+                e, f"译文缺失占位符：{''.join(_missing)}")
             continue
         # F3：写回前记录预检——按 offset 读压缩前缀，校验其与 meta 声称的
         # 容量一致（防 offset 语义错位/提取后文件变化写坏记录；MyRustySubmarine
@@ -2141,15 +2204,20 @@ def _patch_metadata(path: Path, entries: list[dict], result: WriteResult,
         # F2：占位符完整性全量校验——缺失时机械恢复（补末尾，string.Format
         # 按索引取参位置无关）。恢复与容量合并处理：从正文尾部腾空间保
         # 占位符（UTF-8 同 Minato 场景），物理放不下才拒绝。
+        # P6a：同 #US 路径——缺失占位符清单写进拒绝原因（可定位）
+        _fitted_text = payload.decode("utf-8", errors="replace")
+        _missing = [p for p in _FORMAT_PLACEHOLDER.findall(e["original"])
+                    if p not in _fitted_text]
         restored = _restore_placeholders_capped(
-            e["original"], payload.decode("utf-8", errors="replace"),
-            capacity, "utf-8")
+            e["original"], _fitted_text, capacity, "utf-8")
         if restored is None:
-            result.note_rejected(e, "译文缺失 {n} 占位符")
+            result.note_rejected(
+                e, f"译文缺失占位符（放不下）：{''.join(_missing)}")
             continue
         payload = restored
         if not _placeholders_intact(e["original"], payload.decode("utf-8")):
-            result.note_rejected(e, "译文缺失 {n} 占位符")
+            result.note_rejected(
+                e, f"译文缺失占位符：{''.join(_missing)}")
             continue
         # 审计 #3：同一 data_index 两条 entry（重复提取/旧库合并）时
         # changes dict 后写静默覆盖前写，前一条仍 note_written 虚假成功

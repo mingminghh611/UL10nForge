@@ -344,20 +344,55 @@ def audit_repeat_consistency(
                 "reason": reason,
             })
         elif len(translations) > 1:
-            # 译文不一致（模型波动）——宁可不翻，防混排
-            reason = "同对象同原文译文不一致（模型波动）——全组保留原文"
+            # P5c（0.42.1 审计放宽——唯一放宽点）：译文不一致（模型波动）
+            # 旧策略全组回退原文——宁漏勿坏过了头：同对象同原文的多处出现
+            # 译文一致才是常态需求（按钮/标签多处显示同一词），全组回退
+            # 让「6 处出现因 1 处波动全部不翻」。改为多数派统一：取出现
+            # 次数最多的译文写满全组（并列取首现），只有零译文可选时才
+            # 整组回退（此时维持旧 all_reverted 行为）。多数派仍受写回
+            # 层既有安全检查约束（占位符/长度/分诊），此处只做统一不豁免。
+            counts: dict[str, int] = {}
             for e, _ in group:
-                if e.get("translation") != original:
-                    e["translation"] = original
-                    e["status"] = "skipped"
-                    if on_revert:
-                        on_revert(e, f"consistency_translation_variance:{reason}")
-            records.append({
-                "obj": obj, "original": original, "count": len(group),
-                "translations": sorted(translations),
-                "action": "all_reverted",
-                "reason": reason,
-            })
+                t = str(e.get("translation") or "")
+                if t and t != original:
+                    counts[t] = counts.get(t, 0) + 1
+            if counts:
+                majority = max(counts.items(),
+                               key=lambda kv: (kv[1], -list(counts).index(kv[0])))
+                # 并列取首现：max 稳定取第一个达到最大计数者——Python max
+                # 在 key 相等时返回先遍历到的元素，dict 保序即首现顺序
+                reason = (f"同对象同原文译文不一致（模型波动）——"
+                          f"多数派统一（{majority[1]}/{len(counts)} 种译文）")
+                for e, _ in group:
+                    if str(e.get("translation") or "") != majority[0]:
+                        e["translation"] = majority[0]
+                        if on_revert:
+                            on_revert(e, "consistency_majority_unify:"
+                                      + reason)
+                records.append({
+                    "obj": obj, "original": original, "count": len(group),
+                    "translations": sorted(translations),
+                    "action": "majority_unified",
+                    "majority": majority[0],
+                    "reason": reason,
+                })
+            else:
+                # 零译文可选（全部与原文同值但 translations 集合非空——
+                # 理论不可达，防御分支）→ 整组保留原文
+                reason = "同对象同原文译文不一致（模型波动）——全组保留原文"
+                for e, _ in group:
+                    if e.get("translation") != original:
+                        e["translation"] = original
+                        e["status"] = "skipped"
+                        if on_revert:
+                            on_revert(e, "consistency_translation_variance:"
+                                      + reason)
+                records.append({
+                    "obj": obj, "original": original, "count": len(group),
+                    "translations": sorted(translations),
+                    "action": "all_reverted",
+                    "reason": reason,
+                })
     return records
 
 

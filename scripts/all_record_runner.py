@@ -364,7 +364,22 @@ def _export_writeback_record(project, out_writeback: Path, profile,
         consistencies = [
             a for a in logic_audit if a.get("stage") == "consistency"]
         if consistencies:
-            blocks += [f"同原文互斥一致性：{len(consistencies)} 组（全组保留原文防混排）", ""]
+            # P5c（0.42.1）：不一致组不再全组回退——多数派统一
+            # （majority_unified）与键身份回退（all_reverted）分开计数呈现
+            reverted_c = [c for c in consistencies
+                          if c.get("action") == "all_reverted"]
+            unified_c = [c for c in consistencies
+                         if c.get("action") == "majority_unified"]
+            if reverted_c:
+                blocks.append(
+                    f"同原文互斥一致性：{len(reverted_c)} 组"
+                    "（键身份——全组保留原文防混排）")
+                blocks.append("")
+            if unified_c:
+                blocks.append(
+                    f"同原文译文统一：{len(unified_c)} 组"
+                    "（模型波动——多数派译文统一写满全组，P5c）")
+                blocks.append("")
             for item in consistencies[:20]:
                 blocks.append(
                     f"- {item.get('original', '')[:40]}"
@@ -901,6 +916,40 @@ def run_game(game_dir: Path, *, batch: int | None = None,
             pass
         return 0
 
+    # ── AI 辅助识别（B22 补齐，2026-09-07）──
+    # runner 此前从未调用候选层二次分类（GUI translate_page 独有）——
+    # headless 闭环里 typetree 候选层 + rawstr 弱形态召回面
+    # （identifier_without_display_evidence 等，八库普查实证有真实
+    # 显示文本漏网）从未被模型重判，识别覆盖率被 runner 封顶。
+    # 位置必须在翻译门之外：--no-translate 的 scan-only 验证跑同样
+    # 需要（否则 AI 识别只在翻译跑里生效，验证口径不一致）。
+    # 本地=4B 审核服务；云端=review kind 配置直连。fail-closed：失败
+    # 只打日志，绝不阻断主链（与 GUI 同语义）。resume 续跑不重判
+    # （不改变续跑条目集合语义）。
+    if not resume:
+        try:
+            from hanhua.core.ai_recognition import run_ai_recognition
+            from hanhua.core.review_server import ReviewModelService
+            # 云端链路（fromivan C13 同款）：API 模式传 review kind 配置，
+            # ReviewModelService 内部直连外部端点（无本地进程）；本地
+            # 模式 ensure_running 启 4B 服务（与翻译/审核共用，幂等）。
+            _ai_svc = ReviewModelService(
+                PROJECT_ROOT,
+                online_cfg=(settings.api_config("review")
+                            if api.mode == "api" else None))
+            if api.mode == "local":
+                _ai_svc.ensure_running()
+            _ai_report = run_ai_recognition(
+                project.store, PROJECT_ROOT, service=_ai_svc)
+            if _ai_report.degraded:
+                print(f"  [AI识别] 不可用：{_ai_report.error}"
+                      "——候选层维持 skipped（fail-closed）", flush=True)
+            else:
+                print(f"  [AI识别] {_ai_report.summary()}", flush=True)
+        except Exception as _ai_exc:  # noqa: BLE001 增益环节不阻断主链
+            print(f"  [AI识别] 失败（{_ai_exc}）——候选层维持 skipped",
+                  flush=True)
+
     # ── 2 翻译（真实本地模型） ──
     stats = None
     review_results: dict[str, ReviewResult] = {}
@@ -1034,45 +1083,11 @@ def run_game(game_dir: Path, *, batch: int | None = None,
         print(f"  知识检索：{knowledge_retrieval.capability().summary()}"
               + (f" · 已索引 {indexed0} 条" if indexed0 else ""))
 
+        # ── AI 辅助识别已在翻译门之外统一执行（见上方 B22 块）；
+        # 升格条目经 get_entries 重读，entries 以本行重建为准 ──
         entries = [_entry_from_row(r) for r in project.store.get_entries()]
         collected_names = collect_known_names(
             [str(e.original or "") for e in entries])
-
-        # ── AI 辅助识别（B22 补齐，2026-09-07）──
-        # runner 此前从未调用候选层二次分类（GUI translate_page 独有）——
-        # headless 闭环里 typetree 候选层 + rawstr 弱形态召回面
-        # （identifier_without_display_evidence 等，八库普查实证有真实
-        # 显示文本漏网）从未被模型重判，识别覆盖率被 runner 封顶。
-        # 本地=4B 审核服务（即将随翻译阶段启动，此处 ensure_running
-        # 幂等复用）；云端=review kind 配置直连。fail-closed：失败只
-        # 打日志，绝不阻断翻译主链（与 GUI 同语义）。
-        try:
-            from hanhua.core.ai_recognition import run_ai_recognition
-            from hanhua.core.review_server import ReviewModelService
-            # 云端链路（fromivan C13 同款）：API 模式传 review kind 配置，
-            # ReviewModelService 内部直连外部端点（无本地进程）；本地
-            # 模式 ensure_running 启 4B 服务（与翻译/审核共用，幂等）。
-            _ai_svc = ReviewModelService(
-                PROJECT_ROOT,
-                online_cfg=(settings.api_config("review")
-                            if api.mode == "api" else None))
-            if api.mode == "local":
-                _ai_svc.ensure_running()
-            _ai_report = run_ai_recognition(
-                project.store, PROJECT_ROOT, service=_ai_svc)
-            if _ai_report.degraded:
-                print(f"  [AI识别] 不可用：{_ai_report.error}"
-                      "——候选层维持 skipped（fail-closed）")
-            else:
-                print(f"  [AI识别] {_ai_report.summary()}")
-                if _ai_report.upgraded:
-                    entries = [
-                        _entry_from_row(r)
-                        for r in project.store.get_entries()]
-        except Exception as _ai_exc:  # noqa: BLE001 增益环节不阻断主链
-            print(f"  [AI识别] 失败（{_ai_exc}）——候选层维持 skipped")
-        # 2026-08-14：system_prompt 只含角色+精简规则（术语/专名/知识
-        # 全量块已移除，全部按条目检索命中注入）
         system = build_system_prompt(profile, "")
         client = create_client(api)
         lang = f"{profile.source_lang or 'auto'}→{profile.target_lang or 'zh-CN'}"
@@ -1358,6 +1373,51 @@ def run_game(game_dir: Path, *, batch: int | None = None,
                 encoding="utf-8")
         except Exception:  # noqa: BLE001 - 报告写失败不阻断
             pass
+        if audit_res.needs_rewrite:
+            # P2（0.42.1 审计→修复有界闭环）：FAIL 先自动修复再判——
+            # 占位符自愈/磁盘分歧重渲染是确定性修法，修得好不必人工。
+            # 修复动作只有「改 store 译文 + 从 store 重渲染」，与写回
+            # 管线同源（_render_from_store/_encode_from_store），绝无
+            # 第三种磁盘直改路径；修不好（结构性/store 侧根因）才落
+            # needs_rewrite 阻断（宁漏勿坏）。
+            try:
+                from hanhua.core.writeback_repair import repair_writeback
+                # 反馈重译服务：翻译在场才有（--no-translate 且非续跑
+                # → translator None，质量类 flag 只记录跳过，不盲改）
+                repair_report = repair_writeback(
+                    project.store, project.game_dir, project.out_dir,
+                    audit_res,
+                    repair_service=(translator if translator
+                                    is not None else None),
+                    font_enabled=bool(
+                        getattr(settings.font, "enabled", False)),
+                    on_note=lambda s: print(f"  {s}"))
+                print(f"  [写回修复] {repair_report['rounds']} 轮 · "
+                      f"自愈 {repair_report['healed_entries']} 条 · "
+                      f"重译 {repair_report['retranslated']} 条 · "
+                      f"重渲染 {len(repair_report['repaired_files'])} 文件"
+                      + (f" · 人工 {len(repair_report['needs_manual'])}"
+                         if repair_report["needs_manual"] else ""))
+                # 修复后复检（重跑全量审计，最终 FAIL 才是真阻断）：
+                # 修复改的是 store/磁盘，复检必须新跑而非复用旧结果
+                audit_res = audit_writeback(
+                    project.store, project.game_dir, project.out_dir,
+                    run_model=True, app_dir=PROJECT_ROOT,
+                    online_cfg=(settings.api_config("review")
+                                if api.mode == "api" else None),
+                    font_enabled=bool(
+                        getattr(settings.font, "enabled", False)),
+                    v2_result=(writeback_result.get("v2")
+                               if writeback_result else None),
+                    on_note=lambda s: print(f"  {s}"))
+                try:
+                    (out_writeback / "audit.txt").write_text(
+                        render_audit_report(audit_res, game_name),
+                        encoding="utf-8")
+                except Exception:  # noqa: BLE001 - 报告写失败不阻断
+                    pass
+            except Exception as exc:  # noqa: BLE001 修复失败退回人工路径
+                print(f"  [写回修复] 失败（退回人工阻断）：{exc}")
         if audit_res.needs_rewrite:
             failed = ", ".join(
                 f.rel_path for f in audit_res.failed_files[:5])

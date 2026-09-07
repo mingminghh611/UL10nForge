@@ -12,12 +12,23 @@ from hanhua.core.quality import is_write_ready
 
 def write_back(store: ProjectStore, game_dir: Path, out_dir: Path,
                target_lang: str = "zh-CN",
-               normalize_fallback_punctuation: bool = False) -> int:
+               normalize_fallback_punctuation: bool = False,
+               result=None) -> int:
     """把项目库中的译文写回 out_dir（保留相对路径/编码/EOL）。返回写回文件数。
 
     normalize_fallback_punctuation：中文字体启用时，未翻译条目回退的
     原文做字体标点归一化（– → —），与新 bundle 渲染字节一致（需求集
     同款变换，防 □）。字体未启用时保持 False——原文原样写回。
+
+    result（0.42.1 P3）：可选 WriteResult（unity.writer）出参——文本
+    路径逐条记账。旧文本路径只返回文件数，条目是否真正落盘完全无账
+    （P1a 修复的是 TextAsset 结构化分支；纯文本 apply 层的静默跳过
+    ——key_style/键字段强制置空、apply_json/csv 行号失效——同样存在
+    「记 translated 但游戏里是英文」假账）。传入后：is_write_ready 且
+    译文非空的条目记 note_written；被 _render 置空回退（非 write_ready/
+    key_style/键字段）或 apply 层报 skipped 的记 note_rejected（带
+    原因），供审计层与 needs_rewrite 判定使用。与二进制路径
+    write_back_v2 的 WriteResult 同口径（locator 去重）。
     """
     files = store.get_files()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -47,11 +58,52 @@ def write_back(store: ProjectStore, game_dir: Path, out_dir: Path,
         elif f["format"] == "zip":
             out.write_bytes(zip_format.apply_zip(src, _entries_to_model(entries)))
         else:
+            skipped: set[str] | None = (
+                set() if (result is not None and f["format"]
+                          in ("kv", "json", "csv")) else None)
             body = _render(src, f, entries, target_lang,
-                           normalize_fallback_punctuation)
+                           normalize_fallback_punctuation, skipped=skipped)
             out.write_bytes(_encode(body, src, f))
+            # P3 文本路径逐条记账：apply 层 skipped 的 key_path 是静默
+            # 未落盘实证（P1a 同款），逐条记 rejected 暴露给审计；
+            # 未进 skipped 且有有效译文的条目记 written。
+            if result is not None:
+                _account_text_entries(result, entries, f["format"], skipped)
         count += 1
     return count
+
+
+def _account_text_entries(result, entries: list[dict], fmt: str,
+                          skipped: set[str] | None) -> None:
+    """P3 文本路径逐条记账：written/rejected 与二进制路径同口径。
+
+    记账规则（宁漏勿坏，只记有翻译意图的条目）：
+    - 无译文（非 write_ready / 译文为空）→ 不记——本就没有写回意图，
+      混入会稀释 rejected 告警信号；
+    - 有译文但被 _render 置空（key_style/json 键字段）或 apply 层报
+      skipped（key_style 强制跳过、目标值不匹配、行号/行集失效）→
+      note_rejected（reason 带来源，区分 renderer 置空 vs apply 层跳过）；
+    - 其余有译文条目 → note_written。
+    key_style/键字段判定与 _render 同源重复执行（_render 只改模型副本
+    不回写 store 行），保证口径一致。fmt 取文件级 format（与 _render
+    的 json 键字段判定同源）。
+    """
+    for e in entries:
+        translation = e.get("translation") or ""
+        if not translation:
+            continue
+        key_path = str(e.get("key_path", ""))
+        original = str(e.get("original") or "")
+        if is_key_style_identifier(original):
+            result.note_rejected(e, "text_key_style_blank")
+            continue
+        if fmt == "json" and looks_like_key_field(key_path.rsplit("/", 1)[-1]):
+            result.note_rejected(e, "text_json_key_field_blank")
+            continue
+        if skipped and key_path in skipped:
+            result.note_rejected(e, "text_apply_silent_skip")
+            continue
+        result.note_written(e)
 
 
 def _entries_to_model(entries: list[dict]) -> list[TextEntry]:
@@ -85,7 +137,8 @@ def _encode(body: str, src: Path, f: dict) -> bytes:
 
 
 def _render(src: Path, f: dict, entries: list[dict], target_lang: str,
-            normalize_fallback_punctuation: bool = False) -> str:
+            normalize_fallback_punctuation: bool = False,
+            skipped: set[str] | None = None) -> str:
     fmt = f["format"]
     model_entries = [_dict_to_entry(d) for d in entries]
     # 写回保护：键名/键字段条目即使曾被（误）翻译也不写回。
@@ -108,11 +161,14 @@ def _render(src: Path, f: dict, entries: list[dict], target_lang: str,
             e.status = STATUS_SKIPPED
     meta = json.loads(f.get("meta") or "{}")
     text = read_text(src)
+    # P3：kv/json/csv 支持 skipped 出参（P1a），把 apply 层静默未落盘
+    # 的 key_path 逐条暴露给 write_back 记账；其余行级格式条目 meta
+    # 自带行参数，跳过场景由提取期结构判定覆盖（P1a 结论）。
     body = apply_format_text(fmt, model_entries, text, {
         **meta,
         "source_suffix": src.suffix.lower(),
         "target_col": meta.get("target_col"),
-    })
+    }, skipped=skipped)
     # 行重建格式需还原原文件末尾换行
     if fmt in ("txt", "yaml", "ink_yarn", "subtitle", "po") and text.endswith(("\n", "\r")):
         body += "\n"

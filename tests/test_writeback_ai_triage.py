@@ -261,6 +261,10 @@ def test_run_triage_model_missing_degrades_zero_skip():
 
 
 def test_run_triage_persists_verdict_cache(tmp_path):
+    """P5b（0.42.1 审计）：review（不确定）结论**不缓存**——一次保守
+    判定不能永久化（旧实现缓存 review → 后续轮次即使模型在场也不再
+    重判，条目永远跳过）；reject 是确定性「不该写」结论，可缓存复用。
+    """
     store = ProjectStore(tmp_path / "project.db")
     store.init_schema()
     store.add_file("f1", "a.bundle", "v2_asset", "binary", "")
@@ -276,17 +280,72 @@ def test_run_triage_persists_verdict_cache(tmp_path):
     skip_map, _report = run_writeback_triage(entries, store,
                                              service=service)
     assert skip_map
+    # review 不落缓存：meta 里没有 ai_writeback_verdict
     row = next(r for r in store.get_entries() if r["key_path"] == "k1")
     meta = row["meta"] if isinstance(row["meta"], dict) \
         else json.loads(row["meta"])
-    assert meta[_MUTED] == {"v": "review", "pv": _JUDGE_PROMPT_VERSION}
-    # 第二轮：从 store 重建条目（缓存 meta 已落库）→ 缓存命中不再问模型。
-    # 写回现场 pool 全部是 translation != original 的 write-ready 条目，
-    # 这里按同口径回填译文（store 行本身 translation 为空）。
-    rows = store.get_entries()
+    assert _MUTED not in meta
+    # 第二轮：从 store 重建条目（缓存 meta 已落库）→ 重新判定（review
+    # 不缓存，模型在场必须再问），改判 allow 照写
     entries2 = []
-    for row in rows:
-        meta = row["meta"] if isinstance(row["meta"], dict)             else json.loads(row["meta"])
+    for row in store.get_entries():
+        meta = row["meta"] if isinstance(row["meta"], dict) \
+            else json.loads(row["meta"])
+        entries2.append({"file_id": row["file_id"],
+                         "key_path": row["key_path"],
+                         "original": row["original"],
+                         "translation": "战斗音乐",
+                         "meta": meta})
+    service2 = _FakeService(outputs=['[{"i": 0, "v": "allow"}]'])
+    skip_map2, report2 = run_writeback_triage(entries2, store,
+                                              service=service2)
+    assert skip_map2 == {}                       # allow → 不跳过
+    assert report2.asked == 1 and report2.cached == 0
+    # allow 是确定性结论 → 落缓存
+    row = next(r for r in store.get_entries() if r["key_path"] == "k1")
+    meta = row["meta"] if isinstance(row["meta"], dict) \
+        else json.loads(row["meta"])
+    assert meta[_MUTED] == {"v": "allow", "pv": _JUDGE_PROMPT_VERSION}
+    # 第三轮：allow 缓存命中，不再问模型（含 store 重建条目）
+    entries3 = []
+    for row in store.get_entries():
+        meta = row["meta"] if isinstance(row["meta"], dict) \
+            else json.loads(row["meta"])
+        entries3.append({"file_id": row["file_id"],
+                         "key_path": row["key_path"],
+                         "original": row["original"],
+                         "translation": "战斗音乐",
+                         "meta": meta})
+    service3 = _FakeService(error=AssertionError("must not ask"))
+    skip_map3, report3 = run_writeback_triage(entries3, store,
+                                              service=service3)
+    assert skip_map3 == {}
+    assert report3.cached == 1 and report3.asked == 0
+
+
+def test_run_triage_reject_verdict_cached(tmp_path):
+    """P5b：reject（确定性「不该写」）缓存后复用，不重复问模型。"""
+    store = ProjectStore(tmp_path / "project.db")
+    store.init_schema()
+    store.add_file("f1", "a.bundle", "v2_asset", "binary", "")
+    store.upsert_entries([{
+        "file_id": "f1", "key_path": "k1",
+        "original": "combatMusic", "translation": "战斗音乐",
+        "meta": {"kind": "typetree", "role": "display",
+                 "disposition": "translate", "obj_has_values": True,
+                 "field_path": ["m_text"]}}])
+    entry = _entry("k1", "combatMusic", "战斗音乐",
+                   obj_has_values=True, field_path=["m_text"])
+    service = _FakeService(outputs=['[{"i": 0, "v": "reject"}]'])
+    skip_map, report = run_writeback_triage([entry], store,
+                                            service=service)
+    assert skip_map == {("f1", "k1"): "ai_triage_reject"}
+    assert report.rejected == 1
+    # 第二轮：缓存命中（reject 可缓存）→ 不问模型（store 重建条目）
+    entries2 = []
+    for row in store.get_entries():
+        meta = row["meta"] if isinstance(row["meta"], dict) \
+            else json.loads(row["meta"])
         entries2.append({"file_id": row["file_id"],
                          "key_path": row["key_path"],
                          "original": row["original"],
@@ -295,7 +354,7 @@ def test_run_triage_persists_verdict_cache(tmp_path):
     service2 = _FakeService(error=AssertionError("must not ask"))
     skip_map2, report2 = run_writeback_triage(entries2, store,
                                               service=service2)
-    assert skip_map2 == {("f1", "k1"): "ai_triage_review:cached"}
+    assert skip_map2 == {("f1", "k1"): "ai_triage_reject:cached"}
     assert report2.cached == 1 and report2.asked == 0
 
 

@@ -187,8 +187,16 @@ def extract_csv_text(text: str, file_id: str | None = None, suffix: str = "",
 
 
 def apply_csv(entries: list[TextEntry], source_text: str, delimiter: str = ",",
-              target_lang: str = "zh-CN", target_col: int | None = None) -> str:
-    """重建 CSV：无目标列时在表头追加目标语言列。"""
+              target_lang: str = "zh-CN", target_col: int | None = None,
+              skipped: set[str] | None = None) -> str:
+    """重建 CSV：无目标列时在表头追加目标语言列。
+
+    skipped（0.42.1 假记账根治）：可选集合出参——**未被实际应用**的条目
+    key_path 收集于此（行号在表中找不到对应行的静默跳过路径全量暴露，
+    Rendezvous 2026-08-18 实证 CutsceneLocalization 漏 158 行即此类静默
+    跳过）。调用方（writer/审计）据此逐条记账，杜绝「从未落盘却记
+    written」的假账。csv 行号在 meta["row"]，条目身份按 key_path 回收。
+    """
     rows = _read_rows(source_text, delimiter)
     new_col = target_col is None
     if new_col:
@@ -208,6 +216,15 @@ def apply_csv(entries: list[TextEntry], source_text: str, delimiter: str = ",",
             while len(rows[r]) <= target_col:
                 rows[r].append("")
             rows[r][target_col] = e.translation
+    # P1a（0.42.1 假记账根治）：带译文却未落盘的条目全量上报——行号
+    # 在表中不存在（旧库 meta 过期/行集变化，Rendezvous 2026-08-18 实证
+    # 漏 158 行即此静默路径）的条目进 skipped 集合，由调用方逐条记
+    # rejected（csv_row_not_found），杜绝「从未落盘却记 written」假账。
+    if skipped is not None:
+        _valid_rows = set(range(1, len(rows)))
+        for e in entries:
+            if e.translation and e.meta["row"] not in _valid_rows:
+                skipped.add(e.key_path)
     out = io.StringIO()
     # 保留原始行终止符（与 detect_eol 同判据）：CRLF 文件写回 CRLF，
     # 避免行终止符变化被版本控制/脚本误判（调查报告 2.6 新发现）

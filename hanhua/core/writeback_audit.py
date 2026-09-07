@@ -94,6 +94,12 @@ class FileAudit:
     # 条目级
     placeholder_lost: list[str] = field(default_factory=list)
     ref_field_lost: list[str] = field(default_factory=list)   # 键字段枚举被译（引用断链）
+    # P3（0.42.1 审计）：译文存在性断言失败条目——store 有 write-ready
+    # 译文但写回产物里找不到（csv 目标列单元格 / json/txt/kv 子串）。
+    # 不依赖渲染一致性链路，独立断言「译了但没落盘」（Rendezvous
+    # 2026-08-18 漏 158 行实证形态：行号 meta 过期静默跳过，渲染层
+    # 零异常、审计仍通过、游戏里全是英文）。
+    translation_missing: list[str] = field(default_factory=list)
     # 模型层（软复核）
     model_verdict: str = "PASS"
     model_issue: str = ""
@@ -108,7 +114,8 @@ class FileAudit:
                 and self.quote_paired and self.comma_conserved
                 and self.strict_parse_ok and self.delimiter_conserved
                 and self.render_consistent and not self.placeholder_lost
-                and not self.ref_field_lost)
+                and not self.ref_field_lost
+                and not self.translation_missing)
 
 
 @dataclass
@@ -120,6 +127,10 @@ class AuditResult:
     # M3（0.39.0）：二进制证据卡复核统计（report 渲染用）
     v2_cards_audited: int = 0            # 送模型复核的证据卡数（去重后）
     v2_cards_sampled: int = 0            # 抽样上限截断掉的卡数
+    # P4（0.42.1 审计）：模型复核覆盖缺口统计——「未审就是未审」，
+    # 不允许缺口被默认 PASS 吞掉（报告必须如实呈现覆盖面）。
+    model_verdict_missing: int = 0       # 已送审但模型 JSON 漏掉 index 的行对/卡数
+    model_pairs_truncated: int = 0       # 超单文件行对上限被抽样截断、从未送审的行数
 
     @property
     def failed_files(self) -> list[FileAudit]:
@@ -436,6 +447,270 @@ def _structure_audit(fmt: str, src_text: str, out_text: str,
 
 # ── 渲染一致性（store 渲染 + 编码 == 磁盘 bytes）─────────────────
 
+# P3（0.42.1 审计）：译文存在性独立断言。只断言「应写且实际有写回意图」
+# 的条目——is_write_ready 且译文非空且译文 != 原文（译文==原文是合法
+# 回退形态：术语表/保留词，写没写都不算缺）。key_style/键字段条目被
+# writer 有意置空保留原文（写回保护），同样不算缺。
+def _translation_missing_entries(f: dict, entries: list[dict],
+                                 out_text: str) -> list[str]:
+    """逐条断言译文落在写回产物里，返回缺失清单（key_path 描述列表）。
+
+    按格式分派（spec P3）：
+    - csv：目标列单元格级检查（条目 meta row/target_col 定位单元格，
+      单元格含译文前缀即命中——apply_csv 可能按容量截断，用译文前缀
+      匹配（「truncated version」语义）；target_col 缺失按子串兜底）。
+    - json：JSON 序列化形态子串（apply_json 用 json.dumps 写入，
+      译文内的引号/反斜杠会被转义——子串检查也用 json.dumps 形态）。
+    - txt/kv/其余：纯子串检查（整行替换/kv 值替换后译文必在文件内）。
+
+    返回条目的 detail 行（translation_missing_in_output: key_path），
+    调用方并入 FileAudit.translation_missing → needs_rewrite。
+    """
+    from .quality import is_write_ready
+    from .placeholders import is_key_style_identifier, looks_like_key_field
+    fmt = f["format"]
+    missing: list[str] = []
+    for e in entries:
+        translation = e.get("translation") or ""
+        if not translation or translation == e.get("original"):
+            continue
+        if not is_write_ready(e.get("status", "pending"), translation,
+                              e.get("meta") or "{}"):
+            continue
+        original = str(e.get("original") or "")
+        if is_key_style_identifier(original):
+            continue
+        if fmt == "json" and looks_like_key_field(
+                str(e.get("key_path", "")).rsplit("/", 1)[-1]):
+            continue
+        key_path = str(e.get("key_path", ""))
+        hit = False
+        if fmt == "csv":
+            raw_meta = e.get("meta") or "{}"
+            if isinstance(raw_meta, dict):
+                meta = raw_meta   # 调用方直接给 dict（测试/内部复用）原样用
+            else:
+                try:
+                    meta = json.loads(raw_meta)
+                except (json.JSONDecodeError, TypeError):
+                    meta = {}
+            row = meta.get("row")
+            target_col = meta.get("target_col")
+            if isinstance(row, int) and isinstance(target_col, int):
+                import csv as _csv
+                delimiter = (meta.get("delimiter")
+                             or {".tsv": "\t", ".psv": "|"}.get(
+                                 str(f.get("rel_path", "")).rsplit(".", 1)[-1]
+                                 .lower() if "." in str(f.get("rel_path"))
+                                 else "", ","))
+                try:
+                    rows = list(_csv.reader(io.StringIO(out_text),
+                                            delimiter=delimiter or ","))
+                    if 0 <= row < len(rows) and target_col < len(rows[row]):
+                        cell = rows[row][target_col]
+                        # 截断容差（「truncated version」）：写回层可能按
+                        # 容量截断——译文前缀出现在单元格即算落盘
+                        hit = any(
+                            translation[:n] and translation[:n] in cell
+                            for n in (len(translation),
+                                      max(1, len(translation) - 1),
+                                      max(1, len(translation) // 2),
+                                      max(1, len(translation) // 4)))
+                    else:
+                        hit = False
+                except Exception:  # noqa: BLE001 行解析异常按缺失处理
+                    hit = False
+            if not hit:
+                # 兜底：行定位失败（meta 缺 row/target_col——追加列模式等）
+                # 子串级检查，避免对合法形态误报缺失
+                hit = translation in out_text
+        elif fmt == "json":
+            probe = json.dumps(translation, ensure_ascii=False)
+            hit = probe in out_text or translation in out_text
+        else:
+            hit = translation in out_text
+        if not hit:
+            missing.append(
+                f"translation_missing_in_output: {key_path}"
+                f"（{original[:40]} → {translation[:40]}）")
+    return missing
+
+
+def _entry_row(e: dict) -> int | None:
+    """取条目 meta 里的 csv 行号（row 字段，B16c 条目级带档）。"""
+    meta = e.get("meta") or "{}"
+    if isinstance(meta, dict):
+        m = meta
+    else:
+        try:
+            m = json.loads(meta)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    row = m.get("row")
+    return row if isinstance(row, int) else None
+
+
+def _row_cell_is_translation(out_rows: list[list[str]], row: int,
+                             target_col: int, translation: str) -> bool:
+    """产物 row 行 target_col 列是否已是译文（完整或截断前缀形态）。
+
+    单候选兜底的防误判：候选条目译文已在其自身行落盘 → 残留行另有
+    其主（无条目的重复英文行），不能算该条目未落盘。
+    """
+    if not isinstance(row, int) or row < 1 or row >= len(out_rows):
+        return False
+    cells = out_rows[row]
+    if target_col >= len(cells):
+        return False
+    cell = cells[target_col].strip()
+    return bool(cell) and (cell == translation
+                           or translation.startswith(cell))
+
+
+def _csv_target_residue(f: dict, entries: list[dict], out_text: str,
+                        already_missing: set[str]) -> list[str]:
+    """verify_csv_writeback（csv_format）接入第 1 层确定性审计（P2）。
+
+    Rendezvous 2026-08-18 实证：CutsceneLocalization 目标列 158 行仍是
+    英文——过场对话全英文。本函数对写回产物目标列做纯 ASCII 英文残留
+    扫描（verify_csv_writeback 原为死代码，此前从未被调用）。与
+    translation_missing 互补：后者按「译文是否在场」断言（子串兜底会
+    被文件内别处出现的同译文掩护——重复英文行一条落盘一条静默丢失的
+    形态），前者按「该行单元格是否仍是英文残留」断言，两个口径各有
+    盲区，双通道并拦。
+
+    假阳性过滤（宁漏勿坏，只拦「有译文却没落盘」的行）：
+    - 残留行无对应条目 → 技术词（V-Sync/SFX 等非翻译范围）→ 不报；
+    - 条目无译文 / 译文==原文 → 合法回退（保留原文是设计行为）→ 不报；
+    - 单元格内容就是译文（或其截断前缀）→ 译文已落盘 → 不报
+      （纯 ASCII 译文如 "OK" 绝不误报）；
+    - 已在 translation_missing 里报过的条目 → 不双报。
+    """
+    import csv as _csv  # noqa: F401 与 verify_csv_writeback 内部一致
+
+    from .formats.csv_format import verify_csv_writeback
+    from .quality import is_write_ready
+    file_meta: dict = {}
+    raw_file_meta = f.get("meta") or "{}"
+    if isinstance(raw_file_meta, dict):
+        file_meta = raw_file_meta
+    else:
+        try:
+            file_meta = json.loads(raw_file_meta)
+        except (json.JSONDecodeError, TypeError):
+            file_meta = {}
+    target_col = file_meta.get("target_col")
+    if not isinstance(target_col, int):
+        # 条目级 target_col 兜底（B16c：写回参数从提取现场带档）
+        for e in entries:
+            meta = e.get("meta") or "{}"
+            if isinstance(meta, dict):
+                m = meta
+            else:
+                try:
+                    m = json.loads(meta)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            if isinstance(m.get("target_col"), int):
+                target_col = m["target_col"]
+                break
+    if not isinstance(target_col, int):
+        return []   # 追加列模式列位未知——不猜（宁漏勿坏）
+    rel = str(f.get("rel_path") or "")
+    suffix = rel.rsplit(".", 1)[-1].lower() if "." in rel else ""
+    delimiter = file_meta.get("delimiter") or {
+        "tsv": "\t", "psv": "|"}.get(suffix, ",")
+    leftovers = verify_csv_writeback(
+        out_text, delimiter=delimiter, target_col=target_col)
+    if not leftovers:
+        return []
+    # 产物实际行集（含表头）——行号语义与 apply_csv/verify 同源：
+    # 表头是第 0 行，数据行 1..len(rows)-1。越界判定（Rendezvous
+    # 漏 158 行实证：行集变化后 row=9 越界）以此为准，不能用
+    # 「是否出现在 row_entry 值里」判定——过期行号的条目本身就在
+    # row_entry 里（按它自己的失效行号入表），该判据恒为空集。
+    import io as _io
+    try:
+        out_rows = list(_csv.reader(_io.StringIO(out_text),
+                                    delimiter=delimiter))
+    except _csv.Error:
+        out_rows = []
+    valid_rows = set(range(1, len(out_rows)))
+    # 行号 → 条目映射（行号在条目 meta，B16c 同源）。**meta 行号失效
+    # （Rendezvous 漏 158 行实证：行集变化后 row=9 越界）时残留行按行号
+    # 找不到条目 → 兜底按 original 值匹配**（同值行必须逐行核对译文，
+    # 残留行值==条目 original 且条目有译文即命中）。
+    row_entry: dict[int, dict] = {}
+    for e in entries:
+        meta = e.get("meta") or "{}"
+        if isinstance(meta, dict):
+            m = meta
+        else:
+            try:
+                m = json.loads(meta)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        row = m.get("row")
+        if isinstance(row, int):
+            row_entry[row] = e
+    flagged: list[str] = []
+    for item in leftovers:          # 形如 "row 3: V-Sync enabled"
+        head, _, cell = item.partition(": ")
+        try:
+            row = int(head.replace("row", "").strip())
+        except ValueError:
+            continue
+        e = row_entry.get(row)
+        if e is None:
+            # 兜底：行号映射没命中（meta 行号失效）→ 按残留值匹配
+            # original。多候选（同值多行）时优先取「行号越界」的条目
+            # （有效行号条目已被 translation_missing 按行覆盖，越界
+            # 条目才是静默丢失方）。
+            cell_s0 = cell.strip()
+            candidates = [
+                c for c in entries
+                if (c.get("translation")
+                    and c.get("translation") != c.get("original")
+                    and str(c.get("original") or "").strip() == cell_s0)]
+            # 行号越界优先（有效行号条目已被 translation_missing 按行
+            # 覆盖，越界条目才是 apply 层静默丢弃方——row=9 对 2 行表
+            # 即越界）。多候选全是有效行号 → 单候选才认，且须确认其
+            # 译文未在自身行落盘（已落盘说明残留行另有其主——无条目
+            # 的重复英文行/技术词，不猜，宁漏勿坏）。
+            stale = [c for c in candidates if _entry_row(c) not in valid_rows]
+            if stale:
+                e = stale[0]
+            elif len(candidates) == 1:
+                c = candidates[0]
+                crow = _entry_row(c)
+                if crow not in valid_rows or not _row_cell_is_translation(
+                        out_rows, crow, target_col,
+                        str(c.get("translation") or "")):
+                    e = c
+        if e is None:
+            continue                 # 无条目行：技术词/非翻译范围
+        key_path = str(e.get("key_path", ""))
+        if key_path in already_missing:
+            continue                 # translation_missing 已报，防双报
+        translation = e.get("translation") or ""
+        original = str(e.get("original") or "")
+        if not translation or translation == original:
+            continue                 # 合法回退（保留原文是设计行为）
+        if not is_write_ready(e.get("status", "pending"), translation,
+                              e.get("meta") or "{}"):
+            continue
+        cell_s = cell.strip()
+        # 译文已落盘（完整或截断前缀）→ 不是残留
+        if cell_s and (cell_s == translation
+                       or translation.startswith(cell_s)):
+            continue
+        flagged.append(
+            f"csv_target_residue: row {row}: {cell_s[:40]}"
+            f"（条目 {key_path} 已有译文未落盘）")
+        already_missing.add(key_path)
+    return flagged
+
+
 def _render_from_store(store, src: Path, f: dict,
                        entries: list[dict],
                        normalize_fallback_punctuation: bool = False) -> str:
@@ -596,6 +871,32 @@ def audit_deterministic(store, game_dir: Path, out_dir: Path,
             except Exception:  # noqa: BLE001 渲染异常视为不一致
                 audit.render_consistent = False
                 audit.detail.append("渲染/编码异常")
+        # P3（0.42.1 审计）：译文存在性独立断言——不依赖渲染一致性链路
+        # （render_consistent 只证明「store 渲染 == 磁盘」，若渲染本身
+        # 静默跳过该条目——行号 meta 过期——渲染一致照样通过，译文却从
+        # 未落盘（Rendezvous 漏 158 行实证）。此处按格式分派直接在
+        # 磁盘文本里找译文，找不到即 needs_rewrite。
+        if audit.changed_entries:
+            audit.translation_missing = _translation_missing_entries(
+                f, entries, out_text)
+            # P2（0.42.1 审计）：verify_csv_writeback 接入——CSV 目标列
+            # 纯 ASCII 英文残留扫描（此前死代码从未被调用，Rendezvous
+            # 漏 158 行即目标列残留形态）。与 translation_missing 双通道：
+            # 残留按行断言，能抓住「重复英文行一条落盘一条静默丢失」
+            # （子串断言被别处同译文掩护的形态）。残留行并入
+            # translation_missing → needs_rewrite 同闸门。
+            if f["format"] == "csv":
+                # 已报条目的 key_path 集合——前缀截取而非全角括号
+                # split（key_path 本身可含「（」，split 会截断误判）
+                reported = set()
+                for m in audit.translation_missing:
+                    if m.startswith("translation_missing_in_output: "):
+                        rest = m[len("translation_missing_in_output: "):]
+                        reported.add(rest.rsplit("（", 1)[0].strip())
+                residue = _csv_target_residue(
+                    f, entries, out_text, reported)
+                if residue:
+                    audit.translation_missing.extend(residue)
         audits.append(audit)
         if on_note:
             if audit.passed:
@@ -609,6 +910,9 @@ def audit_deterministic(store, game_dir: Path, out_dir: Path,
                     issues.append(f"占位符丢失 {len(audit.placeholder_lost)} 条")
                 if audit.ref_field_lost:
                     issues.append(f"引用字段被译 {len(audit.ref_field_lost)} 条")
+                if audit.translation_missing:
+                    issues.append(
+                        f"译文未落盘 {len(audit.translation_missing)} 条")
                 on_note(f"[写回审计] FAIL {rel}：{'、'.join(issues)}")
     return audits
 
@@ -638,19 +942,34 @@ _MODEL_SYSTEM_PROMPT = """你是游戏本地化写回结构审计员。用户会
 
 
 def _build_model_items(src_text: str, out_text: str, max_pairs: int = 400
-                       ) -> list[tuple[int, str, str]]:
-    """取有差异的行对（源行, 写回行），供模型批量审核。超大文件抽样。"""
+                       ) -> tuple[list[tuple[int, str, str]], int]:
+    """取有差异的行对（源行, 写回行），供模型批量审核。超大文件抽样。
+
+    P4c（0.42.1 审计）：返回 (行对列表, 被截断未送审的行数)——旧版静默
+    截断，调用方不知道有行从未被模型看过（报告呈现的是全量覆盖假象）。
+    截断是刻意的模型成本控制（超大文件不可能全送），但必须显式计数、
+    由报告如实呈现，不允许吞掉。
+    """
     src_lines = _lines(src_text)
     out_lines = _lines(out_text)
     items: list[tuple[int, str, str]] = []
     for i, (a, b) in enumerate(zip(src_lines, out_lines)):
         if a != b and b.strip():
             items.append((i, a, b))
+    truncated = 0
     if len(items) > max_pairs:
-        # 抽样保住边界（首尾各留若干 + 均匀中段），控制模型成本
-        step = max(1, (len(items) - 20) // (max_pairs - 20))
-        items = items[:10] + items[::step][10:-10] + items[-10:]
-    return items
+        # 抽样保住边界（首尾各留若干 + 均匀中段），控制模型成本。
+        # max_pairs ≤ 20 时均匀步长公式无意义（分母 ≤0）→ 直接保头，
+        # 与 _audit_v2_model 的 max_cards ≤ 20 分支同口径。
+        if max_pairs <= 20:
+            truncated = len(items) - max_pairs
+            items = items[:max_pairs]
+        else:
+            step = max(1, (len(items) - 20) // (max_pairs - 20))
+            total = len(items)
+            items = items[:10] + items[::step][10:-10] + items[-10:]
+            truncated = total - len(items)
+    return items, truncated
 
 
 def _parse_model_verdicts(content: str) -> dict[int, tuple[str, str]]:
@@ -720,7 +1039,15 @@ def audit_model(store, game_dir: Path, out_dir: Path,
             out_text = read_text(out)
         except Exception:  # noqa: BLE001
             continue
-        items = _build_model_items(src_text, out_text, max_pairs_per_file)
+        items, file_truncated = _build_model_items(
+            src_text, out_text, max_pairs_per_file)
+        if file_truncated:
+            # P4c（0.42.1 审计）：截断计数进报告——未送审的行不能被
+            # 「确定性 PASS」的表象掩盖（模型语义复核覆盖有缺口）
+            result.model_pairs_truncated += file_truncated
+            if on_note:
+                on_note(f"[写回审计] {rel}: 行差异 {len(items) + file_truncated}"
+                        f" 超上限，{file_truncated} 行未送模型复核（抽样截断）")
         if not items:
             continue
         if on_note:
@@ -747,7 +1074,17 @@ def audit_model(store, game_dir: Path, out_dir: Path,
                 continue
             verdicts = _parse_model_verdicts(content)
             for (i, a, b) in group:
-                verdict, issue = verdicts.get(i, ("PASS", ""))
+                # P4a（0.42.1 审计）：旧写法 verdicts.get(i, ("PASS", ""))
+                # 把「模型 JSON 漏掉该 index」静默当 PASS——输出被截断
+                # （max_tokens=512 的批漏尾）时缺口被吞。未审就是未审：
+                # 漏掉的行对计数进 model_verdict_missing，报告如实呈现，
+                # 不伪造 PASS（与「模型请求失败=硬阻断」同一条原则）。
+                # 不升级为硬阻断：这是软复核层，阻断通道仍是
+                # model_unavailable（请求级失败），行级缺口走计数+报告。
+                if i not in verdicts:
+                    result.model_verdict_missing += 1
+                    continue
+                verdict, issue = verdicts[i]
                 if verdict == "PASS":
                     continue
                 # 去噪：已被第 1 层确定性拦截的问题不重复上报（软复核只留
@@ -899,7 +1236,12 @@ def _audit_v2_model(v2_result, service, *, cards_per_batch: int = 12,
             continue
         verdicts = _parse_model_verdicts(content)
         for index, card in enumerate(group):
-            verdict, issue = verdicts.get(index, ("PASS", ""))
+            # P4a（0.42.1 审计）：与文本层同口径——模型 JSON 漏掉 index
+            # 不再默认 PASS，计数进 model_verdict_missing（未审就是未审）。
+            if index not in verdicts:
+                result.model_verdict_missing += 1
+                continue
+            verdict, issue = verdicts[index]
             if verdict == "PASS":
                 continue
             changes = card.get("changes") or []
@@ -970,6 +1312,14 @@ def audit_writeback(store, game_dir: Path, out_dir: Path,
                 on_note=on_note)
             result.model_flags.extend(model_res.model_flags)
             result.model_unavailable = model_res.model_unavailable
+            # P4（0.42.1 审计）：行对截断/漏判定计数并入总结果——报告
+            # 必须如实呈现模型复核覆盖面，缺口不再被默认 PASS 吞掉。
+            # getattr 兜底：外部测试替身（SimpleNamespace 等）可能不带
+            # 新字段，缺字段按 0 处理（无缺口），不炸集成测试。
+            result.model_pairs_truncated += getattr(
+                model_res, "model_pairs_truncated", 0)
+            result.model_verdict_missing += getattr(
+                model_res, "model_verdict_missing", 0)
             # 第 2 层 b：二进制对象证据卡（M3）——与文本行对同模型、
             # 同四值结论、同软复核语义；模型不可用与文本层同口径阻断。
             if v2_result is not None:
@@ -982,6 +1332,8 @@ def audit_writeback(store, game_dir: Path, out_dir: Path,
                     result.model_unavailable or v2_res.model_unavailable)
                 result.v2_cards_audited = v2_res.v2_cards_audited
                 result.v2_cards_sampled = v2_res.v2_cards_sampled
+                result.model_verdict_missing += getattr(
+                    v2_res, "model_verdict_missing", 0)
         else:
             # 模型层是写回审计的第二道防线（专补确定性层无法判的语义/结构
             # 漏洞）。用户要求「写回审核不需要用户参与、不允许任何错误」：
@@ -1037,6 +1389,8 @@ def render_audit_report(result: AuditResult, game_name: str = "") -> str:
             issues.append(f"占位符丢失 {len(audit.placeholder_lost)} 条")
         if audit.ref_field_lost:
             issues.append(f"引用字段被译 {len(audit.ref_field_lost)} 条")
+        if audit.translation_missing:
+            issues.append(f"译文未落盘 {len(audit.translation_missing)} 条")
         lines.append(
             f"- [{status}] {audit.rel_path}"
             f"（{audit.changed_entries} 条译文）"
@@ -1044,6 +1398,8 @@ def render_audit_report(result: AuditResult, game_name: str = "") -> str:
         for p in audit.placeholder_lost:
             lines.append(f"    {p}")
         for p in audit.ref_field_lost:
+            lines.append(f"    {p}")
+        for p in audit.translation_missing:
             lines.append(f"    {p}")
         for d in audit.detail:
             lines.append(f"    {d}")
@@ -1053,10 +1409,32 @@ def render_audit_report(result: AuditResult, game_name: str = "") -> str:
         for rel, verdict, issue in result.model_flags:
             lines.append(f"- {rel} [{verdict}] {issue}")
     if result.v2_cards_audited or result.v2_cards_sampled:
+        cards_uncovered = result.v2_cards_sampled
+        ratio = (cards_uncovered /
+                 (result.v2_cards_audited + cards_uncovered)) if (
+            result.v2_cards_audited + cards_uncovered) else 0.0
         lines += ["",
                   f"二进制对象证据卡复核：送审 {result.v2_cards_audited} 张"
-                  + (f"（超上限截断 {result.v2_cards_sampled} 张）"
+                  + (f"（超上限截断 {result.v2_cards_sampled} 张未送审）"
                      if result.v2_cards_sampled else "")]
+        # P4b（0.42.1 审计）：截断卡是覆盖缺口——超半数未审即如实
+        # WARN（证据卡多数破坏也未被抽中，人工需知情）；抽样本身是
+        # 刻意的成本控制，不升级 needs_rewrite（硬闸门仍留给确定性层
+        # 与 model_unavailable），但缺口必须进报告不许静默。
+        if result.v2_cards_sampled and ratio > 0.5:
+            lines.append(
+                f"警告：证据卡 {ratio:.0%} 未送审（超半数），"
+                "二进制语义复核覆盖不足，发布前请人工抽查写回产物")
+    # P4a/P4c（0.42.1 审计）：行级覆盖缺口如实呈现——模型 JSON 漏判的
+    # 行对/卡、单文件超上限截断的行，都不允许被「全 PASS」表象掩盖
+    if result.model_verdict_missing:
+        lines += ["",
+                  f"警告：模型输出漏判 {result.model_verdict_missing} 条"
+                  "（送审但 JSON 缺 index，未审不等于 PASS，请人工抽查）"]
+    if result.model_pairs_truncated:
+        lines += ["",
+                  f"警告：{result.model_pairs_truncated} 行差异超单文件上限"
+                  "被抽样截断、未送模型语义复核（确定性结构审计仍全量覆盖）"]
     if result.model_unavailable:
         lines += ["", "审校模型复核：模型服务不可用——审计覆盖有缺口，"
                   "已阻断发布（model_unavailable）"]

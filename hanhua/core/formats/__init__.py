@@ -42,19 +42,29 @@ def detect_eol(raw: bytes) -> str:
     return "\n"
 
 
-def apply_format_text(fmt: str, entries, text: str, meta: dict) -> str:
+def apply_format_text(fmt: str, entries, text: str, meta: dict,
+                      skipped: set[str] | None = None) -> str:
     """按格式名把译文渲染回文本（writer 与 zip 内层共用）。
 
     meta 需含 csv 的 delimiter/target_col 等格式写回参数。
+
+    skipped（0.42.1 假记账根治，P1a）：可选集合出参——apply 层**未被
+    实际应用**的条目 key_path 收集于此（key_style/键字段跳过、目标值
+    不匹配、行号/行集失效等静默丢弃路径全量暴露）。调用方（writer/
+    审计）据此逐条记账，杜绝「从未落盘却记 written」的假账——审计
+    通过但游戏里是英文的确定性路径。不支持该出参的格式（txt/yaml/
+    xml/kv/po/subtitle/ink_yarn 的行级键参数在条目 meta 内自带，跳过
+    场景由提取期结构判定覆盖）不传入；json/csv 是静默跳过的实证高发
+    格式（Rendezvous 漏 158 行 / key_style 误记账）。
     """
     from hanhua.core.formats import (csv_format, json_format, txt_format,
                                      xml_format, yaml_format, subtitle_format,
                                      po_format, ink_yarn_format)
     if fmt == "kv":
         from hanhua.core.formats.kv_format import apply_kv
-        return apply_kv(entries, text)
+        return apply_kv(entries, text, skipped=skipped)
     if fmt == "json":
-        return json_format.apply_json(entries, text)
+        return json_format.apply_json(entries, text, skipped=skipped)
     if fmt == "csv":
         suffix = meta.get("source_suffix")
         # delimiter 三级取值：file 级 meta → 条目级 meta（B16c 实证
@@ -80,7 +90,8 @@ def apply_format_text(fmt: str, entries, text: str, meta: dict) -> str:
                 if getattr(e, "meta", {}).get("target_col") is not None:
                     tc = e.meta["target_col"]
                     break
-        return csv_format.apply_csv(entries, text, delimiter, "zh-CN", tc)
+        return csv_format.apply_csv(entries, text, delimiter, "zh-CN", tc,
+                                    skipped=skipped)
     if fmt == "xml":
         return xml_format.apply_xml(entries, text)
     if fmt == "yaml":

@@ -1841,9 +1841,16 @@ class Project:
                     "与扫描清单不一致，已拒绝写回")
             self._verify_copied_il2cpp_inputs(fingerprint, staging)
             _emit_writeback_stage(stage_cb, "patching", "正在写入静态译文")
+            # P3（0.42.1）：文本路径逐条记账——write_back_text 的可选
+            # result 出参把 key_style 置空/apply 层静默跳过逐条记
+            # rejected（纯文本路径假账根治，P1a 修的是 TextAsset 结构化
+            # 分支），与 v2 的 WriteResult 合并进 writer_outcome 闸门。
+            from hanhua.core.unity.writer import WriteResult as _TextWriteResult
+            text_result = _TextWriteResult()
             n_text = write_back_text(
                 self.store, self.game_dir, staging,
-                normalize_fallback_punctuation=active_font_config.enabled)
+                normalize_fallback_punctuation=active_font_config.enabled,
+                result=text_result)
             if progress_cb:
                 progress_cb(copy_total + 1, progress_total)
             # 扫描/写回同源生成器（Mono typeless bundle 写回必须能
@@ -1855,6 +1862,11 @@ class Project:
             # 分诊层不参与，写回行为与 0.38.0 一致——Lite 通道/模型未装
             # 环境零变化）。在场但批内失败由分诊层内部 fail-closed
             # （review 保守跳过），不在此处预先吞掉。
+            # P6c（0.42.1 审计）：triage_service 刻意保持常量 None——本项目
+            # 只通过 app_dir 走 ReviewModelService 自探测（GIL/生命周期归
+            # writer 内部管理），service 直注仅保留给测试/外部编排（见
+            # writer.write_back_v2 形参注释）。保留形参是为 API 兼容，
+            # 不是遗漏。
             triage_service = None
             triage_app_dir = None
             try:
@@ -1999,9 +2011,15 @@ class Project:
             # P0-2：rejected 阻断默认发布（用户明确确认才放行）；
             # truncated 是容量内部分翻译（主体+省略号已写入），进报告
             # WARN 不阻断——1 条超长译文不应拖垮整场写回（taxes 实证）
+            # P3（0.42.1）：文本路径 rejected 并入同一闸门（同口径
+            # note_rejected——key_style 置空/apply 静默跳过也是「有条目
+            # 没写上」，默认发布必须被拦下来让用户确认）。
             rejected_entries = [
                 {"locator": item.locator, "reason": item.reason}
                 for item in writer_outcome.rejected
+            ] + [
+                {"locator": item.locator, "reason": item.reason}
+                for item in text_result.rejected
             ]
             truncated_items = list(getattr(v2, "truncated_items", ()) or ())
             # 写回逻辑层审计数据（logic_audit：写回前敏感形态 / raw_expansions：
@@ -2043,6 +2061,10 @@ class Project:
                     "written": writer_outcome.written,
                     "rejected": rejected_entries,
                     "truncated": writer_outcome.truncated,
+                    # P3：文本路径逐条记账（纯文本 write_back 的 rejected/
+                    # written——与 v2 writer_outcome 并列呈现，报告统一口径）
+                    "text_attempted": text_result.attempted,
+                    "text_written": text_result.entries,
                 },
                 "rejected_entries": rejected_entries,
                 "truncated_entries": truncated_items,
