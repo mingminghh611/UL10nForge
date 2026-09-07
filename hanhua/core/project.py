@@ -1887,9 +1887,16 @@ class Project:
             # C4：写回侧拒绝的条目静态层同样保留原文（写不进的对象里往往
             # 是键清单/类型描述等结构串），原文同样并入排除表——拒绝本身
             # 仍走 rejected 闸门阻断默认发布，这里只补插件侧防断链。
+            # W5（2026-09-07 按键失灵根治·可疑点1）：文本路径（kv/json/
+            # csv/txt）的 rejected 同样要进排除表——text_result.rejected_sources
+            # 此前被漏掉（只并了 v2 两个集合），key_style 置空/apply 层
+            # 静默跳过的条目静态层是原文，但插件翻译表里仍有其中文 →
+            # 运行时被 ApplyExactTranslation 换中文 → 点击逻辑按英文
+            # 比较断链（「能点但无反应」）。
             reverted_sources = (
                 set(v2.logic_reverted_sources)
-                | set(getattr(v2, "rejected_sources", ()) or ()))
+                | set(getattr(v2, "rejected_sources", ()) or ())
+                | set(getattr(text_result, "rejected_sources", ()) or ()))
             if progress_cb:
                 progress_cb(copy_total + 2, progress_total)
             _emit_writeback_stage(stage_cb, "runtime_payload", "正在部署中文字体")

@@ -856,32 +856,66 @@ def _verify_saved_bundle(
     verifier.path = str(_search_root)
     try:
         verifier.load([str(path)])
-        actual: dict[tuple[str, int], bytes] = {}
-        actual_objects = {}
+        # E5（2026-09-07 内存暴涨复现）：流式指纹校验——绝不把整容器
+        # 每个对象的全字节同时收进 dict（drova level bundle 实测峰值
+        # 13GB、系统内存 50-90% 反复横跳）。非目标对象只需要
+        # (len, sha256)（语义不变：对象集合恒等 + 非目标字节恒等）；
+        # 仅 expected_raw_by_path_id 命中的目标对象保留全字节做逐字节
+        # 比对（它们同时只有被打补丁的少数对象）。
+        actual_sizes: dict[object, int] = {}
+        actual_digests: dict[object, bytes] = {}
+        actual_objects: dict[object, object] = {}
+        patched_keys = {
+            key if isinstance(key, tuple) else None
+            for key in expected_raw_by_path_id}
+        patched_keys.discard(None)
+        # 兼容旧形态（dict[int, bytes]：单文件键只有 path_id）——
+        # 按对象重算指纹时统一走 (size, digest) 双轨
+        int_keys = {
+            key for key in expected_raw_by_path_id
+            if not isinstance(key, tuple)}
+        actual_raw_keep: dict[object, bytes] = {}
         for obj in verifier.objects:
             key = _object_identity(obj)
-            if key not in actual:
-                actual[key] = obj.get_raw_data()
-                actual_objects[key] = obj
+            if key in actual_sizes:
+                continue
+            try:
+                raw = obj.get_raw_data()
+            except Exception:  # noqa: BLE001
+                continue
+            actual_sizes[key] = len(raw)
+            actual_digests[key] = hashlib.sha256(raw).digest()
+            actual_objects[key] = obj
+            # 目标对象（或旧形态单文件键命中）才保留全字节
+            if (key in patched_keys
+                    or (int_keys and key[1] in int_keys)):
+                actual_raw_keep[key] = raw
         missing: list[object] = []
         mismatched: list[object] = []
         for key, expected in expected_raw_by_path_id.items():
-            actual_key = key if isinstance(key, tuple) else next(
-                (candidate for candidate in actual if candidate[1] == key), None)
-            if actual_key is None or actual_key not in actual:
+            if isinstance(key, tuple):
+                actual_key = key
+            else:
+                actual_key = next(
+                    (candidate for candidate in actual_sizes
+                     if candidate[1] == key), None)
+            actual_raw = (actual_raw_keep.get(actual_key)
+                          if actual_key is not None else None)
+            if actual_key is None or actual_raw is None:
                 missing.append(key)
-            elif actual[actual_key] != expected:
+            elif actual_raw != expected:
                 mismatched.append(key)
         if baseline_hashes is not None:
-            if set(actual) != set(baseline_hashes):
-                missing.extend(sorted(set(baseline_hashes) ^ set(actual)))
+            if set(actual_sizes) != set(baseline_hashes):
+                missing.extend(sorted(set(baseline_hashes) ^ set(actual_sizes)))
             expected_hashes = dict(baseline_hashes)
             for key, expected in expected_raw_by_path_id.items():
                 if isinstance(key, tuple):
                     expected_hashes[key] = (len(expected), hashlib.sha256(expected).digest())
             for key, (size, digest) in expected_hashes.items():
-                raw = actual.get(key)
-                if raw is None or len(raw) != size or hashlib.sha256(raw).digest() != digest:
+                if (key not in actual_sizes
+                        or actual_sizes[key] != size
+                        or actual_digests[key] != digest):
                     if key not in mismatched:
                         mismatched.append(key)
         for key in (set((expected_typetree_values or {}))
@@ -1685,7 +1719,10 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
             # 按需调用；自动修复需完整解压 uncompressed，成本高且
             # 无实测需求——见 bundle_crc.py 说明）
             try:
-                _raw = saved.read_bytes()
+                # E5：流式读 header——不整文件 read_bytes（大 bundle
+                # 再多一份全字节驻留）；校验字段只涉及头部前 ~1KB
+                with saved.open("rb") as _fh:
+                    _raw = _fh.read(4096)
                 from hanhua.core.unity.bundle_crc import (
                     checksum_header_offset, read_checksums,
                     verify_checksums)

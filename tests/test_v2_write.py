@@ -1225,6 +1225,69 @@ def test_write_all_merges_rejected_sources_into_exclude(monkeypatch):
     assert seen_exclude == {"moveForward", "Settings"}
 
 
+def test_write_all_merges_text_path_rejected_into_exclude(monkeypatch):
+    """W5（2026-09-07 按键失灵根治·可疑点1）：文本路径（kv/json/csv/txt）
+    write_back 的 rejected 同样并入运行时排除表——此前只并了 v2 的
+    logic_reverted/rejected 两个集合，text_result.rejected_sources 被漏掉：
+    key_style 置空/apply 层静默跳过的条目静态层保留原文，但插件翻译表里
+    仍有其中文 → 运行时 ApplyExactTranslation 换中文 → 点击逻辑按英文
+    比较断链（「能点但无反应」）。"""
+    game_dir = _make_tree()
+    proj = Project.open_game_dir(game_dir, Path(tempfile.mkdtemp()) / "app")
+    proj.scan()
+    runtime_entry = next(row for row in proj.store.get_entries()
+                         if row["status"] == "pending")
+    runtime_meta = json.loads(runtime_entry["meta"] or "{}")
+    runtime_meta["disposition"] = "translate"
+    proj.store.upsert_entries([{
+        "file_id": runtime_entry["file_id"],
+        "key_path": runtime_entry["key_path"],
+        "original": runtime_entry["original"],
+        "meta": runtime_meta,
+    }])
+    proj.store.set_manual(
+        runtime_entry["file_id"], runtime_entry["key_path"], "已翻译")
+
+    v2_result = WriteResult(files=0, entries=0)
+    v2_result.logic_reverted_sources.add("moveForward")   # v2 语义回退
+
+    def capture_v2(store, game_dir, staging, typetree_generator=None,
+                   triage_service=None, triage_app_dir=None):
+        return v2_result
+
+    real_text_write = text_writer.write_back
+
+    def capture_text(store, game_dir, staging, **kwargs):
+        # 真实写回照常执行（重开验证需要译文落盘），再叠加一条文本路径
+        # 拒绝记账：key_style 置空形态（真实形态之一）——静态层保留原文，
+        # 插件侧必须排除
+        n = real_text_write(store, game_dir, staging, **kwargs)
+        result = kwargs.get("result")
+        if result is not None:
+            result.note_rejected(
+                {"original": "TextPathKey", "translation": "文本键",
+                 "meta": "{}"}, "text_key_style_blank")
+        return n
+
+    seen_exclude = None
+    font_result = FontInstallResult(
+        installed=True, filename="test-font.ttf")
+
+    def install(game, staging, config, *, translations, exclude,
+                player_root=None, tmp_bundle=None):
+        nonlocal seen_exclude
+        seen_exclude = set(exclude)
+        return font_result
+
+    monkeypatch.setattr("hanhua.core.project.write_back_v2", capture_v2)
+    monkeypatch.setattr("hanhua.core.project.write_back_text", capture_text)
+    monkeypatch.setattr("hanhua.core.font.pipeline.install_font_override", install)
+
+    proj.write_all(allow_partial=True)
+
+    assert seen_exclude == {"moveForward", "TextPathKey"}
+
+
 # ── 写回 C8：占位符防线覆盖命名占位符 {name} ──────────────────────
 
 def test_format_placeholder_intact_named_placeholder(tmp_path):

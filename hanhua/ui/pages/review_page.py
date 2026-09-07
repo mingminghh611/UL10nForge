@@ -75,16 +75,19 @@ def _needs_review(meta: dict) -> bool:
 def _display_status(row: dict) -> str:
     """状态列显示：审核态优先（#47 全量审校后状态真相在终态而非机械态）。
 
-    优先级：已重译（重译收敛待人工确认）→ 已通过（APPROVED 系）→
+    优先级：已通过（APPROVED 系）→ 已重译（重译收敛待人工确认）→
     待审核（未收敛终态）→ 机械状态。修复「受限/已翻译」无法区分
     BLOCKED/待确认的显示盲区（原状态列只有 4 个机械态）。
+    C17 顺序修正（2026-09-07）：APPROVED 优先于 retranslated——重译
+    收敛写 APPROVED 后 retranslated 标记保留（追溯证据），先查
+    retranslated 会让已通过行永远显示「已重译」。
     """
     meta = _row_meta(row)
-    if meta.get("retranslated"):
-        return "retranslated"
     outcome = meta.get("review_outcome")
     if outcome in ("APPROVED", "APPROVED_MINOR"):
         return "approved"
+    if meta.get("retranslated"):
+        return "retranslated"
     if outcome in _REVIEW_PENDING_OUTCOMES:
         return "needs_review"
     return row["status"]
@@ -718,8 +721,15 @@ class ReviewPage(QWidget):
         # False 且 status!=translated 被永久禁用，最该审的反而审不了。
         # 放宽：translated 用当前译文、blocked 用 rejected_candidate 送审。
         candidate = row["translation"] or _row_meta(row).get("rejected_candidate")
+        # C17（2026-09-07 审校误阻断根治）：APPROVED 系（含人工终态）
+        # 禁用「重新审核」——force_send 单条复审会被 4B 非确定性下判为
+        # NEEDS_REVISION，好译文没有人工干预无法恢复（RC1 的单条通道
+        # 版）。终态改判只走人工编辑（apply_manual_correction）。
+        outcome = _row_meta(row).get("review_outcome")
+        terminal_approved = outcome in ("APPROVED", "APPROVED_MINOR")
         self.review_btn.setEnabled(
             not self._review_running and bool(candidate)
+            and not terminal_approved
             and row["status"] in ("translated", "blocked"))
         self.detail_context.setText(self._context_text(meta))
         self.detail_reason.setPlainText(self._quality_text(row, meta))

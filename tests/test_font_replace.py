@@ -15,6 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from UnityPy.exceptions import TypeTreeError
+
 from hanhua.core.models import FontConfig
 from hanhua.core.unity.font_replace import (
     TmpBundlePayload,
@@ -369,6 +371,122 @@ def test_tmp_covers_required_missing_codepoint():
     # 字形很多、只是缺需求集里的生僻字——样本启发式会误判已覆盖
     assert _tmp_covers_required(tree, {ord(c) for c in "继续游戏饕"}) is False
     assert _tmp_covers_required(tree, {ord("X")}) is False
+
+
+# ── E6：TMP 候选预筛（节点树特征字段，不做 body 解析） ──
+
+class _Node:
+    def __init__(self, name, children=()):
+        self.m_Name = name
+        self.m_Children = list(children)
+
+
+class _PrescreenObj:
+    """预筛桩：节点树可控 + 可选头部解析失败。"""
+
+    def __init__(self, node=None, head_raises=False, no_api=False):
+        self._node = node
+        self._head_raises = head_raises
+        if not no_api:
+            self._get_typetree_node = self._getter
+        self.serialized_type = SimpleNamespace(
+            node=node) if node is not None else SimpleNamespace(node=None)
+
+    def _getter(self):
+        if self._node is None:
+            raise TypeTreeError("no nodes")
+        return self._node
+
+    def parse_monobehaviour_head(self):
+        if self._head_raises:
+            raise ValueError("head parse failed")
+        return SimpleNamespace(m_Script=SimpleNamespace(
+            m_FileID=0, m_PathID=42))
+
+
+def test_prescreen_node_tree_tmp2_candidate():
+    """节点树根含 m_GlyphTable → 候选（放行 body 解析）。"""
+    from hanhua.core.unity.font_replace import _tmp_candidate_prescreen
+    obj = _PrescreenObj(node=_Node("MonoBehaviour", [
+        _Node("m_Name"), _Node("m_GlyphTable"), _Node("m_CharacterTable")]))
+    assert _tmp_candidate_prescreen(obj, {}) is True
+
+
+def test_prescreen_node_tree_tmp1_candidate():
+    from hanhua.core.unity.font_replace import _tmp_candidate_prescreen
+    obj = _PrescreenObj(node=_Node("MonoBehaviour", [
+        _Node("m_fontInfo"), _Node("m_glyphInfoList")]))
+    assert _tmp_candidate_prescreen(obj, {}) is True
+
+
+def test_prescreen_node_tree_non_tmp_rejected():
+    """非 TMP 类（如 DialogueSystem 节点）→ 拒绝——这是内存根治主路径：
+    boost body 解析（GB 级瞬时分配 + 9s）只发生在候选对象上。"""
+    from hanhua.core.unity.font_replace import _tmp_candidate_prescreen
+    obj = _PrescreenObj(node=_Node("MonoBehaviour", [
+        _Node("m_GameObject"), _Node("m_position"), _Node("ports")]))
+    assert _tmp_candidate_prescreen(obj, {}) is False
+
+
+def test_prescreen_no_node_rejected():
+    """节点树不可得（generator 失败/无 typetree）→ 拒绝——read_typetree
+    对同一对象同样抛异常，语义等价（两边都跳过）。"""
+    from hanhua.core.unity.font_replace import _tmp_candidate_prescreen
+    obj = _PrescreenObj(node=None)
+    assert _tmp_candidate_prescreen(obj, {}) is False
+
+
+def test_prescreen_no_api_falls_back_true():
+    """对象无 _get_typetree_node（测试桩/旧 UnityPy）→ 回退全量解析，
+    旧行为不变（不因预筛缺 API 而漏检）。"""
+    from hanhua.core.unity.font_replace import _tmp_candidate_prescreen
+    obj = _PrescreenObj(node=None, no_api=True)
+    assert _tmp_candidate_prescreen(obj, {}) is True
+
+
+def test_prescreen_script_memo_cache():
+    """同类对象按 m_Script 签名 memo：第二次不做 deref/get_nodes。
+    头部解析失败的对象不缓存（返回 True 回退全量解析，不误杀）。"""
+    from hanhua.core.unity.font_replace import _tmp_candidate_prescreen, \
+        _mono_script_key
+    calls = []
+
+    class _CountingObj(_PrescreenObj):
+        def _getter(self):
+            calls.append(1)
+            return super()._getter()
+
+    cache: dict = {}
+    node = _Node("MonoBehaviour", [_Node("m_GlyphTable")])
+    a = _CountingObj(node=node)
+    a.serialized_type = SimpleNamespace(node=None)   # 强制走 generator 路径
+    b = _CountingObj(node=node)
+    b.serialized_type = SimpleNamespace(node=None)
+    assert _tmp_candidate_prescreen(a, cache) is True
+    assert _tmp_candidate_prescreen(b, cache) is True
+    assert len(calls) == 1                            # memo 命中
+    # 头部解析失败 → key None → 不缓存，对象回退全量解析
+    head_fail = _PrescreenObj(node=node, head_raises=True)
+    head_fail.serialized_type = SimpleNamespace(node=None)
+    assert _mono_script_key(head_fail) is None
+
+
+def test_prescreen_uses_serialized_type_node_directly():
+    """内嵌 typetree 在场 → 直接查节点树，不触碰 generator（serialized_
+    type.node 即 _get_typetree_node 的首选来源，判据同源）。"""
+    from hanhua.core.unity.font_replace import _tmp_candidate_prescreen
+    calls = []
+
+    class _CountingObj(_PrescreenObj):
+        def _getter(self):
+            calls.append(1)
+            return super()._getter()
+
+    obj = _CountingObj(node=_Node("MonoBehaviour", [
+        _Node("m_Name"), _Node("m_GlyphTable")]))
+    obj.serialized_type = SimpleNamespace(node=obj._node)
+    assert _tmp_candidate_prescreen(obj, {}) is True
+    assert calls == []                                # 未走 generator
 
 
 # ── Phase 2：容器级消费者记录（replace_tmp_fonts_in_container） ──
@@ -771,3 +889,149 @@ def test_partial_hit_is_incomplete_not_pass(tmp_path, monkeypatch):
     assert result.overall == BLOCKED.name
     assert result.incomplete is True
     assert "未覆盖" in result.summary_text()
+
+
+# ── 0.45.0 全对象基线验证（写回安全闸门：除允许变化的对象外，容器
+#    内任何对象不得增删或字节变化） ─────────────────────────────
+
+class _RawTmpObj(_FakeTmpObj):
+    """带原始字节的对象桩：get_raw_data 返回构造时给定的 bytes。"""
+
+    def __init__(self, path_id, tree, raw: bytes, type_name="MonoBehaviour",
+                 assets_file=None):
+        super().__init__(path_id, tree, type_name, assets_file)
+        self._raw = raw
+
+    def get_raw_data(self):
+        return self._raw
+
+
+def _baseline_objs():
+    """字体对象（将被替换）+ 图集 + 无关对象（必须字节恒等）。
+
+    payload.atlas_texture 给出目标尺寸/格式，_patch_atlas_texture 会把它
+    与游戏图集的 m_Name/m_TextureSettings 合并——图集树不需要预置字段
+    （与其它容器测试同形态）。
+    """
+    payload = _full_payload(atlas_texture={
+        "m_Width": 8, "m_Height": 8, "m_TextureFormat": 62})
+    game = {"m_Name": "g", "m_CharacterTable": [
+        {"m_Unicode": 0x41, "m_GlyphIndex": 0}],
+        "m_GlyphTable": [{"m_Index": 0, "m_GlyphRect": {}}],
+        "m_AtlasTextures": [{"m_FileID": 0, "m_PathID": 100}],
+    }
+    font = _RawTmpObj(1, game, b"font-original")
+    atlas = _RawTmpObj(100, {"m_Name": "a", "m_TextureSettings": {}},
+                       b"atlas-original", type_name="Texture2D")
+    bystander = _RawTmpObj(7, {"m_Name": "bystander"}, b"bystander-original")
+    return payload, game, font, atlas, bystander
+
+
+def test_object_baseline_pass_untouched(tmp_path, monkeypatch):
+    """非目标对象字节恒等 → 基线验证通过（不抛异常）。"""
+    import hanhua.core.unity.font_replace as fr
+    payload, game, font, atlas, bystander = _baseline_objs()
+    objs = [font, atlas, bystander]
+    bundle = tmp_path / "fonts.bundle"
+    bundle.write_bytes(b"x")
+    captured = {}
+
+    def fake_replace_and_swap(path, env, verify_fn=None):
+        # 重开容器返回同一批对象（font/atlas 已改、bystander 原样）
+        captured["verify_fn"] = verify_fn
+
+    monkeypatch.setattr(fr, "_replace_and_swap", fake_replace_and_swap)
+    monkeypatch.setattr(fr, "_dispose_environment", lambda *a, **kw: None)
+    import UnityPy
+    monkeypatch.setattr(UnityPy, "Environment", lambda: _FakeTmpEnv(objs))
+
+    replaced, skipped, consumers = fr.replace_tmp_fonts_in_container(
+        bundle, payload, required={0x4E00})
+    assert replaced == 1
+    # 同一批对象重开：bystander 未动 → 基线比对通过
+    captured["verify_fn"](bundle)
+
+
+def test_object_baseline_rejects_bystander_change(tmp_path, monkeypatch):
+    """非目标对象字节变化 → ValueError（整容器重建引入非预期改动）。"""
+    import hanhua.core.unity.font_replace as fr
+    payload, game, font, atlas, bystander = _baseline_objs()
+    objs = [font, atlas, bystander]
+    bundle = tmp_path / "fonts.bundle"
+    bundle.write_bytes(b"x")
+    captured = {}
+
+    def fake_replace_and_swap(path, env, verify_fn=None):
+        captured["verify_fn"] = verify_fn
+
+    monkeypatch.setattr(fr, "_replace_and_swap", fake_replace_and_swap)
+    monkeypatch.setattr(fr, "_dispose_environment", lambda *a, **kw: None)
+    import UnityPy
+    monkeypatch.setattr(UnityPy, "Environment", lambda: _FakeTmpEnv(objs))
+
+    replaced, _, _ = fr.replace_tmp_fonts_in_container(
+        bundle, payload, required={0x4E00})
+    assert replaced == 1
+    # 容器重建把 bystander 字节改了 → 基线比对必须拒绝
+    bystander._raw = b"bystander-TAMPERED"
+    with pytest.raises(ValueError, match="非目标对象字节变化"):
+        captured["verify_fn"](bundle)
+
+
+def test_object_baseline_rejects_object_set_change(tmp_path, monkeypatch):
+    """对象集合变化（多/少对象）→ ValueError（结构级非预期改动）。"""
+    import hanhua.core.unity.font_replace as fr
+    payload, game, font, atlas, bystander = _baseline_objs()
+    objs = [font, atlas, bystander]
+    bundle = tmp_path / "fonts.bundle"
+    bundle.write_bytes(b"x")
+    captured = {}
+
+    def fake_replace_and_swap(path, env, verify_fn=None):
+        captured["verify_fn"] = verify_fn
+
+    monkeypatch.setattr(fr, "_replace_and_swap", fake_replace_and_swap)
+    monkeypatch.setattr(fr, "_dispose_environment", lambda *a, **kw: None)
+    import UnityPy
+    monkeypatch.setattr(UnityPy, "Environment", lambda: _FakeTmpEnv(objs))
+
+    replaced, _, _ = fr.replace_tmp_fonts_in_container(
+        bundle, payload, required={0x4E00})
+    assert replaced == 1
+    # 容器重建丢了一个对象 → 基线比对必须拒绝
+    saved_objs = _FakeTmpEnv([font, atlas])   # bystander 消失
+    monkeypatch.setattr(UnityPy, "Environment", lambda: saved_objs)
+    with pytest.raises(ValueError, match="容器对象集合变化"):
+        captured["verify_fn"](bundle)
+
+
+def test_object_baseline_legacy_path(tmp_path, monkeypatch):
+    """legacy Font 路径同样走全对象基线：Font 本身豁免、其余恒等。"""
+    import hanhua.core.unity.font_replace as fr
+    payload = _full_payload()
+    ttf_bytes = _make_font_ttf()
+    font_tree = {"m_FontData": list(ttf_bytes), "m_FontSize": 16,
+                 "m_LineSpacing": 1.0}
+    font = _RawTmpObj(1, font_tree, b"font-original", type_name="Font")
+    bystander = _RawTmpObj(7, {"m_Name": "bystander"}, b"bystander-original")
+    objs = [font, bystander]
+    bundle = tmp_path / "level"
+    bundle.write_bytes(b"x")
+    captured = {}
+
+    def fake_replace_and_swap(path, env, verify_fn=None):
+        captured["verify_fn"] = verify_fn
+
+    monkeypatch.setattr(fr, "_replace_and_swap", fake_replace_and_swap)
+    monkeypatch.setattr(fr, "_dispose_environment", lambda *a, **kw: None)
+    import UnityPy
+    monkeypatch.setattr(UnityPy, "Environment", lambda: _FakeTmpEnv(objs))
+
+    replaced, _, _ = fr.replace_legacy_fonts_in_container(bundle, ttf_bytes)
+    assert replaced == 1
+    # bystander 未动 → 通过
+    captured["verify_fn"](bundle)
+    # bystander 被动 → 拒绝
+    bystander._raw = b"tampered"
+    with pytest.raises(ValueError, match="非目标对象字节变化"):
+        captured["verify_fn"](bundle)

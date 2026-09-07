@@ -975,6 +975,39 @@ def _failed_reason(entry: TextEntry) -> str:
     return f"机械质量门最终失败（{detail}）且无候选译文可诊断"
 
 
+# C17 终态豁免（2026-09-07 审校误阻断根治）：审校页「已通过」文本被
+# 反复阻断的根因不在判定内容（C10/C11/C15/C16 已修），而在收集层——
+# translate_page 每次点击翻译后恒以全量条目 + max_send_rate=1.0 调
+# review_entries，收集循环不看 review_outcome，已 APPROVED / 人工修正
+# 的终态条目每次都被重新送 4B；4B 非确定性使部分条目被判 MAJOR/
+# CRITICAL → 反馈重译静默替换好译文 → 不收敛 BLOCKED 清空译文——
+# 「通过审核的正常文本被阻断」。终态条目不再自动重审：
+# - APPROVED / APPROVED_MINOR：已判定可发布，重审只有下行风险；
+# - NEEDS_REVISION / BLOCKED：已走完重译收敛闭环（≤2 轮），待人工，
+#   重审只是重复同一闭环；
+# - 人工终态（review_level=MANUAL / quality_source=manual_api /
+#   manual_corrected）：人改即终局（apply_manual_correction 语义）。
+# REVIEW_ERROR / CANCELLED（审核本身未完成）与 PENDING（新译文）
+# 照常送审——豁免只针对「已有真实判定」的终态。任何新译文路径
+# （重译/直填/人工修正）都会先清或重写 review_outcome，豁免不会
+# 挡住新证据。人工「重新审核」按钮（force_send）不受豁免限制。
+_REVIEW_EXEMPT_OUTCOMES = frozenset(
+    {APPROVED, APPROVED_MINOR, NEEDS_REVISION, BLOCKED})
+
+
+def _review_terminal_exempt(meta) -> bool:
+    """终态豁免判定：approved 系 / 待人工终态 / 人工终态不自动重审。"""
+    if not isinstance(meta, dict):
+        return False
+    if meta.get("review_outcome") in _REVIEW_EXEMPT_OUTCOMES:
+        return True
+    if (meta.get("review_level") == "MANUAL"
+            or meta.get("quality_source") == "manual_api"
+            or "manual_corrected" in meta):
+        return True
+    return False
+
+
 # 机械失败原因 → 重译修正指引（2026-08-15 minato 实证：4B 判 PASS 但
 # 机械门 failed 的条目强制重译时，反馈只有干巴巴的原因列表——模型
 # 不知道具体修什么，重译输出再被同一机械门拒 → BLOCKED 留人工）
@@ -1065,6 +1098,15 @@ def review_entries(entries, glossary, *, game_name: str = "",
     item_entries: list[TextEntry] = []
     failed_without_candidate: list[TextEntry] = []
     for e in entries:
+        # C17 终态豁免（2026-09-07 审校误阻断根治）：APPROVED 系 /
+        # 待人工终态（NEEDS_REVISION/BLOCKED）/ 人工终态（MANUAL）不再
+        # 自动送审——4B 非确定性重判只会带来下行风险（好译文被 MAJOR →
+        # 反馈重译静默替换 → 不收敛 BLOCKED 清空译文）。force_send
+        # （人工「重新审核」按钮）不受豁免。REVIEW_ERROR / CANCELLED
+        # （审核未完成）与无 outcome（新译文）照常送审。
+        if not force_send and _review_terminal_exempt(e.meta):
+            summary["already_final"] = summary.get("already_final", 0) + 1
+            continue
         if e.status == "translated":
             if not e.translation or str(e.translation) == str(e.original):
                 continue                   # 回显跳过非审核对象

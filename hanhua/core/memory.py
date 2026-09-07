@@ -491,6 +491,10 @@ class ProjectStore:
         "review_level", "review_reason", "review_suggestion",
         "review_error_kind", "review_blocked_rounds", "rejected_candidate",
         "quality_reasons",
+        # C17（2026-09-07）：retranslated 标记同样要清——人工修正后
+        # 残留会让审校页显示「已重译」而非人工终态（_display_status
+        # 在 APPROVED 之后查它，不清就永远错位显示）。
+        "retranslated",
     )
 
     def apply_manual_correction(self, file_id, key_path, translation) -> dict:

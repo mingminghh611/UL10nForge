@@ -353,6 +353,10 @@ def _clear_review_state(meta: dict) -> None:
                   "review_blocked_rounds", "rejected_candidate",
                   "quality_reasons", "review_issue"):
         meta.pop(field, None)
+    # C17（2026-09-07）：确定性重译覆盖写入前同样清 retranslated——
+    # 新译文落地后旧「已重译」标记是过期信号（与 _REVIEW_STATE_CLEAR
+    # 同步；review_outcome 已清，retranslated 不清会让审校页显示错位）。
+    meta.pop("retranslated", None)
 
 
 def _record_failure_attempt(entry: TextEntry, reason: str) -> None:

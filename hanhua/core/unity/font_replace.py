@@ -150,6 +150,86 @@ def _typetree_layout_version(tree: dict) -> str | None:
     return None
 
 
+#: TMP 布局特征字段（根级）：tmp2=m_GlyphTable，tmp1=m_glyphInfoList。
+_TMP_FIELD_NAMES = ("m_GlyphTable", "m_glyphInfoList")
+
+
+def _node_has_tmp_fields(node) -> bool:
+    """节点树根字段是否含 TMP 布局特征字段。"""
+    for child in getattr(node, "m_Children", None) or []:
+        if getattr(child, "m_Name", None) in _TMP_FIELD_NAMES:
+            return True
+    return False
+
+
+def _mono_script_key(obj):
+    """MonoBehaviour 的 m_Script 指针签名（预筛局部缓存键）。
+
+    同类对象的 m_Script PPtr 恒等——按 (assets_file id, FileID, PathID)
+    memo 可让同类对象只做一次 deref+get_nodes。缓存是调用方局部 dict，
+    env 存活期内 assets_file 对象被 env.files 持有、id 稳定，无复用风险。
+    头部解析失败返回 None（此时 read_typetree 同样失败，不缓存）。
+    """
+    try:
+        mb = obj.parse_monobehaviour_head()
+        pptr = getattr(mb, "m_Script", None)
+        if pptr is None:
+            return None
+        return (id(getattr(obj, "assets_file", None)),
+                int(getattr(pptr, "m_FileID", 0) or 0),
+                int(getattr(pptr, "m_PathID", 0) or 0))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _tmp_candidate_prescreen(obj, cache: dict | None = None) -> bool:
+    """MonoBehaviour 是否可能是 TMP 字体（不做 body 解析的预筛）。
+
+    E6 根因（drova 实证 2026-09-07）：字体阶段对每个 MonoBehaviour 全量
+    ``read_typetree``——UnityPyBoost 对部分游戏类（DialogueSystem.
+    DS_EndNode 等 NodePort 字典嵌套类）的 body 解析会误读数组长度，
+    构造 GB 级瞬时列表后以 EOFError 失败，单对象 2.4-8s；× 容器内全部
+    MonoBehaviour × 45 容器 × 2 遍（主遍历 + 重开验证）= 写回期间内存
+    50-90% 反复横跳（驻留 RSS 正常，纯瞬时分配振荡）。
+
+    预筛原理（语义等价，不退化漏检）：read_typetree 按节点树解析，产物
+    dict 的顶层键集合 == 节点树根字段名集合。节点树根字段无
+    m_GlyphTable/m_glyphInfoList 时解析产物必然也没有——与「全量解析后
+    _typetree_layout_version 判 None → 跳过」完全等价；节点树不可得
+    （_get_typetree_node 抛异常）时 read_typetree 必然同样抛异常，
+    两边都跳过。只有特征字段在场的候选对象才做 body 解析。
+
+    内嵌 typetree（serialized_type.node 在场）直接查节点树；typeless
+    bundle 走 generate_monobehaviour_node（头部固定布局解析 + m_Script
+    deref + get_nodes，均不触碰 body，实测毫秒级），并按脚本签名 memo。
+
+    返回 False=确定非候选（跳过）；True=候选或无法预筛（对象无
+    _get_typetree_node API——测试桩，回退全量解析，旧行为不变）。
+    """
+    getter = getattr(obj, "_get_typetree_node", None)
+    if getter is None:
+        return True
+    # 内嵌 typetree：节点树现成（与 ObjectReader._get_typetree_node 同判据）
+    st = getattr(obj, "serialized_type", None)
+    node = getattr(st, "node", None) if st is not None else None
+    if node:
+        return _node_has_tmp_fields(node)
+    # typeless：按脚本签名 memo（同类对象只 deref+get_nodes 一次）
+    key = _mono_script_key(obj) if cache is not None else None
+    if key is not None and key in cache:
+        return cache[key]
+    try:
+        node = getter()
+    except Exception:  # noqa: BLE001  # 节点树不可得 → read_typetree 同样失败
+        if key is not None:
+            cache[key] = False
+        return False
+    result = _node_has_tmp_fields(node)
+    if key is not None:
+        cache[key] = result
+    return result
+
+
 def _atlas_stream_meta(tree: dict) -> tuple[str, int, int]:
     """返回图集流 (path, offset, size)；无流数据时 path 为空。"""
     stream = tree.get("m_StreamData") or {}
@@ -393,9 +473,90 @@ def _replace_and_swap(path: Path, env, verify_fn=None) -> None:
                 _time.sleep(0.8)
 
 
+def _object_key(obj) -> tuple[str, int]:
+    """对象全局标识（资产文件名, path_id）。mock/无 assets_file 回退空名
+    （单文件 env 下所有对象同 key 由调用方 seen 去重兜底）。"""
+    assets_file = getattr(obj, "assets_file", None)
+    name = getattr(assets_file, "name", "") or "" if assets_file else ""
+    return str(name), int(obj.path_id)
+
+
+def _collect_baseline(env) -> dict[tuple[str, int], tuple[int, bytes]]:
+    """打补丁前采集全对象原始字节指纹（writer._patch_asset 同模型）。
+
+    写回安全核心口径：写回前后，除允许变化的对象外，游戏结构没有发生
+    非预期变化。container.save() 是整容器重建——旧验证只查被替换对象的
+    目标字段，整容器重建对非目标对象的任何改动（丢对象/改字节）都不会
+    被发现。此处为每个对象记 (size, sha256)，重开后全量比对。
+    get_raw_data 失败的对象跳过（与 writer 同容错——不可读基线不比对）。
+    """
+    import hashlib
+    baseline: dict[tuple[str, int], tuple[int, bytes]] = {}
+    for obj in env.objects:
+        key = _object_key(obj)
+        if key in baseline:
+            continue
+        try:
+            raw = obj.get_raw_data()
+        except Exception:  # noqa: BLE001
+            continue
+        if raw is None:
+            continue
+        baseline[key] = (len(raw), hashlib.sha256(raw).digest())
+    return baseline
+
+
+def _verify_object_baseline(verify, baseline: dict, patched_keys: set,
+                            saved: Path) -> None:
+    """重开容器后全对象基线比对（writer._verify_saved_bundle 同模型）。
+
+    两层检查：
+    1. 对象集合恒等——saved 容器里对象多了/少了都是结构变化，直接拒绝；
+    2. 非目标对象字节恒等——本次允许变化的只有 patched_keys（被替换的
+       Font/TMP/图集对象），其余任何对象的 (size, sha256) 必须与基线
+       完全一致，否则容器重建引入了非预期改动。
+
+    E5（2026-09-07 内存暴涨复现）：指纹流式采集——逐对象算 (size,
+    sha256) 即弃，绝不把整容器全对象字节同时收进 dict（大 level bundle
+    实测把进程推到 GB 级峰值）。语义不变：集合恒等 + 逐对象指纹恒等。
+    """
+    import hashlib
+    sizes: dict[object, int] = {}
+    digests: dict[object, bytes] = {}
+    for obj in verify.objects:
+        key = _object_key(obj)
+        if key in sizes:
+            continue
+        try:
+            raw = obj.get_raw_data()
+        except Exception:  # noqa: BLE001
+            continue
+        sizes[key] = len(raw)
+        digests[key] = hashlib.sha256(raw).digest()
+    if set(sizes) != set(baseline):
+        changed = sorted(set(baseline) ^ set(sizes))
+        raise ValueError(
+            f"容器对象集合变化（非预期结构改动）: {saved.name} "
+            f"差异对象数={len(changed)} 首个={changed[0] if changed else '?'}")
+    for key, (size, digest) in baseline.items():
+        if key in patched_keys:
+            continue
+        if key not in sizes or sizes[key] != size or digests[key] != digest:
+            raise ValueError(
+                f"非目标对象字节变化: {saved.name} {key} "
+                f"expected=({size}, {digest.hex()[:8]}…) "
+                f"actual=({sizes.get(key, '缺失')}, …)")
+
+
 def _verify_legacy_saved(saved: Path, ttf_bytes: bytes, replaced: int,
-                         source_dir: Path | None = None) -> None:
-    """重开临时容器验证全部 Font 的 m_FontData 均已被替换。"""
+                         source_dir: Path | None = None,
+                         baseline: dict | None = None,
+                         patched_keys: set | None = None) -> None:
+    """重开临时容器验证全部 Font 的 m_FontData 均已被替换。
+
+    0.45.0：baseline 给定时追加全对象基线比对——除被替换的 Font 对象外，
+    容器内任何对象不得增删或字节变化（整容器重建防非预期改动）。
+    """
     from UnityPy import Environment
     verify = Environment()
     # 临时副本同目录无兄弟文件——外部引用在原游戏目录解析
@@ -419,6 +580,9 @@ def _verify_legacy_saved(saved: Path, ttf_bytes: bytes, replaced: int,
             raise ValueError(
                 f"Font 替换重开验证不一致: {saved.name} "
                 f"replaced={replaced} matched={matched}")
+        if baseline is not None:
+            _verify_object_baseline(
+                verify, baseline, patched_keys or set(), saved)
     finally:
         _dispose_environment(verify)
 
@@ -449,6 +613,9 @@ def replace_legacy_fonts_in_container(
     ttf_chars: frozenset[int] = ttf_charset(ttf_bytes)
     try:
         env.load([str(path)])
+        # 打补丁前采集全对象字节基线（0.45.0 写回安全闸门）
+        baseline = _collect_baseline(env)
+        patched_keys: set[tuple[str, int]] = set()
         seen: set[tuple[str, str, int]] = set()
         for obj in env.objects:
             if obj.type.name != "Font":
@@ -460,6 +627,7 @@ def replace_legacy_fonts_in_container(
             try:
                 if _patch_font_object(env, obj, ttf_bytes):
                     replaced += 1
+                    patched_keys.add(_object_key(obj))
                     consumers.append(FontConsumer(
                         f"{path.name}#Font#{obj.path_id}", "legacy_font",
                         static_replaced=True, font_scalars=ttf_chars,
@@ -477,7 +645,8 @@ def replace_legacy_fonts_in_container(
         _replace_and_swap(
             path, env,
             verify_fn=lambda saved: _verify_legacy_saved(
-                saved, ttf_bytes, replaced, source_dir=source_dir),
+                saved, ttf_bytes, replaced, source_dir=source_dir,
+                baseline=baseline, patched_keys=patched_keys),
         )
     finally:
         _dispose_environment(env)
@@ -689,7 +858,11 @@ def replace_tmp_fonts_in_container(
     consumers: list[FontConsumer] = []
     try:
         env.load([str(path)])
+        # 打补丁前采集全对象字节基线（0.45.0 写回安全闸门）
+        baseline = _collect_baseline(env)
+        patched_keys: set[tuple[str, int]] = set()
         seen: set[tuple[str, str, int]] = set()
+        prescreen_cache: dict = {}
         for obj in env.objects:
             if obj.type.name != "MonoBehaviour":
                 continue
@@ -697,6 +870,11 @@ def replace_tmp_fonts_in_container(
             if key in seen:
                 continue
             seen.add(key)
+            # E6：节点树预筛——非 TMP 候选不做 body 解析（语义等价，
+            # 见 _tmp_candidate_prescreen；drova DS_EndNode 类 boost 解析
+            # 单对象 GB 级瞬时分配是内存振荡根因）
+            if not _tmp_candidate_prescreen(obj, prescreen_cache):
+                continue
             try:
                 tree = obj.read_typetree()
             except Exception:  # noqa: BLE001
@@ -757,6 +935,8 @@ def replace_tmp_fonts_in_container(
                 if changed:
                     obj.save_typetree(tree)
                 patched.append((obj, atlas_obj))
+                patched_keys.add(_object_key(obj))
+                patched_keys.add(_object_key(atlas_obj))
                 replaced += 1
                 consumers.append(FontConsumer(
                     cid, "tmp_font", static_replaced=True,
@@ -808,6 +988,8 @@ def replace_tmp_fonts_in_container(
             if changed:
                 obj.save_typetree(tree)
             patched.append((obj, atlas_obj))
+            patched_keys.add(_object_key(obj))
+            patched_keys.add(_object_key(atlas_obj))
             replaced += 1
             consumers.append(FontConsumer(
                 cid, "tmp_font", static_replaced=True,
@@ -821,7 +1003,8 @@ def replace_tmp_fonts_in_container(
             path, env,
             verify_fn=lambda saved: _verify_tmp_saved(
                 saved, payload, replaced, typetree_generator,
-                source_dir=source_dir))
+                source_dir=source_dir,
+                baseline=baseline, patched_keys=patched_keys))
     finally:
         _dispose_environment(env)
     return replaced, skipped, consumers
@@ -829,17 +1012,23 @@ def replace_tmp_fonts_in_container(
 
 def _verify_tmp_saved(saved: Path, payload: TmpBundlePayload, replaced: int,
                       typetree_generator: Any | None = None,
-                      source_dir: Path | None = None) -> None:
+                      source_dir: Path | None = None,
+                      baseline: dict | None = None,
+                      patched_keys: set | None = None) -> None:
     """重开临时容器验证 TMP 字形表 + 图集像素均已替换。
 
     只验字形数量会漏掉「元数据更新但流没写入」的假通过——旧实现正是如此
     （同尺寸分支只改 typetree 不写像素）。图集流数据必须逐字节等于
     payload.atlas_stream。
+
+    0.45.0：baseline 给定时追加全对象基线比对——除被替换的 TMP 对象
+    与其图集 Texture2D 外，容器内任何对象不得增删或字节变化。
     """
     verify = _make_env(typetree_generator, path=str(source_dir or saved.parent))
     try:
         verify.load([str(saved)])
         seen: set[tuple[str, str, int]] = set()
+        prescreen_cache: dict = {}
         matched = 0
         atlas_verified = 0
         for obj in verify.objects:
@@ -849,6 +1038,9 @@ def _verify_tmp_saved(saved: Path, payload: TmpBundlePayload, replaced: int,
             if key in seen:
                 continue
             seen.add(key)
+            # E6：与主遍历同一预筛——非 TMP 候选不做 body 解析
+            if not _tmp_candidate_prescreen(obj, prescreen_cache):
+                continue
             try:
                 tree = obj.read_typetree()
             except Exception:  # noqa: BLE001
@@ -878,12 +1070,11 @@ def _verify_tmp_saved(saved: Path, payload: TmpBundlePayload, replaced: int,
             raise ValueError(
                 f"TMP 图集像素验证不一致: {saved.name} "
                 f"replaced={replaced} atlas_verified={atlas_verified}")
+        if baseline is not None:
+            _verify_object_baseline(
+                verify, baseline, patched_keys or set(), saved)
     finally:
         _dispose_environment(verify)
-
-
-def _object_key(obj) -> tuple[str, int]:
-    return str(obj.assets_file.name), int(obj.path_id)
 
 
 # ── 整目录入口 ──────────────────────────────────────────────

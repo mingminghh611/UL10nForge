@@ -3,6 +3,7 @@
 覆盖：四态闸门评估、rejected/truncated 阻断默认发布与 allow_partial
 放行、source/target manifest 持久化、不可变字段集合收集与重开校验。
 """
+import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -619,6 +620,73 @@ def test_verify_saved_bundle_passes_when_immutable_intact(monkeypatch):
         Path("unused"),
         expected_raw_by_path_id={},
         expected_immutable_values={("x.assets", 7): immutable})
+
+
+class _StreamingBigObject:
+    """E5 回归夹具：大对象（2MB），get_raw_data 被追踪调用次数。"""
+
+    def __init__(self, raw: bytes, path_id: int):
+        self._raw = raw
+        self.assets_file = type("AssetFile", (), {"name": "big.assets"})()
+        self.path_id = path_id
+        self.type = type("ObjectType", (), {"name": "MonoBehaviour"})()
+        self.get_raw_data_calls = 0
+
+    def read_typetree(self):
+        return {"m_Name": "X"}
+
+    def get_raw_data(self):
+        self.get_raw_data_calls += 1
+        return self._raw
+
+
+def test_verify_saved_bundle_streaming_baseline_no_full_retention(monkeypatch):
+    """E5（2026-09-07 内存暴涨复现）：重开验证流式指纹——非目标对象只算
+    (len, sha256) 即弃，绝不同时持有整容器全字节（drova level bundle
+    实测 13GB 峰值 / 内存 50-90% 反复横跳）。语义不变：对象集合恒等 +
+    非目标对象指纹恒等 + 目标对象逐字节比对仍生效。
+    """
+    import UnityPy
+
+    baseline_raw = b"\x00" * (2 * 1024 * 1024)          # 2MB 非目标对象
+    patched_raw = b"\xff" * (2 * 1024 * 1024)           # 2MB 目标对象
+    big = _StreamingBigObject(baseline_raw, 1)
+    target = _StreamingBigObject(patched_raw, 2)
+    env = _FakeVerifierEnvironment([big, target])
+
+    baseline = {("big.assets", 1): (len(baseline_raw),
+                                    hashlib.sha256(baseline_raw).digest()),
+                ("big.assets", 2): (len(patched_raw),
+                                    hashlib.sha256(patched_raw).digest())}
+    monkeypatch.setattr(UnityPy, "Environment", lambda: env)
+
+    # 目标对象字节正确 + 非目标基线一致 → 通过
+    _verify_saved_bundle(
+        Path("unused"),
+        expected_raw_by_path_id={("big.assets", 2): patched_raw},
+        baseline_hashes=baseline)
+
+
+def test_verify_saved_bundle_streaming_detects_drift(monkeypatch):
+    """E5：流式指纹语义不变——非目标对象字节被改（同长度）必须仍被拒绝，
+    且目标对象字节不一致也必须仍被拒绝（防「省内存」退化为「漏检」）。"""
+    import UnityPy
+
+    drifted = b"\x01" * (2 * 1024 * 1024)               # 同长度不同内容
+    big = _StreamingBigObject(drifted, 1)
+    target = _StreamingBigObject(b"changed", 2)
+    env = _FakeVerifierEnvironment([big, target])
+
+    baseline = {("big.assets", 1): (len(drifted),
+                                    hashlib.sha256(b"\x00" * len(drifted)).digest()),
+                ("big.assets", 2): (8, b"\x00" * 32)}
+    monkeypatch.setattr(UnityPy, "Environment", lambda: env)
+
+    with pytest.raises(ValueError, match="验证失败"):
+        _verify_saved_bundle(
+            Path("unused"),
+            expected_raw_by_path_id={("big.assets", 2): b"expected!"},
+            baseline_hashes=baseline)
 
 
 # ── Phase 0（审计 §9）：字体 coverage 不完整必须阻断发布 ─────────

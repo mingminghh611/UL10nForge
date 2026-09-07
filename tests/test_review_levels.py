@@ -587,6 +587,119 @@ def test_force_send_reviews_plain_entries(monkeypatch):
     assert seen, "force_send 必须真正送审（fake reviewer 被调用）"
 
 
+# ── C17 终态豁免（2026-09-07 审校误阻断根治） ──────────────────────
+def _stub_reviewer(monkeypatch, seen):
+    """通用 4B 桩：记录送审条目，全部判 PASS。"""
+
+    class _StubReviewer:
+        usable = True
+
+        def __init__(self, app_dir=None, service=None, online_cfg=None,
+                     config=None):
+            pass
+
+        def review_batch(self, items, *, on_progress=None,
+                         cancellation_event=None):
+            seen.extend(items)
+            return {it.entry_id: ReviewResult(it.entry_id, level="PASS")
+                    for it in items}, 0
+
+    monkeypatch.setattr("hanhua.core.reviewer.SemanticReviewer",
+                        _StubReviewer)
+
+
+def test_c17_terminal_outcome_exempt_from_auto_review(monkeypatch):
+    """C17/RC1：APPROVED 系终态条目不再自动重审。
+
+    旧收集循环不看 review_outcome——translate_page 每次点击翻译后恒以
+    全量条目 + max_send_rate=1.0 调 review_entries，已 APPROVED 的好译文
+    每次都被重新送 4B；4B 非确定性下判 MAJOR/CRITICAL → 反馈重译静默
+    替换好译文 → 不收敛 BLOCKED 清空译文——「通过审核的正常文本被阻断」。
+    """
+    from hanhua.core.reviewer import review_entries
+
+    seen: list = []
+    _stub_reviewer(monkeypatch, seen)
+    approved = _entry(meta={
+        "role": "display", "disposition": "translate",
+        "confidence": "high", "review_outcome": "APPROVED"})
+    summary = review_entries([approved], None, app_dir=".")
+    assert summary["sent"] == 0
+    assert summary.get("already_final") == 1
+    assert not seen, "APPROVED 终态不得进 4B（豁免）"
+
+
+def test_c17_manual_terminal_exempt_from_auto_review(monkeypatch):
+    """C17/RC1：人工终态（MANUAL/manual_api/manual_corrected）不自动重审。
+
+    人改即终局（apply_manual_correction 语义）——重审只会覆盖人工判定。
+    """
+    from hanhua.core.reviewer import review_entries
+
+    seen: list = []
+    _stub_reviewer(monkeypatch, seen)
+    manual = _entry(meta={
+        "role": "display", "disposition": "translate",
+        "confidence": "high", "review_outcome": "APPROVED",
+        "review_level": "MANUAL", "quality_source": "manual_api",
+        "manual_corrected": {"at": "t", "before": "x"}})
+    assert review_entries([manual], None, app_dir=".")["sent"] == 0
+    assert not seen
+
+
+def test_c17_pending_and_new_translation_still_reviewed(monkeypatch):
+    """C17 非目标豁免面：REVIEW_ERROR / 无 outcome（新译文）照常送审。
+
+    REVIEW_ERROR / CANCELLED 是审核未完成（非终态），PENDING 新译文
+    没有任何判定——豁免只针对已有真实判定的终态。
+    """
+    from hanhua.core.reviewer import review_entries
+
+    seen: list = []
+    _stub_reviewer(monkeypatch, seen)
+    errored = _entry(meta={
+        "role": "display", "confidence": "high",
+        "review_outcome": "REVIEW_ERROR"})
+    fresh = _entry(meta={
+        "role": "display", "confidence": "high"})
+    summary = review_entries([errored, fresh], None, app_dir=".")
+    assert summary["sent"] == 2
+    assert len(seen) == 2
+
+
+def test_c17_force_send_overrides_terminal_exemption(monkeypatch):
+    """C17：force_send（人工「重新审核」）不受豁免限制。"""
+    from hanhua.core.reviewer import review_entries
+
+    seen: list = []
+    _stub_reviewer(monkeypatch, seen)
+    approved = _entry(meta={
+        "role": "display", "confidence": "high",
+        "review_outcome": "APPROVED"})
+    summary = review_entries([approved], None, app_dir=".",
+                             force_send=True)
+    assert summary["sent"] == 1
+    assert seen, "force_send 必须穿透终态豁免"
+
+
+def test_c17_review_terminal_exempt_unit():
+    """_review_terminal_exempt 判定表：终态集合内豁免、其余不豁免。"""
+    from hanhua.core.reviewer import _review_terminal_exempt
+
+    assert _review_terminal_exempt({"review_outcome": "APPROVED"})
+    assert _review_terminal_exempt({"review_outcome": "APPROVED_MINOR"})
+    assert _review_terminal_exempt({"review_outcome": "NEEDS_REVISION"})
+    assert _review_terminal_exempt({"review_outcome": "BLOCKED"})
+    assert _review_terminal_exempt({"review_level": "MANUAL"})
+    assert _review_terminal_exempt({"quality_source": "manual_api"})
+    assert _review_terminal_exempt({"manual_corrected": {"at": "t"}})
+    # 非豁免：审核未完成 / 无判定
+    assert not _review_terminal_exempt({"review_outcome": "REVIEW_ERROR"})
+    assert not _review_terminal_exempt({"review_outcome": "CANCELLED"})
+    assert not _review_terminal_exempt({})
+    assert not _review_terminal_exempt(None)
+
+
 # ── 审核日志（T1-7） ───────────────────────────────────────────────
 def test_write_review_report(tmp_path):
     summary = {

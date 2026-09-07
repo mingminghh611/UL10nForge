@@ -366,10 +366,13 @@ def test_review_page_retranslated_chip(qapp, tmp_path):
         for i in range(page.proxy.rowCount())
     }
     assert visible == {0}
-    # 已重译条目状态列显示「已重译」而非机械态「已翻译」
+    # C17（2026-09-07）：APPROVED 优先于 retranslated 显示——重译收敛
+    # 写 APPROVED 后 retranslated 标记保留（追溯证据 + 筛选可用），
+    # 但状态列必须显示终态真相「已通过」而非永远「已重译」（旧顺序
+    # 让已通过行被当成待人工确认，诱使 force_send 复审→降格阻断）。
     page.filter_chips["all"].setChecked(True)
     page._apply_filters()
-    assert page.model.index(0, 0).data() == "retranslated"
+    assert page.model.index(0, 0).data() == "approved"
     assert page.model.index(1, 0).data() == "approved"
 
 
