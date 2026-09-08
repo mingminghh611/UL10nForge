@@ -1318,10 +1318,12 @@ class Project:
         kept = 0
         tt_generator = self._build_typetree_generator(fingerprint)
         sources: list[tuple[Callable, Path, str]] = []
+        asset_paths: list[Path] = []
         for f in unity_extractor.find_asset_files(
                 selected_root, data_dir=fingerprint.data_dir,
                 exclude_roots=excluded_roots):
             rel = str(f.relative_to(self.game_dir)).replace("\\", "/")
+            asset_paths.append(f)
             if tt_generator is not None:
                 sources.append((
                     lambda f_, file_id=None, gen=tt_generator,
@@ -1348,12 +1350,33 @@ class Project:
                     for f in fingerprint.application_assemblies])
             except Exception:  # noqa: BLE001
                 cross_sinks = frozenset()
+        # A11（midnight-maid-night 黑屏 2026-09-08）：场景名语料采集——
+        # GameObject m_Name + TagManager 自定义标签 → DLL #US 提取的
+        # 确定性逻辑键兜底门（IL 模式证明 op_Equality 形态看不见的
+        # string.Equals/存字段比较形态由此兜住）。采集一次全程序集共用，
+        # 同时落 profile KV（写回侧镜像门的数据源）。失败静默空集
+        # （退回单层防线，不阻断扫描）。
+        scene_names: frozenset = frozenset()
+        try:
+            gg_managers = None
+            if fingerprint.data_dir is not None:
+                _gg = fingerprint.data_dir / "globalgamemanagers"
+                if _gg.exists():
+                    gg_managers = _gg
+            scene_names = unity_extractor.harvest_scene_name_corpus(
+                asset_paths, gg_managers)
+            if scene_names:
+                self.store.set_profile_value(
+                    "scene_name_corpus", sorted(scene_names))
+        except Exception:  # noqa: BLE001
+            scene_names = frozenset()
         for f in fingerprint.application_assemblies:
             rel = str(f.relative_to(self.game_dir)).replace("\\", "/")
             sources.append((
                 functools.partial(
                     mono_extractor.extract_dll_user_strings,
-                    cross_sinks=cross_sinks), f, rel))
+                    cross_sinks=cross_sinks,
+                    scene_names=scene_names), f, rel))
         meta = fingerprint.metadata
         if meta is not None:
             rel = str(meta.relative_to(self.game_dir)).replace("\\", "/")

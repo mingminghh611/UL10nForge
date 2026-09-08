@@ -497,6 +497,29 @@ _STRUCTURAL_NAME_SINKS = {
     ("UnityEngine.PlayerPrefs", "SetInt"): 2,
     ("UnityEngine.PlayerPrefs", "SetFloat"): 2,
 }
+# ── A11（midnight-maid-night 黑屏根因，2026-09-08）：tag/name 比较
+# 模式——证明链此前看不见的两个盲区 ──
+# C# `gameObject.tag == "Ruth"` / `go.name == "Living Room Door"` 编译为
+# 属性 getter → ldstr → String.op_Equality/op_Inequality → brfalse.s。
+# get_tag/get_name 无字符串参数（属性取值）、op_Equality 无 sink 身份
+# （二元操作符），_STRUCTURAL_SINKS 数据流证明链两处都看不见——多词
+# 标签/对象名再叠加 F33 句子形态放行（'Living Room Door' 8 条、
+# 'Agatha Rush'、'Hallway Trigger' 实证）→ 字面量进池翻译 → 写回后
+# tag/name 比较恒 false → 控制器空引用级联 → 开场动画一过即黑屏。
+# 双角色串（'Ruth' 同时是 tag 与 set_text 文本）更让 UI 证明反向背书。
+# 两组方法：
+# - 取值组：产出 ("name_value") 栈值的引擎属性（tag / GameObject 名）
+# - 比较组：与 name_value 组合的 ldstr 字面量 = 确定性结构键（跳过，
+#   宁漏勿坏——只有真比较点的字面量被拦，set_text 用途不受影响）
+_NAME_VALUE_GETTERS = {
+    "UnityEngine.GameObject": frozenset({"get_tag", "get_name"}),
+    "UnityEngine.Component": frozenset({"get_tag", "get_name"}),
+    "UnityEngine.Object": frozenset({"get_name"}),
+}
+_STRING_COMPARISON_METHODS = frozenset({
+    ("System.String", "op_Equality"),
+    ("System.String", "op_Inequality"),
+})
 _IL_OPERAND_1 = frozenset({
     *range(0x0E, 0x14), 0x1F, *range(0x2B, 0x38), 0xDE,
 })
@@ -869,6 +892,9 @@ def _verified_ui_user_string_tokens(pe, *, cross_sinks: frozenset = frozenset(),
     structural_name_sinks: dict[int, int] = {}
     safe_value_producers: set[int] = set()
     log_sinks: set[int] = set()
+    # A11：tag/name 属性 getter（产出 name_value）与字符串比较操作符
+    name_value_getters: set[int] = set()
+    string_comparisons: set[int] = set()
     member_identity: dict[int, tuple[str, str]] = {}
     for index, row in enumerate(member_rows, 1):
         declaring = getattr(getattr(row, "Class", None), "row", None)
@@ -883,6 +909,13 @@ def _verified_ui_user_string_tokens(pe, *, cross_sinks: frozenset = frozenset(),
         elif (full_type, method_name) in _STRUCTURAL_NAME_SINKS:
             structural_name_sinks[0x0A000000 | index] = \
                 _STRUCTURAL_NAME_SINKS[(full_type, method_name)]
+        elif _NAME_VALUE_GETTERS.get(full_type, frozenset()) and \
+                method_name in _NAME_VALUE_GETTERS[full_type]:
+            # A11：属性 getter 取 tag/name 值——产出 name_value 栈值
+            # （不进 safe_value_producers，比较点需要识别它）
+            name_value_getters.add(0x0A000000 | index)
+        elif (full_type, method_name) in _STRING_COMPARISON_METHODS:
+            string_comparisons.add(0x0A000000 | index)
         elif (full_type, method_name) in _LOG_SINKS:
             # 日志消费 = 确定性非 UI 负面证据（F33 配套：Console.WriteLine/
             # Debug.Log 的字面量是开发日志，句子形态启发式也不得放行）
@@ -1185,6 +1218,28 @@ def _verified_ui_user_string_tokens(pe, *, cross_sinks: frozenset = frozenset(),
                                     verified |= tokens
                                     gained |= args
                         stack.clear()
+                    elif operand in name_value_getters:
+                        # A11：tag/name 属性 getter——产出 name_value 栈值
+                        # （比较点识别用；进 setter 等其他消费路径时与
+                        # "other" 等同——_string_source 不含 name_value）
+                        if stack:
+                            stack.pop()  # 接收者
+                        stack.append("name_value")
+                    elif operand in string_comparisons:
+                        # A11：String.op_Equality/op_Inequality——二元比较，
+                        # 两操作数中一个可溯源到 #US 字面量、另一个是
+                        # name_value（tag/name getter 产物）→ 字面量被
+                        # 证明为逻辑比较键（场景写坏黑屏根因的确定性拦截）
+                        if (structural_out is not None and len(stack) >= 2):
+                            left, right = stack[-2], stack[-1]
+                            pair = (left, right)
+                            for literal, name_val in (pair, pair[::-1]):
+                                if name_val != "name_value":
+                                    continue
+                                tokens, _args = _string_source(literal)
+                                structural_out |= tokens
+                        stack.clear()
+                        stack.append("other")  # bool 结果
                     elif operand in safe_value_producers:  # getter
                         if stack:
                             stack.pop()
@@ -1246,12 +1301,21 @@ def _is_mono_diagnostic_string(s: str) -> bool:
 
 def extract_dll_user_strings(path: str | Path, file_id: str | None = None,
                              progress_cb: Callable | None = None, *,
-                             cross_sinks: frozenset = frozenset()) -> ParsedFile:
+                             cross_sinks: frozenset = frozenset(),
+                             scene_names: frozenset = frozenset()) -> ParsedFile:
     """提取 DLL #US 字符串 → ParsedFile。
 
     cross_sinks：跨程序集 UI sink 身份集合（_cross_assembly_ui_sinks
     的产物）——多 DLL 游戏由扫描管线一次性计算后传入（Fungus 等插件
     的显示方法链在逐程序集证明中不可见，联合闭包补齐跨 DLL 链）。
+
+    scene_names：场景名语料（A11，harvest_scene_name_corpus 的产物）
+    ——GameObject m_Name + TagManager 自定义标签全集。字面量与语料
+    全等 → 确定性逻辑键跳过（按名比较/查找的兜底防线：IL 模式证明
+    覆盖 op_Equality/op_Inequality 形态，string.Equals 宭例调用/
+    存字段再比较等形态由语料门兜住）。宁漏勿坏：语料命中的显示用途
+    一并跳过（midnight-maid-night 黑屏实证：'Hallway Trigger' 类
+    触发器名翻坏即黑屏）。
     """
     import dnfile
     p = Path(path)
@@ -1308,6 +1372,23 @@ def extract_dll_user_strings(path: str | Path, file_id: str | None = None,
             # 等按名查找 API = 确定性结构键——优先于一切显示判定
             # （对象名同时被 Find 和 set_text 使用的按钮实证：宁漏勿坏）
             is_structural_proven = token_offset in structural_tokens
+            # A11 场景名语料门（兜底防线）：字面量与场景 GameObject 名/
+            # 自定义标签全等 = 确定性逻辑键（按名比较/查找），跳过。
+            # 放在 is_structural_proven 判定之后：structural_proven 条目
+            # 走 mono_structural_sink 留档 reason（更精确的定位证据），
+            # 语料门只兜 IL 模式证明看不见的形态（string.Equals 实例
+            # 调用/存字段再比较/跨方法传递）。
+            if (scene_names and not is_structural_proven
+                    and s in scene_names):
+                skipped["scene_name_corpus"] = (
+                    skipped.get("scene_name_corpus", 0) + 1)
+                sample = _skipped_sample_entry(
+                    fid, f"skip/us#{offset}", s, kind="us",
+                    reason="scene_name_corpus",
+                    count=skipped["scene_name_corpus"])
+                if sample:
+                    entries.append(sample)
+                continue
             if input_key_label:
                 # 按键名标签虽被证明为 UI 文本，但翻译后按键绑定失效——
                 # 硬跳过（宁漏勿坏）。留档计数。

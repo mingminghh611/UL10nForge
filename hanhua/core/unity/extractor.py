@@ -1561,6 +1561,77 @@ def _high_freq_threshold(freq: dict[str, int]) -> int:
                min(_HIGH_FREQ_CAP, int(total * _HIGH_FREQ_RATIO)))
 
 
+# A11（midnight-maid-night 黑屏 2026-09-08）：场景名语料采集上限。
+# GameObject 名 + TagManager 自定义标签通常 <2k 条（实证 973 名 + 6 标签），
+# 超 10k 说明形态误判（把整文件 raw 串池收进来），截断防语料门被噪声
+# 稀释成全量全等匹配。
+_SCENE_NAME_CORPUS_LIMIT = 10_000
+
+
+def harvest_scene_name_corpus(asset_files, globalgamemanagers=None) -> frozenset:
+    """A11：采集场景名语料——GameObject m_Name + TagManager 自定义标签。
+
+    数据源（UnityPy Environment，content-probe 发现的资源文件）：
+    - GameObject 对象的 m_Name（场景对象名：按名 Find/比较的查找键）；
+    - globalgamemanagers 的 TagManager（typetree key 'tags'：自定义标签
+      列表，midnight-maid-night 实证 ['Ruth', 'Naomi', 'Hallway Trigger',
+      'Crouch', 'Peer', 'Agatha Rush']——gameObject.tag == "Ruth" 的
+      比较键全在这里）。
+
+    E5/E6 内存纪律：只加载场景形态文件（level* / *.unity / sharedAssets）
+    + globalgamemanagers——GameObject 名住在场景文件里，resources.assets
+    的资产名不是场景查找键；大游戏全量加载会重演内存锯齿。无场景文件
+    时退回全量（小游戏资源本就不多）。任何失败静默返回空集（语料门是
+    兜底防线，采集失败 = 退回 IL 模式证明单层防线，不阻断扫描）。只收
+    非空短名（≤64 字符）——场景对象名是短标识，长串不是比较键形态。
+    """
+    names: set[str] = set()
+    try:
+        scene_like = [
+            p for p in asset_files
+            if (m := _re.match(r"level\d+", p.stem, re.IGNORECASE))
+            or p.suffix.lower() == ".unity"
+            or p.stem.lower().endswith(".sharedassets")]
+        scan_paths = scene_like or list(asset_files)
+        from UnityPy import Environment
+        env = Environment()
+        paths = [str(p) for p in scan_paths]
+        if globalgamemanagers is not None:
+            paths.append(str(globalgamemanagers))
+        if not paths:
+            return frozenset()
+        env.path = str(Path(paths[0]).parent)
+        try:
+            env.load(paths)
+        except Exception:  # noqa: BLE001
+            return frozenset()
+        for obj in env.objects:
+            tname = obj.type.name
+            try:
+                if tname == "GameObject":
+                    name = getattr(obj.read(), "m_Name", "")
+                elif globalgamemanagers is not None and tname == "TagManager":
+                    tree = obj.read_typetree()
+                    tags = tree.get("tags") if isinstance(tree, dict) else None
+                    for tag in tags or []:
+                        if isinstance(tag, str) and tag:
+                            names.add(tag[:64])
+                    continue
+                else:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(name, str) and name:
+                names.add(name[:64])
+        from hanhua.core.unity.writer import _dispose_environment
+        _dispose_environment(env)
+    except Exception:  # noqa: BLE001
+        return frozenset()
+    if len(names) > _SCENE_NAME_CORPUS_LIMIT:
+        return frozenset()
+    return frozenset(names)
+
+
 def _mono_object_name_span(raw: bytes) -> tuple[int, int] | None:
     """MonoBehaviour/ScriptableObject 的 m_Name 字符串跨度（长度头+内容）。
 
