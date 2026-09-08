@@ -139,7 +139,10 @@ def _upload_asset(release_id: int, path: Path) -> None:
            f"{release_id}/assets?name={path.name}")
     total = path.stat().st_size
     start = time.monotonic()
-    req = Request(url, data=path.open("rb"),
+    # 请求体必须是 bytes：传文件对象时 urllib 不计算 Content-Length
+    # → GitHub 返回 400 Bad Content-Length（2GB 分卷上传必现）。
+    body = path.read_bytes()
+    req = Request(url, data=body,
                   headers={**_headers(),
                            "Content-Type": "application/octet-stream"},
                   method="POST")
