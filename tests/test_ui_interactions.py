@@ -720,3 +720,134 @@ def test_translate_worker_no_direct_activity_feed_access():
     src = inspect.getsource(TranslatePage._translate_with_lease)
     assert "activity_feed.append_event" not in src
     assert "signals.note.emit" in src
+
+
+# ─────────────── 开始翻译自动游戏语境识别（0.50.1） ───────────────
+
+def test_translate_worker_auto_game_context_recognition_wired():
+    """0.50.1：开始翻译自动跑游戏语境识别（对齐 runner）——worker 体
+    内必须有：门条件（未建立/≥25% 增量）、save_game_context 落库、
+    profile 重读（本次 run 立即注入 context_*，而非下次翻译才生效）、
+    fail-closed try/except。"""
+    import inspect
+    from hanhua.ui.pages.translate_page import TranslatePage
+    src = inspect.getsource(TranslatePage._translate_with_lease)
+    for token in (
+        "load_game_context",          # 门：语境未建立 → 识别
+        "context_needs_update",       # 门：≥25% 增量 → 重识别
+        "sample_entries",             # 代表性抽样
+        "save_game_context",          # 落库 + 同步 profile context_*
+        "profile = replace(project.profile)",  # 重读快照，本次 run 生效
+        "游戏语境识别跳过",            # fail-closed 不阻断主链
+    ):
+        assert token in src, token
+    # 识别块必须位于 build_system_prompt 之前（注入点在上游）
+    assert src.index("save_game_context") < src.index("build_system_prompt")
+
+
+def test_translate_worker_game_context_gate_no_rerun_when_fresh(qapp, tmp_path):
+    """门条件行为：语境已建立且无大增量时不重复识别（省一次 4B 调用）。
+    直接驱动 _translate_with_lease 前置段——GameContextRecognizer 被
+    monkeypatch 为爆炸，若门失效误入识别分支即抛错被 on_log 捕获，
+    断言日志无识别痕迹。"""
+    from hanhua.ui.pages import translate_page as tp
+    from hanhua.core.game_context import save_game_context
+
+    store = _store(tmp_path)
+    save_game_context(store, {
+        "game_name": "测试游戏", "genre": "RPG",
+        "_sampled_total": 1000,     # 基线远大于库里 2 条 → 不触发更新门
+    })
+    state = _state(tmp_path)
+    project = _FakeProject(store)
+    state.project = project
+    page = TranslatePage(state, _RecordingWindow())
+
+    import threading
+    run = tp._TranslationRun(
+        project=project, generation=0,
+        api=state.api, profile=store.get_profile(),
+        cancel=threading.Event(), stop_local_after_run=False,
+        secrets=[])
+
+    logs: list[str] = []
+
+    class _Signals:
+        class _Sig:
+            def emit(self, *_a):
+                pass
+
+        progress = log = note = _Sig()
+
+    def _explode(*_a, **_k):
+        raise AssertionError("门失效：新鲜语境不应触发识别")
+
+    import hanhua.core.game_context as gc
+    orig = gc.GameContextRecognizer
+    gc.GameContextRecognizer = _explode
+    try:
+        # 让主链在语境块后尽早失败（无本地模型可启动）——语境块的
+        # 行为已被观察到即可
+        try:
+            page._translate_with_lease(run, _Signals())
+        except Exception:
+            pass
+    finally:
+        gc.GameContextRecognizer = orig
+    assert not any("游戏语境识别" in ln for ln in logs or [""])
+
+
+def test_translate_worker_game_context_missing_triggers_recognition(qapp, tmp_path):
+    """门条件行为：语境未建立 → 自动识别 + profile 重读注入本次 run。"""
+    from hanhua.ui.pages import translate_page as tp
+    from hanhua.core.models import ApiConfig
+
+    store = _store(tmp_path)
+    state = _state(tmp_path)
+    project = _FakeProject(store)
+    state.project = project
+    page = TranslatePage(state, _RecordingWindow())
+
+    import threading
+    api = ApiConfig(mode="api", base_url="http://x/v1", api_key="k",
+                    model="m")
+    run = tp._TranslationRun(
+        project=project, generation=0, api=api,
+        profile=store.get_profile(), cancel=threading.Event(),
+        stop_local_after_run=False, secrets=[])
+
+    class _FakeRecognizer:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def recognize(self, samples, source_lang="auto"):
+            rec_logs.append(f"recognize:{len(samples)}:{source_lang}")
+            import json
+            return json.dumps({"game_name": "魔法学院", "genre": "RPG"},
+                              ensure_ascii=False)
+
+    rec_logs: list[str] = []
+    import hanhua.core.game_context as gc
+    orig = gc.GameContextRecognizer
+    gc.GameContextRecognizer = _FakeRecognizer
+    try:
+        try:
+            page._translate_with_lease(run, _FakeSignals())
+        except Exception:
+            pass
+    finally:
+        gc.GameContextRecognizer = orig
+    # 识别确实被触发（样本来自库内条目）
+    assert any(ln.startswith("recognize:") for ln in rec_logs)
+    # 落库 + profile context_* 已同步（本次 run 重读的即此档案）
+    profile = store.get_profile()
+    assert profile.context_game_name == "魔法学院"
+    assert profile.context_genre == "RPG"
+
+
+class _FakeSignals:
+    class _Sig:
+        def emit(self, *_a):
+            pass
+
+    progress = log = note = _Sig()

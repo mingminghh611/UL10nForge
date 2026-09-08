@@ -852,10 +852,71 @@ class TranslatePage(QWidget):
                         f"进入本次翻译")
             except Exception as exc:  # noqa: BLE001 增益环节不阻断主链
                 on_log(f"AI 辅助识别跳过：{exc}")
-            # 专名收集仅用于翻译后术语库学习（learn_proper_names）
-            entries0 = [self._entry_from_row(r) for r in store.get_entries()]
+            # 专名收集仅用于翻译后术语库学习（learn_proper_names）；
+            # rows_all/entries0 在 AI 识别升格落库后取——语境门计数与
+            # 术语学习都以最新条目状态为准
+            rows_all = store.get_entries()
+            entries0 = [self._entry_from_row(r) for r in rows_all]
             collected_names = collect_known_names(
                 [str(e.original or "") for e in entries0])
+            # 游戏语境自动识别（0.50.1）：此前语境识别只有首页手动入口
+            # （设计意图「识别在首次翻译前自动提示（§21）」从未接线自动
+            # 触发），runner（all_record_runner）早已在翻译前自动识别
+            # ——GUI 与 runner 行为对齐。门条件：语境未建立，或可翻译
+            # 条目较识别基线增长 ≥25%（context_needs_update，§23）——
+            # 已建立且无大增量时不重复识别（省一次 4B 模型调用）。
+            # 识别后必须重读 profile：run.profile 是点击瞬间的快照，
+            # save_game_context 会同步 context_* 字段进 GameProfile，
+            # replace(project.profile) 才能让本次 run 的 system_prompt
+            # （下方 build_system_prompt）注入语境。fail-closed：识别
+            # 失败只留日志（语境不注入），绝不阻断翻译主链。
+            try:
+                from hanhua.core.game_context import (
+                    GameContextRecognizer, context_needs_update,
+                    load_game_context, parse_game_context, sample_entries,
+                    save_game_context)
+                actionable_now = sum(
+                    is_actionable_translation(e) for e in entries0)
+                has_context = bool(load_game_context(store))
+                if (not has_context
+                        or context_needs_update(store, actionable_now)):
+                    reason = ("未建立" if not has_context
+                              else "可翻译文本较识别基线增长 ≥25%")
+                    on_log(f"开始自动游戏语境识别（{reason}）…")
+                    if cancel.is_set():
+                        raise RuntimeError("translation cancelled")
+                    ctx_config = api
+                    if api.mode == "local":
+                        # 与首页手动识别同链路：4B 审核模型（1.8B 翻译
+                        # 模型 JSON 输出能力弱，2026-08-31 实证），独立
+                        # 签名/端口，与翻译模型互不干扰
+                        from hanhua.core.review_server import (
+                            ReviewModelService)
+                        service = ReviewModelService(self.state.resource_dir)
+                        info = service.ensure_running()
+                        ctx_config = replace(
+                            api, base_url=info["base_url"],
+                            api_key=info["api_key"], model="game-context")
+                    samples = sample_entries(rows_all)
+                    if samples:
+                        raw = GameContextRecognizer(ctx_config).recognize(
+                            samples,
+                            source_lang=profile.source_lang or "auto")
+                        ctx = parse_game_context(raw)
+                        ctx["_sampled_total"] = len(rows_all)
+                        save_game_context(store, ctx)
+                        # 重读 profile：让本次 run 立即拿到 context_*
+                        # 字段（run.profile 是点击时快照，不重读则语境
+                        # 要到下一次翻译才生效）
+                        profile = replace(project.profile)
+                        on_log("游戏语境已建立并注入本次翻译")
+                        signals.note.emit(
+                            "running",
+                            "游戏语境识别完成，已注入本次翻译的系统提示词")
+                    else:
+                        on_log("无代表性文本样本，跳过游戏语境识别")
+            except Exception as exc:  # noqa: BLE001 增益环节不阻断主链
+                on_log(f"游戏语境识别跳过：{exc}")
             glossary.close()
             # 经验记忆（AgentMemory）：跨游戏持久。本次运行前重置会话统计；
             # 记忆的参考译例并入 glossary（active 记忆，混合运用参考档）；
