@@ -932,12 +932,21 @@ def _memory_apply(memory, entry: TextEntry, level: str, model: str,
     - PASS/修正后译文 → promote：pending → 已提交（可命中）；反馈重译
       产生的新译文（从未入桶）经 upsert 直接提交。
     """
-    if memory is None or not entry.translation or not lang:
+    if memory is None or not lang:
         return
     try:
         if level in ("MAJOR", "CRITICAL"):
+            # 撤销路径只需要 original 定位记忆——不需要 translation。
+            # 0.51.0 发布体检实证旧守卫 `not entry.translation` 一刀切：
+            # BLOCKED 条目 apply_outcome(clear_translation=True) 清空
+            # 译文后本函数早退，remove_memory 走不到，坏译文留在
+            # pending 桶被后续翻译召回（P0-3 污染链未断干净）。
+            if not entry.original:
+                return
             memory.remove_memory(entry.original, model, lang)
         else:
+            if not entry.translation:
+                return
             # BUILTIN 冲突门禁（2026-09-01 污染系统性根治）：PASS 系
             # 审后 promote 前再拦一道——审核模型把 Disabled 判「残疾
             # 人士」PASS（审核端只注入了术语维度无此强制）时，坏译文

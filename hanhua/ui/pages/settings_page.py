@@ -963,7 +963,8 @@ class SettingsPage(QWidget):
         card["btn"].setEnabled(False)
         worker = Worker(self._start_model_worker, kind, choice)
         worker.signals.finished.connect(self._on_model_started)
-        worker.signals.error.connect(self._on_model_error)
+        worker.signals.error.connect(
+            lambda err, k=kind: self._on_model_error(err, k, start=True))
         self._spawn(worker)
 
     def _start_model_worker(self, kind: str, choice: str):
@@ -1004,14 +1005,25 @@ class SettingsPage(QWidget):
         self._refresh_env_status()
         Toast.show(self, f"{self._model_title(kind)} 已启动", "success")
 
-    def _on_model_error(self, err: str):
-        # Worker.error 信号不带 kind → 从启动中状态恢复（置灰按钮）
-        for card in self.model_cards.values():
-            if not card["btn"].isEnabled():
+    def _on_model_error(self, err: str, kind: str = "", start: bool = False):
+        """Worker.error 信号不带 kind——启动路径用闭包回传（区分启动/停止
+        失败并只恢复对应卡片，不再按「按钮置灰」猜卡片：0.51.0 发布体检
+        实证旧写法会把停止失败误报为「启动失败」，且恢复所有置灰卡片）。"""
+        if kind:
+            card = self.model_cards.get(kind)
+            if card is not None:
                 card["btn"].setEnabled(True)
-                card["status"].setText("状态：启动失败")
+                card["status"].setText(
+                    "状态：启动失败" if start else "状态：停止失败")
+        else:
+            # 兜底：无 kind 时保持旧行为（恢复所有置灰卡片）
+            for card in self.model_cards.values():
+                if not card["btn"].isEnabled():
+                    card["btn"].setEnabled(True)
+                    card["status"].setText("状态：启动失败")
         self._refresh_env_status()
-        Toast.show(self, f"模型启动失败：{err}", "error")
+        action = "启动" if start else "停止"
+        Toast.show(self, f"模型{action}失败：{err}", "error")
 
     def _stop_model(self, kind: str) -> None:
         card = self.model_cards[kind]
@@ -1019,7 +1031,8 @@ class SettingsPage(QWidget):
         card["btn"].setEnabled(False)
         worker = Worker(self._stop_model_worker, kind)
         worker.signals.finished.connect(self._on_model_stopped)
-        worker.signals.error.connect(self._on_model_error)
+        worker.signals.error.connect(
+            lambda err, k=kind: self._on_model_error(err, k))
         self._spawn(worker)
 
     def _stop_model_worker(self, kind: str):

@@ -188,13 +188,37 @@ def test_context_needs_update_threshold(store):
     ctx = {"genre": "RPG"}
     gc.save_game_context(store, ctx)
     assert gc.context_needs_update(store, 100) is False  # 无基线 → 已建立
-    ctx["_sampled_total"] = 100
+    ctx["_sampled_actionable"] = 100
     gc.save_game_context(store, ctx)
     assert gc.context_needs_update(store, 124) is False   # < 125
     assert gc.context_needs_update(store, 125) is True    # ≥ 1.25×
     assert gc.context_needs_update(store, 300) is True
-    # 基线保留：加载后 _sampled_total 可见（不污染注入字段白名单）
-    assert gc.load_game_context(store)["_sampled_total"] == 100
+    # 基线保留：加载后 _sampled_actionable 可见（不污染注入字段白名单）
+    assert gc.load_game_context(store)["_sampled_actionable"] == 100
+
+
+def test_context_needs_update_baseline_same_metric(store):
+    """0.51.0 发布体检（识别线 Medium-2）：基线口径 = 可翻译数。
+
+    旧口径基线存「条目总量」（_sampled_total），对比端是 actionable
+    计数——skipped 占比 >20% 的游戏即便可翻译条目翻倍也永不触发
+    更新。修复后：只有 _sampled_total 的旧库退回保守（不触发），
+    新基线 _sampled_actionable 与对比端同口径直接生效。"""
+    ctx = {"genre": "RPG", "_sampled_total": 1000,
+           "_sampled_actionable": 100}
+    gc.save_game_context(store, ctx)
+    loaded = gc.load_game_context(store)
+    # 双基线并存：旧口径仅兼容保留
+    assert loaded["_sampled_total"] == 1000
+    assert loaded["_sampled_actionable"] == 100
+    # 同口径对比：124 不触发、125 触发（不再被 1000 总量基线压制）
+    assert gc.context_needs_update(store, 124) is False
+    assert gc.context_needs_update(store, 125) is True
+    # 纯旧库（只有总量基线）→ 保守不触发，待重新识别后迁移
+    old = {"genre": "RPG", "_sampled_total": 1000}
+    gc.save_game_context(store, old)
+    assert "_sampled_actionable" not in gc.load_game_context(store)
+    assert gc.context_needs_update(store, 5000) is False
 
 
 def test_baseline_not_shared_to_context_block():

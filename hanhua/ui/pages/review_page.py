@@ -1142,16 +1142,23 @@ class ReviewPage(QWidget):
 
     def showEvent(self, event):
         """切回页面时补跑置脏/挂起的 reload（挂起编辑不在此补，由
-        closeEditor 路径负责——避免覆盖正在编辑的内容）。"""
+        closeEditor 路径负责——避免覆盖正在编辑的内容）。
+
+        0.51.0 发布体检（GUI 线 Medium-4）：_pending_reload 也要在此
+        清零——旧写法只清 _reload_dirty，reload() 若再次挂起（编辑态）
+        会重设标记，但「无挂起」的正常补跑不清零会导致此后每次 showEvent
+        都多跑一次全量重建。"""
         super().showEvent(event)
         if (self._reload_dirty or self._pending_reload) \
                 and not self.state.translation_running:
             self._reload_dirty = False
+            self._pending_reload = False
             self.reload()
 
     def reload(self):
         if self.state.project is None:
             self._loading = False
+            self._pending_reload = False
             self.model.setEntries([])
             self._refresh_file_filter([])
             self._stack.setCurrentWidget(self.empty_state)

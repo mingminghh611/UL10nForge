@@ -795,6 +795,14 @@ class TranslatePage(QWidget):
             lambda _result, r=run: self._on_run_drained(r))
         worker.signals.error.connect(
             lambda _error, r=run: self._on_run_drained(r))
+        # 0.51.0 发布体检（GUI 线 Medium-3）：租约未取得（start 后项目
+        # 已切换/关闭）时 worker 返回 None——finished(stats=None) 因
+        # `stats is not None` 条件不会走到 _on_finished，页面会停在
+        # 「正在请求模型…」忙碌动画且按钮不恢复。None 结果在此显式
+        # 复位 UI（终态消息与提示），不再依赖下一轮操作救回。
+        worker.signals.finished.connect(
+            lambda result, r=run:
+            self._on_run_abandoned(r) if result is None else None)
         self._worker = worker
         self._pool.start(worker)
 
@@ -903,7 +911,11 @@ class TranslatePage(QWidget):
                             samples,
                             source_lang=profile.source_lang or "auto")
                         ctx = parse_game_context(raw)
+                        # 基线口径（0.51.0 修正）：存「可翻译数」与
+                        # context_needs_update 的对比端同口径——旧口径存
+                        # 总量，skipped 占比 >20% 的游戏门恒不触发。
                         ctx["_sampled_total"] = len(rows_all)
+                        ctx["_sampled_actionable"] = actionable_now
                         save_game_context(store, ctx)
                         # 重读 profile：让本次 run 立即拿到 context_*
                         # 字段（run.profile 是点击时快照，不重读则语境
@@ -1645,6 +1657,23 @@ class TranslatePage(QWidget):
             self.start_btn.setEnabled(self.state.project is not None)
             self.stop_btn.setEnabled(False)
 
+    def _on_run_abandoned(self, run: _TranslationRun):
+        """0.51.0 发布体检（Medium-3）：租约未取得（项目已切换/关闭）的
+        翻译 run 终态复位——UI 不再停在忙碌动画。
+
+        _on_finished/_on_error 只在 is_current_project 通过时触达，项目
+        切换后两条路都静默；此处无条件复位运行态（新项目界面由
+        _on_project 重建，重复复位无副作用）。"""
+        self._running = False
+        self.state.translation_running = False
+        self._reset_pipeline_progress()
+        self.progress_label.setText("翻译未开始（项目已切换）")
+        self._set_stream_status("○ 已停止", phase="idle")
+        self.start_btn.setEnabled(self.state.project is not None
+                                  and self._active_run is None)
+        self.stop_btn.setEnabled(False)
+        self._set_primary(self.start_btn)
+
     # ── 停止 / 重试 ──
     def stop(self):
         run = self._active_run
@@ -1653,16 +1682,19 @@ class TranslatePage(QWidget):
             run.request_stop(self.state.local_model)
         if requested:
             self.stop_btn.setEnabled(False)
-            self.log_view.appendPlainText("正在停止…未完成条目保留为待翻译，可随时继续")
+            self._log_line("正在停止…未完成条目保留为待翻译，可随时继续")
             self._runlog("control", "用户停止：未完成条目保留为待翻译")
 
     def retry_failed(self):
+        if self.state.project is None:
+            Toast.show(self, "请先在首页打开游戏文件夹", "warning")
+            return
         store = self.state.project.store
         for r in store.get_entries(status="failed"):
             # #9：重置待译清旧审核终态，重译成功不再被残留 BLOCKED 拒绝
             store.reset_to_pending(r["file_id"], r["key_path"])
         self.state.entriesChanged.emit()
-        self.log_view.appendPlainText("已标记失败条目为待翻译")
+        self._log_line("已标记失败条目为待翻译")
         self._runlog("control", "重试失败：已标记失败条目为待翻译")
         self.start()
 
@@ -1737,7 +1769,7 @@ class TranslatePage(QWidget):
         self._write_worker_task = worker
         self.write_safety.set_ready(False, "写回进行中…")
         self._runlog_begin("开始写回")
-        self.log_view.appendPlainText("正在写回…")
+        self._log_line("正在写回…", "writeback")
         self._pool.start(worker)
 
     def _on_write_error(self, err: str):
@@ -1752,13 +1784,11 @@ class TranslatePage(QWidget):
         Toast.show(self, message, "error")
         export_path = self._export_fail_record("写回失败", err)
         if export_path:
-            self.log_view.appendPlainText(f"失败记录已导出：{export_path}")
-            self._runlog("record", f"失败记录已导出：{export_path}")
+            self._log_line(f"失败记录已导出：{export_path}", "record")
         record_path = self._export_records(
             error_title="写回失败", error_detail=err)
         if record_path:
-            self.log_view.appendPlainText(f"完整记录已导出：{record_path}")
-            self._runlog("record", f"完整记录已导出：{record_path}")
+            self._log_line(f"完整记录已导出：{record_path}", "record")
 
     def _write_worker(self, project, generation: int, font_config,
                       signals=None, *, allow_partial: bool = False):
@@ -1965,14 +1995,14 @@ class TranslatePage(QWidget):
         coverage = verification.get("font_coverage")
         if gate:
             gate_text = f"{gate.get('status')} — {gate.get('detail')}"
-            self.log_view.appendPlainText(f"字体发布门：{gate_text}")
+            self._log_line(f"字体发布门：{gate_text}", "writeback")
             if coverage:
                 stacks = coverage.get("stack_counts") or {}
                 stack_text = " · ".join(
                     f"{kind}: {n}" for kind, n in sorted(stacks.items()))
-                self.log_view.appendPlainText(
+                self._log_line(
                     f"字体覆盖：{coverage.get('overall')}"
-                    f"（{stack_text or '无消费者'}）")
+                    f"（{stack_text or '无消费者'}）", "writeback")
                 missing = coverage.get("missing") or []
                 if missing:
                     self.log_view.appendPlainText("缺字：")
@@ -1990,23 +2020,22 @@ class TranslatePage(QWidget):
             # Phase 5：位图注入摘要（NGUI/BMFont provider 闭环）
             bitmap = verification.get("font_bitmap")
             if bitmap:
-                self.log_view.appendPlainText(
+                self._log_line(
                     "位图注入：" + f"provider {len(bitmap.get('providers') or [])} 个"
                     f"（{', '.join(bitmap.get('providers') or [])}）· "
                     f"注入 {bitmap.get('injected')} · "
                     f"审计 {bitmap.get('audited')} · "
-                    f"未注入 {bitmap.get('pending')}")
+                    f"未注入 {bitmap.get('pending')}", "writeback")
         else:
-            self.log_view.appendPlainText(
-                f"字体层级：{font_level_text}")
+            self._log_line(f"字体层级：{font_level_text}", "writeback")
         if gates:
             gate_parts = [
                 f"{name}={item.get('status', 'N/A')}"
                 for name, item in gates.items()
                 if name != "overall"]
-            self.log_view.appendPlainText(
+            self._log_line(
                 f"四态闸门：{' · '.join(gate_parts)}"
-                f"（overall={overall}）")
+                f"（overall={overall}）", "writeback")
             for name, item in gates.items():
                 if name != "overall" and item.get("detail"):
                     self.log_view.appendPlainText(
@@ -2060,8 +2089,9 @@ class TranslatePage(QWidget):
                 "info")
         manifest_name = verification.get("manifest")
         if manifest_name:
-            self.log_view.appendPlainText(
-                f"发布清单：{out / manifest_name}（全量文件 hash，含未修改文件）")
+            self._log_line(
+                f"发布清单：{out / manifest_name}（全量文件 hash，含未修改文件）",
+                "writeback")
         self.reveal_btn.setHidden(not verified)
         staged_exe = self._staged_executable()
         self.play_btn.setEnabled(
@@ -2073,8 +2103,7 @@ class TranslatePage(QWidget):
                 else f"请检查输入保护与重开验证（overall={overall}）")
             export_path = self._export_fail_record("写回未通过验证", detail)
             if export_path:
-                self.log_view.appendPlainText(f"失败记录已导出：{export_path}")
-                self._runlog("record", f"失败记录已导出：{export_path}")
+                self._log_line(f"失败记录已导出：{export_path}", "record")
         if route_blocked:
             Toast.show(self, "写回未通过验证 · 必需能力仍被阻断", "error")
         elif not route_complete:
@@ -2091,15 +2120,13 @@ class TranslatePage(QWidget):
             Toast.show(self, toast, "warning" if warnings else "success")
         record_path = self._export_records(write_result=result)
         if record_path:
-            self.log_view.appendPlainText(f"完整记录已导出：{record_path}")
-            self._runlog("record", f"完整记录已导出：{record_path}")
+            self._log_line(f"完整记录已导出：{record_path}", "record")
             # 写回审计报告随记录文档落盘（record_writer 已生成
             # writeback/audit.txt 时在记录目录内；此处兜底独立路径）
             audit_path = self.state.project.out_dir / "writeback" / "audit.txt"
             if audit_path.is_file():
-                self.log_view.appendPlainText(
-                    f"写回审计报告：{audit_path}")
-                self._runlog("audit", f"写回审计报告（全文）：{audit_path}")
+                self._log_line(
+                    f"写回审计报告：{audit_path}", "audit")
 
     def reveal_output(self):
         out = str(self.state.project.out_dir)

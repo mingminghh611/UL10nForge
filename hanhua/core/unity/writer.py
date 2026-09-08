@@ -327,7 +327,7 @@ def _fit_bytes(translation: str, capacity: int, encoding: str,
         # 代理区判定从未生效——死代码；正确条件是截断点前一字符落在
         # 代理区 U+D800-U+DFFF（高代理算半个代理对，退一格到低代理前）
         while (chars > 0
-               and "\uD800" <= translation[chars - 1:chars] <= "\uDFFF"):
+               and 0xD800 <= ord(translation[chars - 1]) <= 0xDFFF):
             chars -= 1
         data = (translation[:chars] + TRUNCATION_ELLIPSIS).encode("utf-16-le")[:capacity]
         if pad:

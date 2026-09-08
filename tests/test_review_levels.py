@@ -430,6 +430,27 @@ def test_memory_gate_none_memory_is_noop():
     _memory_apply(None, _entry(), "CRITICAL", "m", "zh-CN")  # 不抛
 
 
+def test_memory_gate_blocked_cleared_translation_still_removes():
+    """0.51.0 发布体检（审核线 High-1）：BLOCKED 条目清空译文后坏记忆
+    仍必须撤销——旧守卫 `not entry.translation` 一刀切导致撤销路径早退，
+    pending 桶坏译文被后续翻译召回（P0-3 污染链未断干净）。"""
+    mem = _FakeMemory()
+    entry = _entry(translation="")          # apply_outcome(clear_translation=True)
+    _memory_apply(mem, entry, "CRITICAL", "m", "zh-CN")
+    assert mem.removed == [("Save the game", "m", "zh-CN")]
+    assert mem.added == []
+    # PASS 路径译文为空 → 仍不 promote（无译文可提交）
+    mem2 = _FakeMemory()
+    _memory_apply(mem2, _entry(translation=""), "PASS", "m", "zh-CN")
+    assert mem2.added == [] and mem2.removed == []
+    # original 也为空的撤销调用 → 安全 no-op（remove_memory 收到空定位
+    # 无意义，直接早退）
+    mem3 = _FakeMemory()
+    _memory_apply(mem3, _entry(original="", translation=""), "CRITICAL",
+                  "m", "zh-CN")
+    assert mem3.removed == []
+
+
 # ── 再审收敛上限（T1-5） ───────────────────────────────────────────
 @dataclass
 class _FakeTranslator:

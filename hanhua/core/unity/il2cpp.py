@@ -81,7 +81,7 @@ def _is_display_template(s: str) -> bool:
 # il2cpp 引擎字符串（异常消息/调试日志/渲染 Pass/Input System 绑定/
 # URP Debug 面板/TMP 处理步骤/着色器路径/构造串/物理按键名）是确定性
 # 形态，真实游戏显示文本中几乎不可能完整出现。命中 → skipped（reason=
-# engine_log_message + 限量样本留档），不产生 pending——KoiKoi 实证
+# engine_log_message + 限量样本留档），不产生 pending——花札对局游戏实证
 # 1095 条 pending 全 low（引擎日志污染）→ 自动翻译池空 → 每批 1-2 条
 # 慢翻译（识别 B4/E3）。未被命中的留档条目仍是哑信号：宁可多留不可
 # 误杀（宁漏勿坏），真实游戏文本（'Koi Koi'/'Boar Deer Butterfly'）
@@ -114,11 +114,11 @@ _ENGINE_ERRWORD = re.compile(
     r'belongs to a different domain|can only be stopped|only be stopped|'
     r'not be called on|is not dynamic|not be null)\b', re.I)
 # 引擎日志特征词（无显式 errword 但形态确定）
-# B4 补充（2026-09-02，KoiKoi 实证）：A buffer must be provided /
+# B4 补充（2026-09-02，花札对局游戏实证）：A buffer must be provided /
 # Coroutine container not configured / No receiver for uri / Maximum
 # event size is / Only one XR display is supported 等异常消息被该正则吸收
 # （errword 已含 is read-only/cannot be null 等），B4 吸收层在模板分类
-# 之前——KoiKoi 102 条 pending 仍全 low 是**宁漏勿坏**的保守结果
+# 之前——该游戏 102 条 pending 仍全 low 是**宁漏勿坏**的保守结果
 # （识别宁严勿漏：宁可多留不可误杀真实文本）。此层收紧会误杀真实显示
 # 模板（HP: {0}/{1} 等），故不在此处扩正则，留档条目由人工/后续扫描
 # 处理。
@@ -274,7 +274,7 @@ _ENGINE_SCRIPT_RTL = re.compile(r'^[֐-׿]|^[؀-ۿ]')
 _ENGINE_CSS_SYNTAX = re.compile(r'^\[ <length-percentage>|^\[StyleSelectorPart')
 # 数学构造串（Normalize(min={0},max={1})…）
 _ENGINE_MATH_FMT = re.compile(r'^[A-Za-z]+\([a-zA-Z]+=\{\d')
-# 含占位符的引擎格式模板（KoiKoi 实证补充）：带引号占位符/异常形态词
+# 含占位符的引擎格式模板（花札游戏实证补充）：带引号占位符/异常形态词
 _ENGINE_FMT_QUOTE_PH = re.compile(r"""['"][{]\d+""")
 _ENGINE_FMT_MSG_WORD = re.compile(
     r"(?:violation on path|fault on path|Win32 IO returned|"
@@ -325,7 +325,7 @@ _ENGINE_SENTENCE_HEAD = re.compile(
     r"Validate a |Validate using|Value has |ValueFactory |"
     r"Visual |Waithandle |Warning: |When supplying|Xform |"
     r"Year, |You can only|You must specify)", re.I)
-# 无显式 errword 但确定的引擎日志（KoiKoi 实证补充）
+# 无显式 errword 但确定的引擎日志（花札游戏实证补充）
 _ENGINE_SENTENCE_LOG = re.compile(
     r'^(?:A context property did not approve the candidate context for activating the object|'
     r'Nested animation tracks should never be asked to create a graph directly|'
@@ -345,7 +345,7 @@ def _is_engine_log_message(s: str) -> bool:
     引擎字符串是确定性形态（异常语义词/渲染 Pass/Input System 绑定/
     调试面板/TMP 处理步骤/着色器路径/构造串/物理按键名），真实游戏显示
     文本中几乎不可能完整出现。命中的条目绝不应进翻译池（识别 B4：
-    il2cpp 引擎字符串污染 KoiKoi 1095 条 pending 全 low → 自动翻译池
+    il2cpp 引擎字符串污染（花札对局游戏 1095 条 pending 全 low） → 自动翻译池
     空）。未被命中的留档条目仍是哑信号——宁可多留不可误杀（宁漏勿坏），
     真实游戏文本（'Koi Koi'/'Boar Deer Butterfly'）必须保留为可译条目。
     """
@@ -377,7 +377,7 @@ def _is_engine_log_message(s: str) -> bool:
         return True
     # 无占位符的完整句子形态异常消息（"Index was outside…"）：句号结尾
     # + 引擎前缀词。带占位符的定位串（'Type {0} NameID {1} InstanceID {2}'
-    # 'XR Pass {0} Cull {1}'）被误判 display/low 留档（KoiKoi 实证）——
+    # 'XR Pass {0} Cull {1}'）被误判 display/low 留档（同批实证）——
     # 识别是宁漏勿坏（宁可多留不可误杀），此处不再收紧，让它们流回
     # 留档而非吸收（防真实显示模板误杀）。
     # 多词完整句子形态（非占位符）：句号结尾 + 引擎前缀词（The/An/Only/
@@ -1009,7 +1009,7 @@ def extract_metadata_strings(path: str | Path, file_id: str | None = None,
         # 消息/调试日志/渲染 Pass/Input System 绑定/URP 面板/TMP 处理步骤/
         # 着色器路径/物理按键名）是确定性形态，真实游戏显示文本中几乎
         # 不可能完整出现。命中 → skipped（reason=engine_log_message + 限量
-        # 样本留档），不产生 pending——KoiKoi 实证 1095 条 pending 全
+        # 样本留档），不产生 pending——花札对局游戏实证 1095 条 pending 全
         # low（引擎日志污染）→ 自动翻译池空 → 每批 1-2 条慢翻译。吸收层
         # 在模板细分类之前（含占位符的引擎消息也吸收），仅放行真实游戏
         # 文本（'Koi Koi'/'Boar Deer Butterfly' 等）。

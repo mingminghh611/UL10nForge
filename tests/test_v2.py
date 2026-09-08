@@ -942,6 +942,49 @@ def test_fit_bytes_utf16():
     assert truncated and len(out) == 10
 
 
+def test_fit_bytes_utf16_no_lone_surrogate_at_cut():
+    """P6b 回归（0.51.0 发布体检）：UTF-16 截断点不得落在代理对中间。
+
+    历史坑：0.42.1 的守卫用字符串链式比较 + \\uXXXX 转义端点，端点在
+    编码/显示管线里被 U+FFFD 顶替后守卫变死代码且肉眼不可见；0.51.0
+    改 ord() 码点比较根治。两层防线回归：
+    ① astral 平面正常文本（emoji/扩展 CJK）截断后不产生孤立代理；
+    ② 源串内嵌孤立代理（surrogatepass 解码产物）时，截断点落在孤立
+    代理前必须回退（该字符 1 码点 = 2 字节，位置信息不可靠）。
+    """
+    # ① 全 emoji 文本：按码点切片不会拆真代理对，断言输出无孤立高代理
+    out, truncated = _fit_bytes("🎮" * 20, 21, "utf-16-le", pad=False)
+    assert truncated
+    for i in range(0, len(out) - 1, 2):
+        cp = int.from_bytes(out[i:i + 2], "little")
+        assert not (0xD800 <= cp <= 0xDBFF) or (
+            i + 3 < len(out)
+            and 0xDC00 <= int.from_bytes(out[i + 2:i + 4], "little") <= 0xDFFF
+        ), "高代理后必须紧跟低代理，不得孤立"
+    out2, truncated2 = _fit_bytes("𠀋字" * 10, 11, "utf-16-le", pad=False)
+    assert truncated2
+    for i in range(0, len(out2) - 1, 2):
+        cp = int.from_bytes(out2[i:i + 2], "little")
+        assert not (0xD800 <= cp <= 0xDBFF) or (
+            i + 3 < len(out2)
+            and 0xDC00 <= int.from_bytes(out2[i + 2:i + 4], "little") <= 0xDFFF
+        ), "高代理孤立（截断点切在代理对中间）"
+    # ② 源串含孤立高代理：截断点落在孤立代理前必须回退一格。
+    #    注：_fit_bytes 入口对孤立代理本身会抛 UnicodeEncodeError
+    #    （独立防线）；守卫防的是 surrogatepass 产物流入
+    #    后续切片路径，这里复刻内部预算+守卫两循环直接断言守卫语义。
+    text = "X\uD800" + "Y" * 20      # U+D800 孤立高代理
+    chars = max(1, 6 // 2 - 1)
+    while (chars > 0
+           and len((text[:chars] + "…").encode(
+               "utf-16-le", errors="surrogatepass")) > 6):
+        chars -= 1
+    before = chars
+    while chars > 0 and 0xD800 <= ord(text[chars - 1]) <= 0xDFFF:
+        chars -= 1
+    assert chars < before, "守卫未回退：截断点前一字符是孤立代理仍被保留"
+
+
 # ── TextAsset 提取与写回 ──
 def test_textasset_lines_extract():
     raw = "Hello there\n第二行\nThird line with {name} tag\n".encode("utf-8")

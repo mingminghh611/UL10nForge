@@ -60,7 +60,7 @@ _PROTECTED_SINGLE_WORDS = frozenset(
 # 动作/操作短语（'Deck Play'/'Call Koi Koi'）不在表中 → 被
 # _context_preserve_ok 拦截不注入。
 _PURE_PROPER_NOUN = frozenset({
-    # 花札卡面专名（KoiKoi）
+    # 花札卡面专名（花札对局游戏实证）
     "Matsu no Tsuru", "Ume no Uguisu", "Sakura no Maku", "Fuji no Fujoki",
     "Ayame no Hashi", "Botan no Chou", "Hagi no Inoshishi",
     "Susuki no Tsuki", "Susuki no Gan", "Kiku no Sake", "Momiji no Shika",
@@ -389,7 +389,7 @@ class AgentMemory:
     def _context_preserve_ok(source: str, target: str) -> bool:
         """组合词对（含空格）是否可作全局参考注入。
 
-        KoiKoi 实证（2026-09-01）：组合词对也会被跨游戏复用误伤——
+        花札游戏实证（2026-09-01）：组合词对也会被跨游戏复用误伤——
         'Deck Play'（花札「牌堆出牌」）被提成 (Deck, 牌组) 后，其他游戏
         'Deck'（卡牌构筑 deck）被强制成「牌组」，语境不通。组合词对只在
         满足以下条件之一时注入：
@@ -430,7 +430,7 @@ class AgentMemory:
         内置规则随 prompt 恒在，冲突记忆只会覆盖正确规则（参考译例
         对模型比规则更显眼）。
 
-        2026-09-01（KoiKoi 组合词对污染）：组合词对也加语境保护——
+        2026-09-01（花札游戏组合词对污染）：组合词对也加语境保护——
         非保留型/非全大写/非纯专名的动作短语（'Deck Play'→牌堆出牌
         被提炼成 Deck→牌组 污染跨游戏）不注入；纯专名（'AoTan'→
         '青短'）译名固定可全局注入。

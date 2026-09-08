@@ -825,7 +825,9 @@ def run_game(game_dir: Path, *, batch: int | None = None,
         print(f"[错误] --resume 但项目库不存在：{my_dir}")
         return 5
     if my_dir.exists() and not resume:
-        shutil.rmtree(my_dir, ignore_errors=False)
+        # _rmtree_force：旧库文件常带只读位（tool-jobs 复制副本），
+        # 裸 rmtree 遇 PermissionError 直接崩溃（0.51.0 发布体检实证）
+        _rmtree_force(my_dir)
     app_dir.mkdir(parents=True, exist_ok=True)
     projects_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1155,7 +1157,18 @@ def run_game(game_dir: Path, *, batch: int | None = None,
         pending_count = sum(is_actionable_translation(e) for e in entries)
         print(f"  条目 {len(entries)} · 待翻译 {pending_count}"
               f" · 批量 {batch_size} · 并发 {concurrency}")
-        stats = translator.run(entries, progress_cb=None)
+        # 翻译是 runner 主链路：异常（模型服务崩溃 / OOM / 网络中断 /
+        # SQLite 锁）必须有总结落盘（C12：不看 stdout 也能还原失败原因），
+        # 否则知识库 / 经验记忆沉淀全部丢失且无排查凭据。
+        # 0.51.0 发布体检实证：此前裸调用，异常直接进程退出。
+        try:
+            stats = translator.run(entries, progress_cb=None)
+        except Exception as exc:  # noqa: BLE001 翻译异常→带总结降级退出
+            print(f"[错误] 翻译阶段异常：{exc}", flush=True)
+            _write_summary(project, report, None, None, game_name, out_dir,
+                           error=f"翻译阶段异常：{exc}",
+                           language_profile=lang_profile)
+            return 4
         print(f"  完成：{stats.done} 条（记忆 {stats.from_memory}）"
               f" · 失败 {stats.failed} · 请求 {stats.requests}"
               f" · 耗时 {stats.elapsed:.1f}s")

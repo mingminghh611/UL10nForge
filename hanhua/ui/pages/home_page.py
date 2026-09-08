@@ -1130,7 +1130,11 @@ class HomePage(QWidget):
         recognizer = GameContextRecognizer(config)
         raw = recognizer.recognize(samples, source_lang=source_lang)
         ctx = parse_game_context(raw)
+        # 基线口径（0.51.0 修正）：存「可翻译数」与 context_needs_update
+        # 的对比端同口径——旧口径存总量，skipped 占比 >20% 的游戏门恒不触发。
         ctx["_sampled_total"] = len(rows)
+        ctx["_sampled_actionable"] = sum(
+            is_actionable_translation(entry_from_row(r)) for r in rows)
         save_game_context(store, ctx)
         return ctx, raw
 

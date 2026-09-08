@@ -421,8 +421,9 @@ class GameContextRecognizer:
 def load_game_context(store) -> dict:
     """从 ProjectStore KV 读 Game Context（缺失/损坏 → {}）。
 
-    白名单过滤防旧库脏数据膨胀，但放行内部元数据字段（_sampled_total，
-    §23 需要更新判定基线）——它不属于注入上下文的语境字段。
+    白名单过滤防旧库脏数据膨胀，但放行内部元数据字段（_sampled_total/
+    _sampled_actionable，§23 需要更新判定基线）——它们不属于注入
+    上下文的语境字段。
     """
     try:
         value = store.get_profile_value(GAME_CONTEXT_KEY, {})
@@ -430,20 +431,26 @@ def load_game_context(store) -> dict:
         return {}
     if isinstance(value, dict):
         return {k: v for k, v in value.items()
-                if k in _CONTEXT_FIELDS or k == "_sampled_total"}
+                if k in _CONTEXT_FIELDS
+                or k in ("_sampled_total", "_sampled_actionable")}
     return {}
 
 
 def save_game_context(store, ctx: dict) -> None:
     """Game Context → ProjectStore KV（覆盖旧值）。
 
-    _sampled_total 是「需要更新」判定基线（§23）非语境字段，一并持久化
-    但禁止作为注入上下文（build_game_context_block 只读 context_* 字段）。
+    _sampled_actionable 是「需要更新」判定基线（§23，0.51.0 口径修正：
+    与对比端同为可翻译数口径）非语境字段，一并持久化但禁止作为注入
+    上下文（build_game_context_block 只读 context_* 字段）。
+    _sampled_total 是旧口径基线，仅为存量库兼容保留读写。
     """
     clean = {k: ctx.get(k) for k in _CONTEXT_FIELDS if ctx.get(k) not in (None, "")}
-    baseline = ctx.get("_sampled_total")
+    baseline = ctx.get("_sampled_actionable")
     if isinstance(baseline, (int, float)) and baseline > 0:
-        clean["_sampled_total"] = int(baseline)
+        clean["_sampled_actionable"] = int(baseline)
+    old_baseline = ctx.get("_sampled_total")
+    if isinstance(old_baseline, (int, float)) and old_baseline > 0:
+        clean["_sampled_total"] = int(old_baseline)
     try:
         store.set_profile_value(GAME_CONTEXT_KEY, clean)
     except Exception:  # noqa: BLE001 持久化失败降级（不阻断识别流程）
@@ -483,15 +490,23 @@ def clear_game_context(store) -> None:
 
 def context_needs_update(store, actionable_total: int) -> bool:
     """「需要更新」三态判定（§23）：已有 Game Context 且新增可翻译文本
-    ≥ 已有总量 25%（估算：识别时文本总量未存，用上下文里记录的可翻译
-    数对比；无记录时按增量比例近似）。
+    ≥ 已有总量 25%。
+
+    0.51.0 发布体检（识别线 Medium-2）修正口径不一致：基线
+    _sampled_total 历史上存的是「识别时条目总量」，而这里对比的是
+    actionable_total（可翻译数）——当 skipped 占比 >20% 时即便可翻译
+    条目翻倍也永远达不到 baseline*1.25，门恒不触发，语境永不更新。
+    现基线统一为「识别时可翻译数」（_sampled_actionable），两处写入
+    端（home_page._recognize_worker / translate_page 自动识别）同步
+    存该口径；旧库只有 _sampled_total 时退回保守（不触发更新），
+    下一次重新识别后基线自动迁移。
 
     返回 False 时 UI 显示「已建立」；无 Game Context 显示「未建立」。
     """
     ctx = load_game_context(store)
     if not ctx:
         return False
-    baseline = int(ctx.get("_sampled_total") or 0)
+    baseline = int(ctx.get("_sampled_actionable") or 0)
     if baseline <= 0:
         return False
     return actionable_total >= baseline * (1 + CONTEXT_UPDATE_RATIO)

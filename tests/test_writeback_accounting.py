@@ -328,6 +328,11 @@ def test_fit_bytes_guard_constants_are_surrogate_range():
     """守卫常量必须是代理区 U+D800–U+DFFF（0.42.1 审计：旧写法单字符
     链式比较 (U+FFFD <= c <= U+FFFD) 只匹配替换字符本身——死代码，
     代理区判定从未生效）。AST 层锁定常量，防止回归成 FFFD 死代码。
+
+    0.51.0 发布体检改写：守卫从字符串字面量链式比较改为
+    0xD800 <= ord(c) <= 0xDFFF 数字比较——\\uXXXX 转义端点在编码/
+    显示管线里会被 U+FFFD 顶替（0.42.1→0.51.0 期间两次复发且肉眼
+    不可见），数字常量无此歧义。本测试同步改为锁定数字比较端点。
     """
     import ast as _ast
     import io as _io
@@ -335,11 +340,12 @@ def test_fit_bytes_guard_constants_are_surrogate_range():
     src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
         _os.path.abspath(__file__))), "hanhua", "core", "unity",
         "writer.py"), encoding="utf-8").read()
-    consts = [ord(n.value) for n in _ast.walk(_ast.parse(src))
-              if isinstance(n, _ast.Constant) and isinstance(n.value, str)
-              and len(n.value) == 1
-              and 0xD800 <= ord(n.value) <= 0xDFFF]
-    assert 0xD800 in consts and 0xDFFF in consts
+    consts = [n.value for n in _ast.walk(_ast.parse(src))
+              if isinstance(n, _ast.Constant) and isinstance(n.value, int)
+              and 0xD800 <= n.value <= 0xDFFF]
+    assert 0xD800 in consts and 0xDFFF in consts, (
+        "守卫必须用数字码点比较（0xD800/0xDFFF 常量）锁定代理区判定"
+    )
 
 
 def test_fit_bytes_guard_backs_off_high_surrogate():
