@@ -1476,6 +1476,17 @@ def run_game(game_dir: Path, *, batch: int | None = None,
     skipped = project.store.count("skipped")
     print(f"  translated {translated} · failed {failed} · skipped {skipped}")
 
+    # XUAT 词典导出（0.50.0 A14）：与 GUI record_writer 同一实现——
+    # 译文另存 XUAT 运行时词典（写坏高危游戏的零风险替换路线）。
+    try:
+        from hanhua.core.xuat_export import export_xuat_translations
+        xuat_path = export_xuat_translations(project, out_dir / "xuat")
+        if xuat_path:
+            print(f"  XUAT 词典：{xuat_path.name}（运行时替换路线，"
+                  f"不写游戏文件）")
+    except Exception as exc:  # noqa: BLE001 附属功能不阻断闭环
+        print(f"  [XUAT] 词典导出失败：{exc}")
+
     _write_summary(project, report, stats, writeback_result, game_name,
                    out_dir, error=writeback_error,
                    review_summary=review_summary or None,

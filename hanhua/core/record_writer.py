@@ -1315,6 +1315,15 @@ def export_records(project, out_root: Path | None = None, *,
             review_summary=review_summary)
         if agent_report:
             _write_memory_report(out_dir, agent_report)
+        # XUAT 词典导出（0.50.0 A14）：译文另存一份 XUAT 运行时词典
+        # （xuat/Translation/<Lang>/Text/00_<游戏名>.txt）——写坏高危
+        # 游戏的零风险替换路线（不写任何游戏文件）。附属功能：失败不
+        # 阻断记录导出，无译文名目静默跳过。
+        try:
+            from hanhua.core.xuat_export import export_xuat_translations
+            export_xuat_translations(project, out_dir / "xuat")
+        except Exception:  # noqa: BLE001 附属功能不阻断主流程
+            pass
         _write_auto_docs(
             project, out_dir, profile,
             result=write_result,
