@@ -363,7 +363,7 @@ def test_patch_metadata_reopen_verifies_unpatched_records(tmp_path, monkeypatch)
     path.write_bytes(raw)
     real_patch = il2cpp.patch_metadata_strings
 
-    def corrupting_patch(raw_bytes, changes):
+    def corrupting_patch(raw_bytes, changes, **_kwargs):
         out = bytearray(real_patch(raw_bytes, changes))
         # 破坏未补丁记录 Beta（重建后前移到 0x201..0x205）——内容仍合法
         # ASCII/UTF-8，结构完整，旧验证（只查被改记录）无法发现
@@ -385,7 +385,7 @@ def test_patch_metadata_reopen_rejects_record_count_change(tmp_path, monkeypatch
     path.write_bytes(raw)
     real_patch = il2cpp.patch_metadata_strings
 
-    def dropping_patch(raw_bytes, changes):
+    def dropping_patch(raw_bytes, changes, **_kwargs):
         out = bytearray(real_patch(raw_bytes, changes))
         # 删除末条记录（Gamma 0x205..0x20A）并收缩 header 记录数/数据声明：
         # 模拟重建游标偏差——文件仍合法但记录数减少
@@ -759,3 +759,143 @@ def test_patch_metadata_restores_missing_placeholder_without_truncation(tmp_path
     assert patched[0][2] is not None
     data_off = patched[0][2]
     assert reopened[data_off:data_off + 9].decode("utf-8") == "继续{0}"
+
+
+# --------------------------------------------------------------------------
+# 变长写回（0.48.0）：explicit 容量溢出 → 全局紧凑重建（原位失败回退变长路径）
+# --------------------------------------------------------------------------
+
+def test_patch_metadata_allow_overflow_rebuilds_in_region():
+    """变长核心：explicit 译文超单条容量 → allow_overflow=True 全量紧凑
+    重建到数据区头部（文件长度恒等、不追加），译文按实际长度读出。"""
+    raw = _build(31, ["Hi", "Hello player welcome"])   # 数据区 22B
+    patched = il2cpp.patch_metadata_strings(
+        raw, {0: "你好世界".encode("utf-8"), 2: "你好".encode("utf-8")},
+        allow_overflow=True)
+    assert len(patched) == len(raw)          # 重建不移动文件长度
+    texts = [patched[pos:pos + ln].decode("utf-8")
+             for _di, ln, pos
+             in sorted(il2cpp.parse_string_literals(patched), key=lambda r: r[2])]
+    assert texts == ["你好世界", "你好"]     # 溢出条目按实际长度，无截断
+    # dataSize 收紧到新总长，区域尾部清零（确定性）
+    assert struct.unpack_from("<I", patched, 0x14)[0] == 12 + 6
+    assert patched[0x200 + 18:0x200 + 22] == b"\x00" * 4
+
+
+def test_patch_metadata_allow_overflow_untouched_records_byte_identical():
+    """重建后未译记录必须逐字节等值（紧凑搬运零污染）。"""
+    raw = _build(27, ["Hi", "Hello player welcome", "Goodbye"])
+    patched = il2cpp.patch_metadata_strings(
+        raw, {0: "好".encode("utf-8"), 22: "再见".encode("utf-8")},
+        allow_overflow=True)
+    recs = sorted(il2cpp.parse_string_literals(patched), key=lambda r: r[2])
+    # 中间未译记录 'Hello player welcome' 与原字节逐位一致
+    assert patched[recs[1][2]:recs[1][2] + 20] == raw[0x202:0x202 + 20]
+
+
+def test_patch_metadata_allow_overflow_default_still_raises():
+    """默认（allow_overflow=False）保持旧契约：超容量硬拒绝——既有
+    调用方/测试语义不变，只有明确选择变长路径的调用方拿到重建。"""
+    raw = _build(31, ["Hi", "Hello player welcome"])
+    with pytest.raises(ValueError, match="超过容量"):
+        il2cpp.patch_metadata_strings(raw, {0: b"x" * 30})
+
+
+def test_patch_metadata_allow_overflow_region_overflow_raises():
+    """数据区整体放不下（全部记录紧凑后仍超 data_size）→ 拒绝重建
+    （调用方回退截断路径，绝不越出数据区写坏其他区段）。"""
+    raw = _build(24, ["Ab"])                            # 数据区 2B
+    with pytest.raises(ValueError, match="数据区溢出"):
+        il2cpp.patch_metadata_strings(
+            raw, {0: "超长译文超长译文超长译文超长译文".encode("utf-8")},
+            allow_overflow=True)
+
+
+def test_patch_metadata_allow_overflow_duplicate_data_index_shared_offset():
+    """重复 data_index（空记录 length=0 与实数据共享偏移）：重建后全部
+    同 index 条目指向同一新区偏移，空记录保持 0（不产生区间重叠）。"""
+    raw = bytearray(_build(29, ["Hello", "Worldxxxxxxxxxxxx"]))
+    struct.pack_into("<II", raw, 0x100 + 16, 0, 0)      # 追加空记录 (len=0, idx=0)
+    struct.pack_into("<I", raw, 0x0C, 24)               # litTableSize 16→24
+    patched = il2cpp.patch_metadata_strings(
+        bytes(raw), {0: "你好世界呀".encode("utf-8"),
+                     5: "世".encode("utf-8")},
+        allow_overflow=True)
+    recs = il2cpp._independent_pool_records(patched)
+    empty = [r for r in recs if r[1] == 0]
+    assert len(empty) == 1                              # 空记录保真
+    texts = [patched[pos:pos + ln].decode("utf-8")
+             for _di, ln, pos
+             in sorted(il2cpp.parse_string_literals(patched), key=lambda r: r[2])]
+    assert texts == ["你好世界呀", "世"]
+
+
+def test_patch_metadata_allow_overflow_no_overflow_stays_in_place():
+    """allow_overflow=True 但全部条目在容量内 → 仍原位路径（改动面最小，
+    未译条目偏移不变——重建只对真溢出启用）。"""
+    raw = _build(31, ["Hi", "Hello"])
+    patched = il2cpp.patch_metadata_strings(
+        raw, {2: "好".encode("utf-8")}, allow_overflow=True)
+    assert (0, 2, 0x200) in il2cpp.parse_string_literals(patched)  # 未译原位
+
+
+def test_patch_metadata_variable_length_writeback_integration(tmp_path):
+    """writer 集成：explicit 溢出条目经 _patch_metadata 走变长重建——
+    written（非 truncated），重开验证全池通过，译文完整无省略号。"""
+    raw = _build(31, ["Hi!", "Hello there friend"])    # 3 + 17 = 20B 数据区
+    path = tmp_path / "global-metadata.dat"
+    path.write_bytes(raw)
+    result = WriteResult()
+    _patch_metadata(path, [
+        # rec0 容量 3B，译文 12B 溢出；rec1 同步翻译腾出区域空间
+        _meta_entry(0x200, 3, "Hi!", "你好世界"),
+        _meta_entry(0x203, 18, "Hello there friend", "好"),
+    ], result)
+    assert result.written == 2
+    assert result.truncated == 0                        # 变长路径不截断
+    assert result.rejected == []
+    reopened = path.read_bytes()
+    texts = [reopened[pos:pos + ln].decode("utf-8")
+             for _di, ln, pos
+             in sorted(il2cpp.parse_string_literals(reopened), key=lambda r: r[2])]
+    assert texts == ["你好世界", "好"]                  # 完整译文
+
+
+def test_patch_metadata_variable_length_region_overflow_falls_back_to_truncation(tmp_path):
+    """writer 集成：重建也放不下（数据区整体溢出）→ 截断兜底（宁可截断
+    不可拒写整场），truncated 记账 + 重开验证通过。"""
+    raw = _build(31, ["Ab"])                            # 数据区 2B
+    path = tmp_path / "global-metadata.dat"
+    path.write_bytes(raw)
+    result = WriteResult()
+    _patch_metadata(path, [
+        _meta_entry(0x200, 2, "Ab", "超长译文超长译文超长译文超长译文"),
+    ], result)
+    # 容量 2B 连一个完整汉字（UTF-8 3B/字）+ 省略号都放不下 → 截断后
+    # 为空 → 诚实拒绝（写空字符串会抹掉文本 + 破坏记录数守恒）
+    assert result.written == 0
+    assert result.truncated == 0
+    assert len(result.rejected) == 1
+    assert path.read_bytes() == raw                     # 文件原样
+
+
+def test_patch_metadata_variable_length_placeholder_restored_uncapped(tmp_path):
+    """变长路径占位符恢复无容量上限：译文缺 {0} 补末尾后若超原容量，
+    走重建而非截断——占位符完整 + 译文完整。"""
+    raw = _build(31, ["Go {0}", "Hello there friend", "zzz"])  # 6+18+3=27B 数据区
+    path = tmp_path / "global-metadata.dat"
+    path.write_bytes(raw)
+    result = WriteResult()
+    _patch_metadata(path, [
+        # 「出发{0}」= 9B > 6B 容量 → 溢出 → 重建；长兄弟条目同步翻译
+        # 腾出区域空间（27B 区 ≥ 9+3+3）
+        _meta_entry(0x200, 6, "Go {0}", "出发"),
+        _meta_entry(0x206, 18, "Hello there friend", "好"),
+    ], result)
+    assert result.written == 2
+    assert result.truncated == 0
+    reopened = path.read_bytes()
+    texts = [reopened[pos:pos + ln].decode("utf-8")
+             for _di, ln, pos
+             in sorted(il2cpp.parse_string_literals(reopened), key=lambda r: r[2])]
+    assert texts == ["出发{0}", "好", "zzz"]

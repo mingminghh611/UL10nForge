@@ -648,7 +648,8 @@ def metadata_data_layout(raw: bytes) -> tuple[int, int, str] | None:
     return data_off, data_size, record_mode
 
 
-def patch_metadata_strings(raw: bytes, changes: dict[int, bytes]) -> bytes:
+def patch_metadata_strings(raw: bytes, changes: dict[int, bytes],
+                           *, allow_overflow: bool = False) -> bytes:
     """按 data_index 原位替换字面量数据,并同步修复长度语义(尾部 NUL 修复)。
 
     explicit(v24/27/29/31):记录区 <length> 字段更新为译文实际字节数,数据原位;
@@ -667,6 +668,11 @@ def patch_metadata_strings(raw: bytes, changes: dict[int, bytes]) -> bytes:
 
     explicit(v24/27/29/31):记录 <length> 字段显式,数据原位覆盖,无差分
     问题,dataSize/header 一律不动。两种模式都不改记录数/其他区偏移。
+
+    allow_overflow=True:explicit 溢出条目（译文 > 原容量）不再拒绝,
+    全量转 rebuild_metadata_strings_extended 全局紧凑重建（变长路径,
+    0.48.0）——CJK 译文长于原英文时不再截断降质。implicit 本身即变长
+    （紧凑重建）,该开关无影响。
     """
     if not changes:
         return raw
@@ -693,14 +699,24 @@ def patch_metadata_strings(raw: bytes, changes: dict[int, bytes]) -> bytes:
         raise ValueError("metadata 字面量池交叉验证不一致,拒绝补丁")
     by_index = {data_index: (length, data_pos)
                 for data_index, length, data_pos in records}
+    overflow: list[int] = []
     for data_index, payload in changes.items():
         if data_index not in by_index:
             raise ValueError(f"data_index {data_index} 不在字面量记录表中")
         if len(payload) > by_index[data_index][0]:
-            raise ValueError(
-                f"译文 {len(payload)} 字节超过容量 "
-                f"{by_index[data_index][0]}（data_index={data_index}）")
+            if not allow_overflow:
+                raise ValueError(
+                    f"译文 {len(payload)} 字节超过容量 "
+                    f"{by_index[data_index][0]}（data_index={data_index}）")
+            # allow_overflow：调用方明确选择变长回退路径（溢出条目走
+            # 全局紧凑重建），原位写入超出容量会覆盖邻接记录数据——
+            # 这里只记账，绝不原位写超长 payload
+            overflow.append(data_index)
     blob = bytearray(raw)
+    if record_mode == "explicit" and overflow:
+        # 变长回退：全量走 rebuild_metadata_strings_extended（全局紧凑
+        # 重建，溢出条目按实际长度写入）。返回前防御已在其内部执行。
+        return rebuild_metadata_strings_extended(raw, changes)
     if record_mode == "explicit":
         # 记录区全部条目按 data_index 索引——绝不能用 valid 记录序号推算
         # 记录区位置：parse 的 UTF-8/非零长过滤会破坏「序号 ↔ 记录区位置」
@@ -770,7 +786,8 @@ def _assert_diff_whitelist(raw: bytes, blob: bytearray, *, record_mode: str,
                            data_size: int, data_size_pos: int, entry_size: int,
                            changes: dict[int, bytes],
                            by_index: dict[int, tuple[int, int]],
-                           cursor: int | None = None) -> None:
+                           cursor: int | None = None,
+                           rebuild: bool = False) -> None:
     """写回差异白名单：patch 前后逐字节 diff，所有差异必须落在合法变更
     范围内——header 其他字段、其他区段（方法名表/类表等游戏逻辑所在）
     零字节被碰（「不影响游戏」的硬保证）。
@@ -780,11 +797,14 @@ def _assert_diff_whitelist(raw: bytes, blob: bytearray, *, record_mode: str,
     逻辑同判据，空记录不更新）。
     implicit：允许差异 = 数据区 [data_off, data_off+cursor)（紧凑重建）
     + dataSize 字段 + 记录区全部条目（链式更新）。
+    rebuild=True（变长全局重建，explicit 容量溢出回退）：区间模型与
+    implicit 同——数据区全区间（紧凑重排 + 空洞清零）+ dataSize 字段 +
+    记录区全部条目（explicit 重建时 length/dataIndex 都重写）。
     """
     patched = bytes(blob)
     if len(patched) != len(raw):
         raise ValueError(f"写回改变了文件长度 {len(raw)} -> {len(patched)}")
-    if record_mode == "explicit":
+    if record_mode == "explicit" and not rebuild:
         allowed: set[int] = set()
         for data_index, payload in changes.items():
             _length, data_pos = by_index[data_index]
@@ -802,6 +822,8 @@ def _assert_diff_whitelist(raw: bytes, blob: bytearray, *, record_mode: str,
         # 数据区允许范围 = 整个 [data_off, data_off+data_size)：紧凑重建
         # 搬移全部记录 + 空洞（原数据区尾部）清零覆盖数据区全部字节；
         # 白名单的意义是锁定「数据区/记录区/dataSize 之外零字节被碰」
+        # （rebuild=True 的 explicit 全局重建同一区间模型——数据区重排
+        # + 记录区 length/dataIndex 重写 + dataSize 收紧）
         intervals = [
             (data_off, data_off + data_size),
             (data_size_pos, data_size_pos + 4),
@@ -814,6 +836,106 @@ def _assert_diff_whitelist(raw: bytes, blob: bytearray, *, record_mode: str,
         raise ValueError(
             f"写回差异越出白名单 {len(bad)} 处（首例 0x{bad[0]:x}），"
             "文件被意外改动，拒绝")
+
+
+def rebuild_metadata_strings_extended(raw: bytes,
+                                      changes: dict[int, bytes]) -> bytes:
+    """变长全局重建（explicit 容量溢出时的回退路径，0.48.0）。
+
+    与 patch_metadata_strings（原位）不同：全部记录紧凑重排到数据区头部
+    （v24/27/29/31 是独占区间模型，搬迁无邻接污染），译文按实际长度写入，
+    未写条目原字节搬运，dataSize 同步收紧（新总长）。文件长度、记录数、
+    其他区段（header/记录区之外的表）一律不动。
+
+    复用同一套防御（布局白名单/_cross_validate_pool/_assert_diff_whitelist
+    implicit 区间模型——数据区全区间 + dataSize + 记录区，恰好覆盖本重建
+    的合法变更面）。仅支持 explicit：implicit（v39）的 patch 本身就是
+    紧凑重建，天然变长，不需要回退。
+
+    重复 data_index 条目（空字符串 length=0 与实数据共享偏移）语义保持：
+    全部同 index 条目指向同一新区偏移；记录各自保留原 length（被译条目
+    仅 length>0 的实际条目更新为译文长度——与原位路径同判据，空记录
+    保持 0 不产生区间重叠）。
+
+    返回新字节；任何防御失败抛 ValueError（调用方回退截断）。
+    """
+    if not changes:
+        return raw
+    if len(raw) < _MIN_METADATA_HEADER_SIZE:
+        raise ValueError("metadata 文件过短,无法补丁")
+    magic, version = struct.unpack_from("<II", raw, 0)
+    if magic != METADATA_MAGIC:
+        raise ValueError("非 global-metadata.dat(magic 不匹配)")
+    layout = _LAYOUTS.get(version)
+    if layout is None:
+        raise ValueError(f"不支持的 metadata 版本: {version}")
+    (lit_off_pos, lit_size_pos, data_off_pos, data_size_pos,
+     entry_size, record_mode) = layout
+    if record_mode != "explicit":
+        raise ValueError("变长重建仅支持 explicit 记录模式")
+    lit_off, lit_table_size = struct.unpack_from("<II", raw, lit_off_pos)
+    data_off, data_size = struct.unpack_from("<II", raw, data_off_pos)
+    if not lit_table_size or not data_size:
+        raise ValueError("metadata 字面量表或数据区为空")
+    if not _cross_validate_pool(raw):
+        raise ValueError("metadata 字面量池交叉验证不一致,拒绝补丁")
+    # 记录区全部条目（含 parse 过滤掉的空/非 UTF-8 记录）——与
+    # patch_metadata_strings 同一教训（minato 实证：过滤条目被丢下 →
+    # 残留旧 dataIndex → 越界）。记录区顺序逐条读 <length, dataIndex>。
+    count = lit_table_size // entry_size
+    ordered: list[tuple[int, int]] = []
+    for i in range(count):
+        pos = lit_off + i * entry_size
+        length, data_index = struct.unpack_from("<II", raw, pos)
+        ordered.append((data_index, length))
+    pool_indexes = {di for di, _ln, _pos in
+                    (_independent_pool_records(raw) or ())}
+    for data_index in changes:
+        if data_index not in pool_indexes:
+            raise ValueError(f"data_index {data_index} 不在字面量记录表中")
+    # 每个 data_index 取代表长度（非零长实数据；重复条目全为 0 时为 0）
+    rep_len: dict[int, int] = {}
+    for data_index, length in ordered:
+        if length > rep_len.get(data_index, 0):
+            rep_len[data_index] = length
+    blob = bytearray(raw)
+    # 布局：按记录区首次出现顺序放置，同 index 条目共享偏移
+    placed: dict[int, int] = {}
+    new_offsets: list[int] = []
+    blocks: list[tuple[int, bytes]] = []
+    cursor = 0
+    for data_index, _length in ordered:
+        if data_index not in placed:
+            payload = changes.get(data_index)
+            block = (payload if payload is not None
+                     else raw[data_off + data_index:
+                              data_off + data_index + rep_len[data_index]])
+            placed[data_index] = cursor
+            blocks.append((cursor, block))
+            cursor += len(block)
+        new_offsets.append(placed[data_index])
+    if cursor > data_size:
+        raise ValueError(
+            f"metadata 数据区溢出：紧凑重建 {cursor} > data_size {data_size}")
+    # 数据区写入：先整区清零（确定性），再写重建块（均在原数据区内）
+    blob[data_off:data_off + data_size] = b"\x00" * data_size
+    for start, block in blocks:
+        blob[data_off + start:data_off + start + len(block)] = block
+    # 记录区重写：新 <length, dataIndex>——被译条目仅 length>0 的实际
+    # 条目更新长度（空记录保持 0），全部条目 dataIndex 换新偏移
+    for i, (data_index, length) in enumerate(ordered):
+        new_len = (len(changes[data_index])
+                   if data_index in changes and length > 0 else length)
+        struct.pack_into("<II", blob, lit_off + i * entry_size,
+                         new_len, new_offsets[i])
+    struct.pack_into("<I", blob, data_size_pos, cursor)
+    _assert_diff_whitelist(
+        raw, blob, record_mode=record_mode, lit_off=lit_off,
+        lit_table_size=lit_table_size, data_off=data_off,
+        data_size=data_size, data_size_pos=data_size_pos,
+        entry_size=entry_size, changes=changes, by_index={},
+        cursor=cursor, rebuild=True)
+    return bytes(blob)
 
 
 def extract_metadata_strings(path: str | Path, file_id: str | None = None,

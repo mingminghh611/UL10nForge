@@ -2215,6 +2215,41 @@ def _patch_dll(path: Path, entries: list[dict], result: WriteResult,
                  for offset, payload, _flag, entry in expected])
 
 
+def _pool_capacity(pool_by_index: dict[int, list[int]],
+                   data_index: int) -> int:
+    """该 data_index 在记录区（独立读取器）声称的最大容量。
+
+    同一 data_index 可能有多条记录（空记录 length=0）——容量取最大
+    实长度。data_index 不在池中（F7 已在前面拒绝，理论不可达）时
+    返回 0（触发截断到 0 → patch 拒绝，宁拒绝不写坏）。
+    """
+    lengths = pool_by_index.get(data_index)
+    return max(lengths) if lengths else 0
+
+
+def _restore_placeholders_uncapped(original: str, translation: str,
+                                   encoding: str) -> bytes | None:
+    """占位符机械恢复（无容量上限——变长写回路径，0.48.0）。
+
+    与 _restore_placeholders_capped 同一恢复语义（缺失占位符补末尾，
+    省略号/正文尾让位），但不受 capacity 约束：变长路径的容量预算由
+    全局紧凑重建兜底（数据区总余量），单条不再按原容量截断。
+    译文含全部占位符 → 原样编码返回。
+    """
+    found = _FORMAT_PLACEHOLDER.findall(original)
+    if not found:
+        return translation.encode(encoding)
+    missing = [p for p in found if p not in translation]
+    if not missing:
+        return translation.encode(encoding)
+    body = translation
+    if body.endswith(TRUNCATION_ELLIPSIS):
+        body = body[:-1]
+    if not body:
+        return None
+    return (body + "".join(missing)).encode(encoding)
+
+
 def _patch_metadata(path: Path, entries: list[dict], result: WriteResult,
                     rel_path: str = ""):
     raw = path.read_bytes()
@@ -2266,29 +2301,20 @@ def _patch_metadata(path: Path, entries: list[dict], result: WriteResult,
             result.note_rejected(
                 e, f"data_index {data_index} 长度与文件不符")
             continue
-        # pad=False：不填 NUL，长度由记录字段/布局同步更新（F1 修复核心）
-        payload, truncated = _fit_bytes(
-            e["translation"], capacity, "utf-8", pad=False)
-        if truncated:
-            result.note_truncated(e["original"], e["translation"])
         # F2：占位符完整性全量校验——缺失时机械恢复（补末尾，string.Format
-        # 按索引取参位置无关）。恢复与容量合并处理：从正文尾部腾空间保
-        # 占位符（UTF-8 同 Minato 场景），物理放不下才拒绝。
-        # P6a：同 #US 路径——缺失占位符清单写进拒绝原因（可定位）
-        _fitted_text = payload.decode("utf-8", errors="replace")
+        # 按索引取参位置无关）。P6a：缺失占位符清单写进拒绝原因（可定位）。
+        # 变长写回（0.48.0）：不再按原容量截断——explicit 溢出走全局
+        # 紧凑重建，implicit patch 本身就是变长重建；容量只在重建也
+        # 放不下（数据区整体溢出）时才由截断兜底路径生效。
         _missing = [p for p in _FORMAT_PLACEHOLDER.findall(e["original"])
-                    if p not in _fitted_text]
-        restored = _restore_placeholders_capped(
-            e["original"], _fitted_text, capacity, "utf-8")
+                    if p not in e["translation"]]
+        restored = _restore_placeholders_uncapped(
+            e["original"], e["translation"], "utf-8")
         if restored is None:
             result.note_rejected(
                 e, f"译文缺失占位符（放不下）：{''.join(_missing)}")
             continue
         payload = restored
-        if not _placeholders_intact(e["original"], payload.decode("utf-8")):
-            result.note_rejected(
-                e, f"译文缺失占位符：{''.join(_missing)}")
-            continue
         # 审计 #3：同一 data_index 两条 entry（重复提取/旧库合并）时
         # changes dict 后写静默覆盖前写，前一条仍 note_written 虚假成功
         # ——重复一律拒绝，宁可漏写不可谎报
@@ -2299,10 +2325,59 @@ def _patch_metadata(path: Path, entries: list[dict], result: WriteResult,
         expected.append((data_index, payload, e))
     if not changes:
         return
-    try:
-        patched = il2cpp.patch_metadata_strings(raw, changes)
-    except ValueError as exc:
-        raise ValueError(f"IL2CPP metadata 写回失败：{exc}") from exc
+    # 变长写回（0.48.0）：explicit 溢出条目走全局紧凑重建而非截断。
+    # 判定：任一 payload > 原 capacity → rebuild（把「优先全量」与
+    # 「溢出条目」合并成一次 rebuild 调用，避免混合两种数据布局）。
+    # 全部 payload ≤ capacity → 原位路径（改动面最小，白名单最严）。
+    needs_rebuild = any(
+        len(payload) > _pool_capacity(pool_by_index, data_index)
+        for data_index, payload in changes.items())
+    patched: bytes | None = None
+    # 实际落盘的 changes 字典：rebuild 路径写原文 payload，截断兜底路径
+    # 写 fitted payload——重开验证/证据卡必须对照「真正写入的字节」，
+    # 而不是 entry 循环里的未截断 payload（A12：截断兜底后用 changes
+    # 验证会误报 length 不符）。
+    written_changes: dict[int, bytes] = changes
+    if needs_rebuild:
+        # 变长重建失败（数据区整体溢出等）→ patched=None，落截断兜底
+        try:
+            patched = il2cpp.patch_metadata_strings(
+                raw, changes, allow_overflow=True)
+        except ValueError:
+            patched = None
+    if patched is None:
+        # 原位路径，或全局重建也放不下 → 逐条截断到容量（宁可截断
+        # 不可谎报/不可拒写整场），原位写入
+        fitted_changes: dict[int, bytes] = {}
+        truncation_notes: list[tuple[str, str]] = []
+        for data_index, payload in changes.items():
+            cap = _pool_capacity(pool_by_index, data_index)
+            if len(payload) > cap:
+                fitted, _tr = _fit_bytes(
+                    payload.decode("utf-8", errors="replace"), cap,
+                    "utf-8", pad=False)
+                entry = next(e for d_idx, _p, e in expected
+                             if d_idx == data_index)
+                if not fitted:
+                    # 容量连一个完整字符+省略号都放不下（如 2B 原文配 CJK
+                    # 译文）——写空字符串等于抹掉文本且 parse 过滤零长记录
+                    # 会破坏重开验证的记录数守恒，诚实拒绝
+                    result.note_rejected(
+                        entry, "容量不足以容纳任何译文（截断后为空）")
+                    continue
+                truncation_notes.append(
+                    (entry["original"], entry["translation"]))
+                fitted_changes[data_index] = fitted
+            else:
+                fitted_changes[data_index] = payload
+        try:
+            patched = il2cpp.patch_metadata_strings(
+                raw, fitted_changes, allow_overflow=False)
+        except ValueError as exc:
+            raise ValueError(f"IL2CPP metadata 写回失败：{exc}") from exc
+        written_changes = fitted_changes
+        for original, translation in truncation_notes:
+            result.note_truncated(original, translation)
     _atomic_write_bytes(path, patched)
     # 重开验证（C3 全池比对）：重新解析池（与提取同一解析器），与原始
     # 全记录逐条比对——不只检查被补丁记录，未补丁记录的内容/长度也必须
@@ -2316,10 +2391,24 @@ def _patch_metadata(path: Path, entries: list[dict], result: WriteResult,
         raise ValueError(
             f"IL2CPP 译文重开验证失败：记录数 {len(all_records)} -> {len(verify)}"
             "（紧凑重建增删了记录，拒绝）")
+    # 变长重建后 data_index 全链重排——按记录区顺序配对，比对锚是
+    # 「本条是否被译」+「内容」；data_index 变化本身合法（重建产物）
+    old_in_changes = {old_index for old_index, _l, _p in all_records
+                      if old_index in written_changes}
     for order, (old_index, old_len, old_pos) in enumerate(all_records):
         _new_index, length, data_pos = verify[order]
         if old_index in changes:
-            payload = changes[old_index]
+            if old_index not in written_changes:
+                # 截断兜底把该条拒了（截断后为空）——文件里保持原字节，
+                # 与未补丁记录同一比对口径
+                if (length != old_len
+                        or reopened[data_pos:data_pos + length]
+                        != raw[old_pos:old_pos + old_len]):
+                    raise ValueError(
+                        f"IL2CPP 译文重开验证失败：被拒条目 "
+                        f"data_index={old_index} 内容被改动")
+                continue
+            payload = written_changes[old_index]
             if (length != len(payload)
                     or reopened[data_pos:data_pos + length] != payload):
                 raise ValueError(
@@ -2335,8 +2424,11 @@ def _patch_metadata(path: Path, entries: list[dict], result: WriteResult,
                     f"IL2CPP 译文重开验证失败：未补丁记录 "
                     f"data_index={old_index} 内容被重建改动")
     # 全部比对通过后记账（顺序无关，但确保所有补丁条目都验证过）
+    if len(old_in_changes) != len(written_changes):
+        raise ValueError(
+            "IL2CPP 译文重开验证失败：被译 data_index 数与 changes 不一致")
     for data_index, _payload, entry in expected:
-        if data_index in changes:
+        if data_index in written_changes:
             result.note_written(entry)
     _note_object_evidence(
         result, rel_path=rel_path, asset_file="", path_id=-1,
@@ -2345,4 +2437,4 @@ def _patch_metadata(path: Path, entries: list[dict], result: WriteResult,
                   entry["original"],
                   payload.decode("utf-8", errors="replace"))
                  for data_index, payload, entry in expected
-                 if data_index in changes])
+                 if data_index in written_changes])
