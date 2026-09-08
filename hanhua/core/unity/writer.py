@@ -1088,6 +1088,16 @@ def write_back_v2(store: ProjectStore, game_dir: Path, out_dir: Path,
         resolve_relative_under(out_dir, file_info["rel_path"])
     entries_by_file = _entries_by_file(
         store, {f["id"] for f in v2_files})
+    # A11 写回镜像门数据源：扫描期落库的场景名语料（GameObject m_Name +
+    # TagManager 自定义标签）。存量库扫描于语料门上线前 = 无此 KV →
+    # frozenset() → 门不生效（退回单层防线），不阻断写回。
+    scene_names: frozenset = frozenset()
+    try:
+        _corpus = store.get_profile_value("scene_name_corpus", [])
+        if isinstance(_corpus, list):
+            scene_names = frozenset(str(n) for n in _corpus)
+    except Exception:  # noqa: BLE001
+        scene_names = frozenset()
     changed_bundle_candidates = [
         f for f in v2_files
         if f["format"] == "v2_asset"
@@ -1155,7 +1165,8 @@ def write_back_v2(store: ProjectStore, game_dir: Path, out_dir: Path,
                          typetree_generator=typetree_generator,
                          rel_path=f["rel_path"])
         elif f["format"] == "v2_mono":
-            _patch_dll(dst, entries, result, rel_path=f["rel_path"])
+            _patch_dll(dst, entries, result, rel_path=f["rel_path"],
+                       scene_names=scene_names)
         elif f["format"] == "v2_il2cpp":
             _patch_metadata(dst, entries, result, rel_path=f["rel_path"])
         for entry in candidates:
@@ -2071,7 +2082,7 @@ def _us_record_offset(meta: dict) -> int | None:
 
 
 def _patch_dll(path: Path, entries: list[dict], result: WriteResult,
-               rel_path: str = ""):
+               rel_path: str = "", scene_names: frozenset = frozenset()):
     blob = bytearray(path.read_bytes())
     expected: list[tuple[int, bytes, int, dict]] = []
     seen_offsets: set[int] = set()
@@ -2084,6 +2095,24 @@ def _patch_dll(path: Path, entries: list[dict], result: WriteResult,
         result.note_attempt(e)
         if not _should_write_entry(e):
             result.note_rejected(e, _write_rejection_reason(e))
+            continue
+        # A11 写回镜像门（场景名语料）：#US 字面量与场景 GameObject 名/
+        # TagManager 自定义标签全等 = 确定性逻辑键（按名比较/查找），
+        # 写译会断运行时分发（midnight-maid-night 黑屏实证：tag ==
+        # "Ruth" 被译 → 比较恒 false → NRE 级联）。提取侧语料门的新库
+        # 条目本就 skipped 不会到这里；此门兜旧库/存量 translated 条目
+        # （库 8f73194990 实证 13 条）。note_logic_reverted 标 resolved
+        # + reverted_locators + logic_reverted_sources（W3 运行时排除表）
+        # ——不阻断发布，绝不 note_rejected。
+        if scene_names and e["original"] in scene_names:
+            result.note_logic_reverted(e, "scene_name_corpus_gate")
+            result.logic_audit.append({
+                "stage": "semantic_revert",
+                "locator": str(e.get("key_path") or ""),
+                "original": e["original"],
+                "translation": e["translation"],
+                "reason": "scene_name_corpus_gate",
+            })
             continue
         offset = _us_record_offset(meta)
         if offset is None:

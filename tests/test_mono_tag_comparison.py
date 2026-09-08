@@ -10,7 +10,11 @@ brfalse.s——属性 getter 无字符串参数、操作符无 sink 身份，证
    确定性结构跳过（mono_structural_sink）；
 2. 双角色串（同一字面量另有 set_text 用途）→ 结构证明优先（宁漏勿坏）；
 3. 纯 UI 用途（get_tag 不在场）不受影响——精确拦截比较点，不误伤显示
-   文本。
+   文本；
+4. Layer2 场景名语料门：字面量与场景 GameObject 名/TagManager 标签
+   全等 → 确定性跳过（scene_name_corpus），IL 模式证明看不见的比较
+   形态（string.Equals/存字段再比较）由此兜住；structural_proven
+   优先保留更精确 reason。
 """
 from __future__ import annotations
 
@@ -72,13 +76,15 @@ def _heap_of(texts):
 
 
 def _extract(heap, bodies, member_refs, monkeypatch, tmp_path,
-             method_defs=None, dll_name: str = "Assembly-CSharp.dll"):
+             method_defs=None, dll_name: str = "Assembly-CSharp.dll",
+             scene_names: frozenset = frozenset()):
     import dnfile
     fake_pe = _build_fake_pe(heap, bodies, member_refs, method_defs)
     monkeypatch.setattr(dnfile, "dnPE", lambda _path: fake_pe)
-    parsed = extract_dll_user_strings(tmp_path / dll_name)
-    return {e.original: e for e in parsed.entries
-            if not e.key_path.startswith("skip/")}
+    parsed = extract_dll_user_strings(
+        tmp_path / dll_name, scene_names=scene_names)
+    by_original = {e.original: e for e in parsed.entries}
+    return by_original
 
 
 def _ldstr(token):
@@ -188,3 +194,60 @@ class TestTagNameComparison:
         # 无 setter 消费 → 未证明路径（句子形态放行），绝不是 mono_structural_sink
         for text in ("Alpha phrase", "Beta phrase"):
             assert by_original[text].meta["reason"] != "mono_structural_sink"
+
+
+class TestSceneNameCorpusGate:
+    """Layer2 场景名语料门：比较键兜底 + structural 优先 + 非语料不受影响。"""
+
+    def test_corpus_exact_match_skipped(self, tmp_path, monkeypatch):
+        # 'Hallway Trigger' 无 IL 比较形态在场（string.Equals 实例调用/
+        # 存字段再比较——IL 模式证明看不见），但在场景语料中 → 语料门兜住
+        heap, tokens = _heap_of(["Hallway Trigger"])
+        code = (_ldstr(tokens[0]) + _callvirt(_SETTER) + b"\x2a")
+        bodies = {0x2000: _body(code)}
+        by_original = _extract(
+            heap, bodies, _members(), monkeypatch, tmp_path,
+            scene_names=frozenset({"Hallway Trigger"}))
+        e = by_original["Hallway Trigger"]
+        assert e.status == "skipped"
+        assert e.meta["reason"] == "scene_name_corpus"
+        assert e.key_path.startswith("skip/us#")
+
+    def test_corpus_structural_proven_takes_precedence(self, tmp_path, monkeypatch):
+        # 双保险叠加：'Ruth' 既在语料中、又有 op_Equality IL 形态在场 →
+        # structural_proven 优先（更精确的 reason=mono_structural_sink，
+        # 定位证据不丢）
+        heap, tokens = _heap_of(["Ruth"])
+        code = (_LDARG0 + _callvirt(_GET_TAG)
+                + _ldstr(tokens[0]) + _call(_OP_EQ) + b"\x2a")
+        bodies = {0x2000: _body(code)}
+        by_original = _extract(
+            heap, bodies, _members(), monkeypatch, tmp_path,
+            scene_names=frozenset({"Ruth"}))
+        e = by_original["Ruth"]
+        assert e.status == "skipped"
+        assert e.meta["reason"] == "mono_structural_sink"
+
+    def test_non_corpus_text_untouched(self, tmp_path, monkeypatch):
+        # 语料门不误伤：真实 UI 文本不在场景语料中 → 正常进池
+        heap, tokens = _heap_of(["Naomi arrives"])
+        code = (_ldstr(tokens[0]) + _callvirt(_SETTER) + b"\x2a")
+        bodies = {0x2000: _body(code)}
+        by_original = _extract(
+            heap, bodies, _members(), monkeypatch, tmp_path,
+            scene_names=frozenset({"Hallway Trigger", "Ruth"}))
+        e = by_original["Naomi arrives"]
+        assert e.status == "pending"
+        assert e.meta["reason"] == "mono_ui_setter"
+
+    def test_corpus_requires_full_match(self, tmp_path, monkeypatch):
+        # 全等匹配：语料含 'Ruth' 但条目是含它的句子 → 不命中（子串不是
+        # 比较键形态，按名比较是全等）
+        heap, tokens = _heap_of(["Ruth is waiting for you"])
+        code = (_ldstr(tokens[0]) + _callvirt(_SETTER) + b"\x2a")
+        bodies = {0x2000: _body(code)}
+        by_original = _extract(
+            heap, bodies, _members(), monkeypatch, tmp_path,
+            scene_names=frozenset({"Ruth"}))
+        e = by_original["Ruth is waiting for you"]
+        assert e.status == "pending"

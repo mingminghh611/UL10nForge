@@ -505,6 +505,86 @@ def test_patch_dll_multiple_entries_verify_all(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# A11 写回镜像门：场景名语料命中的 #US 条目 → 语义回退（不写不拒）
+# --------------------------------------------------------------------------
+#
+# midnight-maid-night 黑屏实证：tag/name 比较键（"Ruth"/"Hallway Trigger"）
+# 进池翻译写回 → tag == "Ruth" 恒 false → NRE 级联黑屏。提取侧语料门拦
+# 新扫描，此门兜存量库 translated 条目。回归断言：
+# - note_logic_reverted 记账（reverted_locators + logic_reverted_sources，
+#   W3 运行时排除表），绝不 note_rejected（不阻断发布）；
+# - 磁盘字节保真（语料命中的记录原样保留）；
+# - 非语料条目照常写入（门不误伤）。
+
+def test_patch_dll_scene_name_corpus_gate_reverts(tmp_path):
+    """语料命中 → 语义回退 + 字节保真；同文件非语料条目照常写。
+
+    记录布局：@1 = prefix(1)+"Ruth"(8)+flag(1) → 占 1..10；
+    @11 = prefix(1)+"Settings"(16)+flag(1) → 占 11..28。
+    """
+    heap = _us_heap([
+        ("Ruth".encode("utf-16-le"), 0),
+        ("Settings".encode("utf-16-le"), 0),
+    ])
+    path = tmp_path / "Assembly-CSharp.dll"
+    path.write_bytes(heap)
+    before = path.read_bytes()
+    result = WriteResult()
+    _patch_dll(path, [
+        _us_entry(1, 8, "Ruth", "露丝"),
+        _us_entry(11, 16, "Settings", "设置"),
+    ], result, scene_names=frozenset({"Ruth", "Hallway Trigger"}))
+    # 'Settings' 正常写入；'Ruth' 语义回退（不 written 不 rejected）
+    assert result.written == 1
+    assert len(result.rejected) == 0
+    blob = path.read_bytes()
+    # 记录 @11 照常写
+    assert blob[11] == 0x05
+    assert blob[12:16] == "设置".encode("utf-16-le")
+    # 记录 @1（Ruth）字节保真：与写回前完全一致
+    assert blob[1:11] == before[1:11]
+    assert blob[1:2] == b"\x09"
+    assert blob[2:10] == "Ruth".encode("utf-16-le")
+    # 语义回退记账：logic_reverted（发布侧 W3 排除表）+ 审计段
+    assert result.reverted_locators == {"dll:us#1"}
+    assert "Ruth" in result.logic_reverted_sources
+    audit_reasons = [rec.get("reason") for rec in result.logic_audit
+                     if rec.get("stage") == "semantic_revert"]
+    assert audit_reasons == ["scene_name_corpus_gate"]
+
+
+def test_patch_dll_scene_name_corpus_requires_exact_match(tmp_path):
+    """全等匹配：语料含 'Ruth' 但条目是含它的句子 → 不命中，照常写。"""
+    original = "Ruth is waiting"
+    heap = _us_heap([(original.encode("utf-16-le"), 0)])
+    path = tmp_path / "Assembly-CSharp.dll"
+    path.write_bytes(heap)
+    result = WriteResult()
+    _patch_dll(path, [
+        _us_entry(1, 30, original, "露丝在等你"),
+    ], result, scene_names=frozenset({"Ruth"}))
+    assert result.written == 1
+    assert len(result.rejected) == 0
+    assert result.reverted_locators == set()
+    blob = path.read_bytes()
+    assert blob[2:2 + 10] == "露丝在等你".encode("utf-16-le")
+
+
+def test_patch_dll_scene_name_corpus_empty_is_noop(tmp_path):
+    """空语料（存量库无 KV）→ 门不生效，行为与 0.46.0 完全一致。"""
+    original = "Ruth"
+    heap = _us_heap([(original.encode("utf-16-le"), 0)])
+    path = tmp_path / "Assembly-CSharp.dll"
+    path.write_bytes(heap)
+    result = WriteResult()
+    _patch_dll(path, [
+        _us_entry(1, 8, original, "露丝"),
+    ], result, scene_names=frozenset())
+    assert result.written == 1
+    assert result.reverted_locators == set()
+
+
+# --------------------------------------------------------------------------
 # 被 parse 过滤的记录（空/非 UTF-8）不得破坏记录区写入
 # --------------------------------------------------------------------------
 #

@@ -1589,7 +1589,7 @@ def harvest_scene_name_corpus(asset_files, globalgamemanagers=None) -> frozenset
     try:
         scene_like = [
             p for p in asset_files
-            if (m := _re.match(r"level\d+", p.stem, re.IGNORECASE))
+            if _re.match(r"level\d+", p.stem, _re.IGNORECASE)
             or p.suffix.lower() == ".unity"
             or p.stem.lower().endswith(".sharedassets")]
         scan_paths = scene_like or list(asset_files)
@@ -1623,8 +1623,14 @@ def harvest_scene_name_corpus(asset_files, globalgamemanagers=None) -> frozenset
                 continue
             if isinstance(name, str) and name:
                 names.add(name[:64])
+        # 采集结果已落局部变量，dispose 失败（假 Environment/极端坏文件）
+        # 不该吞掉整次采集——兜底防线失明比句柄泄漏更糟（Windows 句柄
+        # 随进程退出释放；扫描进程生命周期内不替换这些文件）。
         from hanhua.core.unity.writer import _dispose_environment
-        _dispose_environment(env)
+        try:
+            _dispose_environment(env)
+        except Exception:  # noqa: BLE001
+            pass
     except Exception:  # noqa: BLE001
         return frozenset()
     if len(names) > _SCENE_NAME_CORPUS_LIMIT:
