@@ -132,7 +132,7 @@ python main.py
 Release 页面每个文件旁附 SHA256。下载后可核验：
 
 ```powershell
-Get-FileHash .\UL10nForge-0.51.0-Full.7z -Algorithm SHA256
+Get-FileHash .\UL10nForge-0.51.1-Full.7z -Algorithm SHA256
 # 比对结果是否与发布页一致
 ```
 
@@ -407,6 +407,8 @@ hanhua/
 ---
 
 ## 11. 版本
+
+**0.51.1**（2026-09-09）：写回与字体稳定性五项修复——① TMP 字体图集替换后同步材质 `_TextureWidth`/`_TextureHeight`/`_GradientScale`（权威取 bundle 材质浮点）——UI 消失但可点击（SDF 采样错位）的根因闭环；② rawstr 写回前定位器内容自校验：offset 漂移不再中断整个游戏写回，按条拒绝进审计闸门；③ Localization typetree `type_descriptor` 空格三段形态兼容（Unity.Localization 条目 save_typetree 拒绝消除）；④ 审核模型 JSON 定界符弯引号修复：78+ 条 PARSE_ERROR 假阳性（条目被误判不可发布）恢复为正常裁决；⑤ 运行时字体兜底插件改为始终部署（静态覆盖完整也部署），缺字风险再降一级；3445 项全量回归。
 
 **0.51.0**（2026-09-09，第二个正式发行版）：发布前全链路体检 + 六项缺陷闭环——① 全模块代码审查（识别 / 写回安全 / 翻译审核 / 性能日志 / GUI 与 runner 五线并行）逐项闭环：审核 MAJOR/CRITICAL 撤销路径死码修复（BLOCKED 条目清空译文后坏记忆仍会撤销，杜绝 pending 桶污染召回）、翻译任务在项目切换后 UI 停留忙碌动画的复位缺失、游戏语境 25% 增量门基线口径统一（skipped 占比高的游戏语境永不更新的问题）、写回结果段 ~25 处日志绕过落盘漏斗（字体发布门 / 位图注入 / 发布清单等此前只显示不落盘，现全量留档）、审校页残留重载标志、停止 / 重试操作漏斗补接；② 发行包内容扫描：随包发布文件中的真实游戏名注释全部脱敏（隐私扫描此前只查绝对路径与 API Key，不查游戏名——已补）；③ 3433 项全量回归；④ 三通道（Full / Lite / Models）重打包发布。
 
