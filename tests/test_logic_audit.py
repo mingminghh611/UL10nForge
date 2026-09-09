@@ -9,8 +9,10 @@ from __future__ import annotations
 from hanhua.core.unity.logic_audit import (
     audit_entries_before_writeback,
     audit_raw_expansion,
+    logic_key_evidence,
     logic_pattern_of,
     snapshot_object_strings,
+    typetree_logic_key_evidence,
     verify_logic_layer,
 )
 
@@ -538,3 +540,27 @@ def test_typetree_unityevent_and_fmod_revert():
         {"obj_is_input_axis": True}, "Mouse X")[0] == "revert"
     assert typetree_logic_key_evidence(
         {}, "event:/Bank/Music")[0] == "revert"
+
+
+def test_localization_smart_format_descriptor_reverts():
+    """resonance-of-the-ocean 实证：Localization SmartFormat 配置的
+    「TypeName Namespace Assembly」三段式类型描述串（m_NoTranslationFoundMessage
+    / m_NullDisplayString 等字段）翻译后 save_typetree 抛
+    Referenced type not found → 写回侧确定性回退（写回存在被拒绝条目已阻断
+    默认发布）。第二形态与「Type, Assembly」形态同源兜底。"""
+    text = ("Parser UnityEngine.Localization.SmartFormat.Core.Parsing "
+            "Unity.Localization")
+    assert logic_pattern_of(text) == "type_descriptor"
+    verdict = typetree_logic_key_evidence(
+        {"field_path": ["references", "RefIds", "i:5", "data",
+                        "m_NoTranslationFoundMessage"]}, text)
+    assert verdict == ("revert", "type_descriptor")
+    verdict2 = logic_key_evidence(text, {})
+    assert verdict2 == ("revert", "type_descriptor")
+
+
+def test_type_descriptor_second_form_does_not_hit_dialogue():
+    """三段式第二形态的防误伤回测：真实对话文本不命中。"""
+    for text in ("Doctor, Doctor", "Open the File. Read docs.",
+                 "Hello world foo", "WINDOW Display ABC"):
+        assert logic_pattern_of(text) is None, text

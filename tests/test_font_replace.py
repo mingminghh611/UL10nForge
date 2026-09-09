@@ -721,6 +721,108 @@ def test_container_atlas_dimensions_copied(tmp_path, monkeypatch):
     assert game["m_AtlasPadding"] == 9
 
 
+def test_container_material_floats_synced(tmp_path, monkeypatch):
+    """A15 回归：图集替换后材质浮点必须同步——_TextureWidth/_TextureHeight/
+    _GradientScale 仍描述游戏原图集（512）时 SDF shader 采样错位 →
+    UI 整体不可见但射线仍命中（可点击）。取值权威来源 = bundle 材质。"""
+    payload = _full_payload(
+        material_floats=(("_TextureWidth", 4096.0),
+                         ("_TextureHeight", 4096.0),
+                         ("_GradientScale", 10.0)))
+    game = {"m_Name": "g", "m_CharacterTable": [
+        {"m_Unicode": 0x41, "m_GlyphIndex": 0}],
+        "m_GlyphTable": [{"m_Index": 0, "m_GlyphRect": {}}],
+        "m_AtlasTextures": [{"m_FileID": 0, "m_PathID": 100}],
+        "material": {"m_FileID": 0, "m_PathID": 200},
+    }
+    atlas = _FakeTmpObj(100, {"m_Name": "a", "m_TextureSettings": {}},
+                        type_name="Texture2D")
+    material = _FakeTmpObj(
+        200, {"m_Name": "LiberationSans SDF Material",
+              "m_SavedProperties": {"m_Floats": [
+                  ["_GradientScale", 6.0],
+                  ["_TextureWidth", 512.0],
+                  ["_TextureHeight", 512.0],
+                  ["_OutlineSoftness", 0.0]]}},
+        type_name="Material")
+    objs = [_FakeTmpObj(1, game), atlas, material]
+    bundle = tmp_path / "fonts.bundle"
+    bundle.write_bytes(b"x")
+    (replaced, skipped, consumers), _ = _run_container(
+        bundle, objs, payload, required={0x4E00}, monkeypatch=monkeypatch)
+    assert replaced == 1
+    floats = {p[0]: p[1] for p in
+              material._tree["m_SavedProperties"]["m_Floats"]}
+    assert floats["_TextureWidth"] == 4096.0
+    assert floats["_TextureHeight"] == 4096.0
+    assert floats["_GradientScale"] == 10.0
+    assert floats["_OutlineSoftness"] == 0.0   # 非耦合浮点不动
+    assert consumers[0].material_resolved is True
+    assert "材质浮点未同步" not in consumers[0].ref
+
+
+def test_container_material_floats_missing_fields_appended(
+        tmp_path, monkeypatch):
+    """A15 回归：游戏材质浮点表缺耦合字段（shader 按属性默认值读取同样
+    采样错位）→ 补齐，不是跳过。"""
+    payload = _full_payload(
+        material_floats=(("_GradientScale", 10.0),))
+    game = {"m_Name": "g", "m_CharacterTable": [
+        {"m_Unicode": 0x41, "m_GlyphIndex": 0}],
+        "m_GlyphTable": [{"m_Index": 0, "m_GlyphRect": {}}],
+        "m_AtlasTextures": [{"m_FileID": 0, "m_PathID": 100}],
+        "material": {"m_FileID": 0, "m_PathID": 200},
+    }
+    atlas = _FakeTmpObj(100, {"m_Name": "a", "m_TextureSettings": {}},
+                        type_name="Texture2D")
+    material = _FakeTmpObj(
+        200, {"m_Name": "m",
+              "m_SavedProperties": {"m_Floats": [["_OutlineSoftness", 0.0]]}},
+        type_name="Material")
+    objs = [_FakeTmpObj(1, game), atlas, material]
+    bundle = tmp_path / "fonts.bundle"
+    bundle.write_bytes(b"x")
+    (replaced, skipped, consumers), _ = _run_container(
+        bundle, objs, payload, required={0x4E00}, monkeypatch=monkeypatch)
+    assert replaced == 1
+    floats = {p[0]: p[1] for p in
+              material._tree["m_SavedProperties"]["m_Floats"]}
+    assert floats["_GradientScale"] == 10.0                 # bundle 权威值
+    assert floats["_TextureWidth"] == 8.0                   # 回退=图集宽
+    assert floats["_TextureHeight"] == 8.0                  # 回退=图集高
+
+
+def test_container_material_unresolved_honest_consumer(
+        tmp_path, monkeypatch):
+    """A15 回归：材质引用不可解析（跨文件/无 Material 对象）→ 不阻断
+    替换（运行时插件兜底），但消费者 material_resolved=False 诚实标注
+    → 覆盖判定 CANDIDATE_ONLY（MATERIAL_REFERENCE_UNRESOLVED）。"""
+    payload = _full_payload()
+    game = {"m_Name": "g", "m_CharacterTable": [
+        {"m_Unicode": 0x41, "m_GlyphIndex": 0}],
+        "m_GlyphTable": [{"m_Index": 0, "m_GlyphRect": {}}],
+        "m_AtlasTextures": [{"m_FileID": 0, "m_PathID": 100}],
+        "material": {"m_FileID": 0, "m_PathID": 200},   # 指向不存在的对象
+    }
+    atlas = _FakeTmpObj(100, {"m_Name": "a", "m_TextureSettings": {}},
+                        type_name="Texture2D")
+    objs = [_FakeTmpObj(1, game), atlas]
+    bundle = tmp_path / "fonts.bundle"
+    bundle.write_bytes(b"x")
+    (replaced, skipped, consumers), _ = _run_container(
+        bundle, objs, payload, required={0x4E00}, monkeypatch=monkeypatch)
+    assert replaced == 1                                  # 替换仍发生
+    assert consumers[0].material_resolved is False
+    assert "材质浮点未同步" in consumers[0].ref
+    # 覆盖引擎语义：material_resolved=False → CANDIDATE_ONLY
+    from hanhua.core.font.coverable import (CANDIDATE_ONLY, CoverageState,
+                                            compute_coverage)
+    from hanhua.core.font.glyph_set import RequiredGlyphSet
+    outcome = compute_coverage(
+        consumers, RequiredGlyphSet(frozenset({0x4E00})))
+    assert outcome.consumers[0].state == CANDIDATE_ONLY
+
+
 def test_container_dynamic_without_atlas_stays_dynamic(tmp_path, monkeypatch):
     """0-glyph 且图集引用不可解析 → 保持 dynamic_tmp（诚实阻断，不假覆盖）。"""
     payload = _full_payload()

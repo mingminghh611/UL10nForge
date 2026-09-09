@@ -123,6 +123,46 @@ def test_review_batch_handles_non_json_output():
     assert results["1"].reviewed is False
 
 
+def test_parse_result_repairs_curly_quote_delims():
+    """C18：模型把字符串定界符写成中文弯引号 → 修复后正常解析。
+
+    fromivan/hope-left-me 等六份运行日志 39/39 条 PARSE_ERROR 全是
+    该形态（`…语境。”}`——值的收尾定界符是 ”）。修复后判定可用，
+    不再误入 REVIEW_ERROR 终态导致条目不可发布。
+    """
+    raw = ('{"level": "MINOR", "reason": "原文为形容词，译文“传统方式”'
+           '误作名词短语，应修正为“传统”或“传统方式”以匹配语境。”}')
+    r = _parse_result(raw, "e1")
+    assert r is not None
+    assert r.is_error is False
+    assert r.level == "MINOR"
+    # reason 内容里引用译文的弯引号原样保留（不破坏内容）
+    assert "“传统方式”" in r.reason
+
+
+def test_parse_result_curly_repair_still_fails_cleanly_on_garbage():
+    """C18 修复不了的真垃圾输出仍走 PARSE_ERROR（错误不伪装成判定）。"""
+    r = _parse_result("完全不是 JSON 的输出 ”}", "e2")
+    assert r is not None
+    assert r.is_error is True
+    assert r.error == "PARSE_ERROR"
+
+
+def test_parse_batch_result_repairs_curly_quote_delims():
+    """C18 批量路径：数组元素内弯引号定界符同样修复。"""
+    from hanhua.core.reviewer import _parse_batch_result
+
+    class _Item:
+        entry_id = "b1"
+
+    raw = ('[{"entry_id": "b1", "level": "MAJOR", "reason": "术语误译'
+           '应译为“继续”。”}]')
+    out = _parse_batch_result(raw, [_Item()])
+    assert "b1" in out
+    assert out["b1"].level == "MAJOR"
+    assert out["b1"].is_error is False
+
+
 def test_review_batch_cancellation_returns_cancelled_count():
     """取消事件触发 → 剩余条目计入 cancelled_count（取消是显式终态，
     不得归入 error 或 pass）。"""

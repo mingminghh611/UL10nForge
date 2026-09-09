@@ -34,11 +34,17 @@ from collections.abc import Callable
 # dEad（游戏 stylization 大小写）、MENU_PLAY（常量）、动画触发器
 # camelCase、本地化键 snake_case 等实证形态。
 LOGIC_SENSITIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    # 类型描述符：「Namespace.Type, Assembly」形态——第一部分必须含点号
-    # （全限定名）。"Doctor, Doctor" 等对话文本无点号不命中（20 条
-    # containment-breach 真实语料回测修正）。
+    # 类型描述符：两种形态——「Namespace.Type, Assembly」（UnityEvent
+    # m_TargetAssemblyTypeName 等）与「TypeName Namespace Assembly」（
+    # Unity Localization SmartFormat 配置，resonance-of-the-ocean 实证：
+    # 三段空格分隔，段 2/3 必须点分全限定）。第二种 "Doctor, Doctor" 类
+    # 对话文本无点号段不命中；与 extractor._TYPE_DESCRIPTOR 同源双形态。
     ("type_descriptor", re.compile(
         r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+,\s*[A-Za-z0-9_.]+$")),
+    ("type_descriptor", re.compile(
+        r"^[A-Za-z_][A-Za-z0-9_]*\s+"
+        r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+\s+"
+        r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$")),
     ("camel_case", re.compile(r"^[a-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*$")),
     ("snake_case", re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$")),
     ("kebab_case", re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$")),

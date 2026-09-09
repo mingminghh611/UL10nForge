@@ -451,11 +451,31 @@ def _estimate_prompt_tokens(item: ReviewItem) -> int:
     return int(cjk + (len(text) - cjk) * 0.25) + 40   # +40 类型/格式行
 
 
+def _repair_curly_quote_delims(text: str) -> str:
+    """修复模型把 JSON 字符串定界符写成中文弯引号的输出（C18）。
+
+    4B 审核模型偶尔输出 `{"level": "MINOR", "reason": "…语境。”}` ——
+    值的收尾定界符是中文弯引号 ”（开头的 “ 同理），JSON 解析直接
+    失败。fromivan/hope-left-me/midnight-maid-night/museum 六份运行
+    日志 39/39 条 PARSE_ERROR 全是该形态（判定其实已给出，被解析层
+    丢成 REVIEW_ERROR 终态 → 条目不可发布 + 逐条兜底翻倍耗时）。
+
+    只转换紧邻结构字符（`}`/`]`/`,` 之前、`{`/`,`/`:` 之后）的弯引号
+    ——reason 内容里引用译文的「“传统方式”」类弯引号（前后是普通
+    文字）原样保留，不破坏内容。真实样本 100% 修复且内容零失真。
+    """
+    text = re.sub(r"”(\s*[},\]])", r'"\1', text)
+    text = re.sub(r"([{,]\s*)“", r'\1"', text)
+    text = re.sub(r"(:\s*)“", r'\1"', text)
+    return text
+
+
 def _parse_result(raw: str, entry_id: str) -> ReviewResult | None:
     """解析审核模型 JSON 输出 → ReviewResult（容错：剥离代码围栏）。
 
     围栏形态处理：```json\n{...}\n``` → 去掉首行 ```json 与尾部 ```；
-    直接 ```{...}``` → 去掉首尾 ```。
+    直接 ```{...}``` → 去掉首尾 ```。JSON 解析失败时先尝试弯引号
+    定界符修复（C18），修复不了才走 PARSE_ERROR 兜底。
     """
     try:
         text = raw.strip()
@@ -467,7 +487,11 @@ def _parse_result(raw: str, entry_id: str) -> ReviewResult | None:
             if body.startswith("json"):
                 body = body[4:].strip()
             text = body
-        data = json.loads(text)
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            # C18：弯引号定界符修复（先严格后修复，正常输出零影响）
+            data = json.loads(_repair_curly_quote_delims(text))
     except (json.JSONDecodeError, AttributeError):
         # 非 JSON 兜底（Phase A P0-6）：整段视为 reason，级别按词形粗判，
         # 但显式标记 PARSE_ERROR——错误不得伪装成「没有发现问题」。
@@ -533,7 +557,12 @@ def _parse_batch_result(raw: str,
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, AttributeError):
-        return {}
+        # C18：弯引号定界符修复（批量数组元素同样形态）。修复后再
+        # 校验 list——非数组/修复失败都返回空 dict 走逐条兜底。
+        try:
+            data = json.loads(_repair_curly_quote_delims(text))
+        except (json.JSONDecodeError, AttributeError):
+            return {}
     if not isinstance(data, list):
         return {}
     ids = {item.entry_id for item in group_items}

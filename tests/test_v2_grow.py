@@ -215,3 +215,30 @@ def test_sewer_call_localization_entry_writes_by_stable_id(tmp_path):
         assert values[volume_id] == "音量"
     finally:
         _dispose_environment(env)
+
+
+def test_patch_serialized_string_original_mismatch_raises():
+    """定位器漂移：长度头边界合法但内容与原文不符 → 必须拒绝，不静默写坏。
+
+    pyromaniac 实证（0.51.0 线）：旧库 obj+offset 定位器落到兄弟对象数据
+    上，raw[480:484] 读出 'ked\x00' 当长度头——0x00646b65=6579563 越界
+    崩溃是「越界形态」；同样场景下若兄弟数据恰是「不越界的小值」，仅边界
+    检查拦不住，字节会被写进错误位置。expected_original 内容自证兜底。
+    """
+    raw = bytearray(_serialized("Clicked") + struct.pack("<I", 0))
+    with pytest.raises(ValueError, match="字符串内容与原文不符"):
+        _patch_serialized_string(raw, 4, "点击", expected_original="Start")
+    # 原文一致时正常写入（回归防误伤）
+    old_end, new_end = _patch_serialized_string(
+        raw, 4, "点击", expected_original="Clicked")
+    assert raw[4:10] == "点击".encode("utf-8")
+    assert new_end >= old_end
+
+
+def test_patch_serialized_string_non_utf8_original_raises():
+    """定位器指向二进制数据（解码即失败）→ 拒绝而不是 UnicodeDecodeError
+    裸抛（调用方统一按 ValueError 捕获按条拒绝）。"""
+    raw = bytearray(struct.pack("<I", 4) + b"\xff\xfe\xfd\xfc"
+                    + struct.pack("<I", 0))
+    with pytest.raises(ValueError, match="非 UTF-8"):
+        _patch_serialized_string(raw, 4, "文本", expected_original="Start")

@@ -1363,3 +1363,89 @@ def test_restore_placeholders_capped_tight_capacity_keeps_placeholder(tmp_path):
     assert _restore_placeholders_capped(
         "HP {0}/{1}", "生命值", capacity=64, encoding="utf-8") == \
         "生命值{0}{1}".encode("utf-8")
+
+
+def test_rawstr_locator_mismatch_rejects_entry_not_whole_writeback(
+        tmp_path, monkeypatch):
+    """坏定位器（offset 落在兄弟对象数据上）→ 按条拒绝 + 整次写回完成。
+
+    pyromaniac 实证（0.51.0 线）：offset=484 处长度头读出 6579563，
+    _patch_serialized_string 抛 ValueError 曾中断整个游戏写回。修复后：
+    该条目 note_rejected（进 rejected 闸门 + rejected_sources 排除表，
+    运行时插件不再翻译该串），其余条目照常写入。
+    """
+    import UnityPy
+    import hanhua.core.unity.writer as unity_writer
+
+    class FakeObject:
+        def __init__(self, raw):
+            self.path_id = 7
+            self.assets_file = type(
+                "AssetFile", (), {"name": "fixture.assets"})()
+            self.type = type("ObjectType", (), {"name": "MonoBehaviour"})()
+            self.raw = raw
+
+        def get_raw_data(self):
+            return self.raw
+
+        def set_raw_data(self, raw):
+            self.raw = bytes(raw)
+
+    class SerializedFile:
+        def __init__(self, environment):
+            self.environment = environment
+            self.reader = None
+
+        def save(self):
+            return self.environment.objects[0].get_raw_data()
+
+    class FakeEnvironment:
+        def __init__(self):
+            self.objects = []
+            self.files = {}
+
+        def load(self, paths):
+            self.objects = [FakeObject(Path(paths[0]).read_bytes())]
+            self.files = {"main": SerializedFile(self)}
+
+    monkeypatch.setattr(UnityPy, "Environment", FakeEnvironment)
+    path = tmp_path / "fixture.assets"
+    # 对象数据：长度头 + "Clicked"（offset=4），其后 4 字节 0x00646b65
+    # ——模仿 pyromaniac 兄弟数据 'ked\x00'。坏定位器 offset=12 会把它
+    # 当长度头（6579563 越界形态）；这里用「不越界的小值」形态更狠：
+    # 仅边界检查拦不住，内容自证必须兜住。
+    import struct
+
+    original = b"Clicked"
+    raw = (struct.pack("<I", len(original)) + original
+           + struct.pack("<I", 5) + b"other" + b"\x00\x00\x00")
+    path.write_bytes(raw)
+    result = WriteResult()
+    monkeypatch.setattr(unity_writer, "_verify_saved_bundle", lambda *a, **k: None)
+    good_entry = {
+        "file_id": "fixture", "key_path": "asset#fixture.assets#7/str/0",
+        "original": "Clicked", "translation": "点击",
+        "meta": '{"kind":"rawstr","asset_file":"fixture.assets",'
+                '"obj":7,"offset":4,"obj_has_values":false,'
+                '"role":"display","disposition":"translate",'
+                '"reason":"single_visible_string"}',
+    }
+    bad_entry = {
+        "file_id": "fixture", "key_path": "asset#fixture.assets#7/str/1",
+        "original": "Start", "translation": "开始",
+        "meta": '{"kind":"rawstr","asset_file":"fixture.assets",'
+                '"obj":7,"offset":12,"obj_has_values":false,'
+                '"role":"display","disposition":"translate",'
+                '"reason":"single_visible_string"}',
+    }
+
+    _patch_asset(path, [good_entry, bad_entry], result)
+
+    # 好条目已写入；坏条目被拒绝而非崩溃
+    data = path.read_bytes()
+    assert data[4:10] == "点击".encode("utf-8")
+    assert len(result.rejected) == 1
+    assert "rawstr_locator_mismatch" in result.rejected[0].reason
+    assert result.attempted == 2
+    assert result.written == 1
+    assert "Start" in result.rejected_sources

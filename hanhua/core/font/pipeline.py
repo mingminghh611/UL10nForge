@@ -187,25 +187,14 @@ class FontCompatibilityPipeline:
         tmp_bundle = select_tmp_bundle(inputs.unity_version)
         if static is not None and static.replaced:
             # 静态替换成功后部署运行时插件兜底（覆盖动态加载字体）——
-            # 插件失败不阻断（静态已生效），记 warning 由调用方附加
+            # 插件失败不阻断（静态已生效），记 warning 由调用方附加。
+            # 0.51.x 用户指令（缺字根治）：**始终部署**运行时插件——
+            # 旧 E4「静态 COVERED 即跳过」不再生效：静态覆盖证明只覆盖
+            # 已知消费者，运行时动态加载/后续场景新增字体（Rendezvous
+            # 口口口实证：m_fontAsset 无效 + FindObjectsOfTypeAll 找不到
+            # 场景文本）静态层无法兜底；插件常驻扫描的性能开销用户明确
+            # 不作为考量。插件失败时静态覆盖已完整证明才降级为提示。
             if inputs.capability.provider_supported:
-                # 静态覆盖已完整证明且无动态 TMP 消费者待运行时认证时，
-                # 插件兜底非必需——直接跳过部署（卡顿根治 P0：插件常驻
-                # 每秒全对象扫描拖垮帧率；overall==COVERED 已隐含所有
-                # dynamic_tmp 消费者已认证，跳过不会使任何消费者回退，
-                # 此处 any 判断是防御性显式守卫）。
-                skip_plugin = (
-                    static.coverage is not None
-                    and static.coverage.overall == CoverageState.COVERED
-                    and not any(
-                        c.kind == "dynamic_tmp"
-                        and not c.runtime_provider_available
-                        for c in static.consumers))
-                if skip_plugin:
-                    self._warnings.append(
-                        "运行时字体插件未部署（静态覆盖已完整证明，"
-                        "插件兜底非必需）")
-                    return self._static_font_result(plan, static)
                 try:
                     return install_font_override(
                         inputs.game_dir, inputs.staging, inputs.font_config,
@@ -224,7 +213,7 @@ class FontCompatibilityPipeline:
                         and static.coverage.overall == CoverageState.COVERED)
                     if static_ok:
                         self._warnings.append(
-                            "运行时字体插件未部署（静态覆盖已完整证明，"
+                            "运行时字体插件部署失败（静态覆盖已完整证明，"
                             "插件兜底非必需）")
                     else:
                         self._warnings.append(

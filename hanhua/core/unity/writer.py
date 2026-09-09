@@ -665,13 +665,20 @@ def _align(value: int, boundary: int = 4) -> int:
     return value + (-value % boundary)
 
 
-def _patch_serialized_string(raw: bytearray, data_offset: int, translation: str
+def _patch_serialized_string(raw: bytearray, data_offset: int, translation: str,
+                             expected_original: str | None = None,
                              ) -> tuple[int, int]:
     """替换 Unity 序列化的 UTF-8 string 字段，并保留字段后的内容。
 
     Unity string 的长度头只记录实际文本字节数；字段末尾的零字节仅是为了让
     下一个字段落在 4 字节边界。替换范围必须以旧字段结束位置为界，不能以新
     长度计算，否则变长译文会覆盖紧随字符串的序列化字段。
+
+    expected_original：写回条目的原文。给定时不只查边界，还校验长度头
+    指向的字节解码后与原文一致——定位器漂移（旧库残留/对象布局变化）落
+    到兄弟对象数据上时，长度头可能恰好是一个「不越界的小值」，边界检查
+    拦不住而字节被静默写坏；内容自证让一切失配定位器在此抛 ValueError
+    （宁漏勿坏：由调用方拒绝该条目，绝不写错位置）。
 
     返回 (old_end, new_end)：本补丁的旧/新字段结束位置（含对齐零），供
     C2 差异白名单记录 span——old_end 与 new_end 之差是后续内容的位移量。
@@ -683,6 +690,16 @@ def _patch_serialized_string(raw: bytearray, data_offset: int, translation: str
     old_end = _align(data_offset + old_length)
     if old_end > len(raw):
         raise ValueError(f"字符串长度越界：offset={data_offset}, length={old_length}")
+    if expected_original is not None:
+        try:
+            actual = bytes(raw[data_offset:data_offset + old_length]).decode(
+                "utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"字符串定位器失配（非 UTF-8）：offset={data_offset}") from exc
+        if actual != expected_original:
+            raise ValueError(
+                f"字符串内容与原文不符：offset={data_offset}")
 
     payload = translation.encode("utf-8")
     new_end = _align(data_offset + len(payload))
@@ -1654,12 +1671,34 @@ def _patch_asset(path: Path, entries: list[dict], result: WriteResult,
                 # 偏移处的扩容不会影响尚未处理的较低偏移。
                 raw_original = bytes(raw)
                 patch_spans: list[tuple[int, int, int]] = []
+                rejected_here: list[dict] = []
                 for e, meta in sorted(write_items, key=lambda x: -x[1].get("offset", 0)):
-                    old_end, new_end = _patch_serialized_string(
-                        raw, meta["offset"], e["translation"])
+                    try:
+                        old_end, new_end = _patch_serialized_string(
+                            raw, meta["offset"], e["translation"],
+                            expected_original=str(e["original"]))
+                    except ValueError as exc:
+                        # 定位器失配（旧库残留 obj+offset 落到兄弟对象数据 /
+                        # 对象布局已变）——按条拒绝而不是中断整个游戏写回，
+                        # 且绝不写错位置（宁漏勿坏）。pyromaniac 实证
+                        # （0.51.0 线）：offset=484 处长度头读到 6579563，
+                        # 一条坏定位器曾让整次写回崩溃。
+                        result.note_rejected(e, f"rawstr_locator_mismatch: {exc}")
+                        result.warnings.append(
+                            f"rawstr 定位器失配已拒绝（{exc}）："
+                            f"{e.get('key_path')}")
+                        rejected_here.append(e)
+                        continue
                     patch_spans.append((meta["offset"] - 4, old_end, new_end))
                     changed = True
                     patched_entries.append(e)
+                if rejected_here:
+                    # 被拒条目不进逻辑验证映射（其译文未写入对象——若留在
+                    # string_translations，重开验证会按「译文必须出现」误报）。
+                    for e in rejected_here:
+                        string_translations.pop(e["original"], None)
+                    write_items = [(e, meta) for e, meta in write_items
+                                   if e not in rejected_here]
                 if changed:
                     expected = bytes(raw)
                     _assert_asset_diff_whitelist(

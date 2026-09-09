@@ -80,6 +80,11 @@ class TmpBundlePayload:
     #: material/shader 契约（tmp_contract 校验用；缺失可降级）
     material_name: str = ""
     shader_name: str = ""
+    #: bundle 材质 m_SavedProperties.m_Floats 的 (name, value) 对——
+    #: 图集耦合浮点（_TextureWidth/_TextureHeight/_GradientScale）的
+    #: 权威取值来源（A15：材质浮点与替换后图集不同步 → SDF 采样错位
+    #: → UI 整体不可见但射线仍命中）
+    material_floats: tuple = ()
 
 
 # ── 版本映射 ────────────────────────────────────────────────
@@ -269,6 +274,7 @@ def load_tmp_bundle(bundle: Path) -> TmpBundlePayload:
     env = Environment()
     env.path = str(bundle.parent)
     font_obj = atlas_obj = None
+    material_floats: tuple = ()
     try:
         env.load([str(bundle)])
         seen: set[tuple[str, str, int]] = set()
@@ -288,6 +294,14 @@ def load_tmp_bundle(bundle: Path) -> TmpBundlePayload:
                 tree = obj.read_typetree()
                 material_name = str(tree.get("m_Name", "") or "")
                 shader_name = str(tree.get("m_ShaderName", "") or "")
+                floats = (tree.get("m_SavedProperties")
+                          or {}).get("m_Floats") or []
+                if isinstance(floats, list):
+                    # A15：bundle 材质浮点是图集耦合参数的权威配对值
+                    material_floats = tuple(
+                        (str(n), float(v)) for n, v in floats
+                        if isinstance(n, str)
+                        and isinstance(v, (int, float)))
         if font_obj is None or atlas_obj is None:
             raise ValueError(
                 f"TMP 字体 bundle 缺少字体或图集对象: {bundle.name}")
@@ -318,6 +332,7 @@ def load_tmp_bundle(bundle: Path) -> TmpBundlePayload:
             charset=charset,
             material_name=material_name,
             shader_name=shader_name,
+            material_floats=material_floats,
         )
     finally:
         _dispose_environment(env)
@@ -900,6 +915,109 @@ def _obj_file_key(obj) -> str:
     return getattr(assets_file, "name", "") or ""
 
 
+#: 图集耦合材质浮点（A15）——SDF 采样与图集几何直接耦合的参数名。
+#: _TextureWidth/_TextureHeight：SDF 梯度采样按图集尺寸归一化；
+#: _GradientScale：SDF 等值线过渡带宽（≈ padding+1）。图集换成
+#: bundle 4096² 后这些值若仍描述游戏原图集（512² 等），shader 采样
+#: 完全错位 → 文本渲染为空（UI 消失但可点击，射线不依赖渲染）。
+_ATLAS_COUpled_FLOATS = ("_TextureWidth", "_TextureHeight", "_GradientScale")
+
+
+def _resolve_material_obj(env, tree: dict, anchor=None):
+    """解析 TMP 字体引用的 Material（必须与字体同 SerializedFile）。
+
+    tmp2 布局引用字段为 ``material``（小写，TMP_FontAsset 序列化字段），
+    部分世代为 ``m_Material``。解析口径与 _resolve_atlas_obj 同源：
+    m_FileID=0 同文件、path_id 按 anchor 资产文件限定（跨文件同号对象
+    是错误目标）。
+    """
+    ref = tree.get("material")
+    if not isinstance(ref, dict):
+        ref = tree.get("m_Material")
+    if not isinstance(ref, dict):
+        return None
+    file_id = ref.get("m_FileID")
+    path_id = ref.get("m_PathID")
+    if isinstance(file_id, str):
+        same_file = file_id.strip() in {"", "0", "0:0"}
+    else:
+        same_file = not file_id or int(file_id) == 0
+    if not same_file:
+        return None  # 跨文件引用：不支持（宁漏勿坏）
+    try:
+        path_id = int(path_id)
+    except (TypeError, ValueError):
+        return None
+    anchor_file = _obj_file_key(anchor) if anchor is not None else None
+    for other in env.objects:
+        if other.type.name != "Material":
+            continue
+        if anchor_file is not None and _obj_file_key(other) != anchor_file:
+            continue
+        if int(other.path_id) == path_id:
+            return other
+    return None
+
+
+def _sync_material_floats(material_obj, payload: TmpBundlePayload,
+                          atlas_width: int, atlas_height: int) -> bool:
+    """把游戏侧 TMP Material 的图集耦合浮点同步为 bundle 配对值。
+
+    返回是否有变化（False = 材质本来已同步或无耦合字段，无需保存）。
+
+    A15 根因（UI 消失但可点击）：_patch_atlas_texture 把图集换成
+    bundle 4096² 后，游戏侧 Material 的 m_SavedProperties.m_Floats 里
+    _TextureWidth/_TextureHeight/_GradientScale 仍描述原图集（512² 等）
+    → SDF shader 按旧尺寸归一化采样 → 文本渲染为空。取值权威来源是
+    bundle 自带材质（与 bundle 图集同批生成，Rendezvous 手工修复实证
+    必须同步）；bundle 材质浮点缺失时按替换后图集几何推导（_Gradient-
+    Scale 回退 padding+1，与 SDF 生成惯例一致）。
+    """
+    bundle_floats = dict(payload.material_floats)
+    fallbacks = {
+        "_TextureWidth": float(atlas_width),
+        "_TextureHeight": float(atlas_height),
+        "_GradientScale": float(
+            int(payload.font_typetree.get("m_AtlasPadding") or 0) + 1),
+    }
+    targets = {}
+    for name in _ATLAS_COUpled_FLOATS:
+        if name in bundle_floats:
+            targets[name] = bundle_floats[name]
+        elif name in fallbacks:
+            targets[name] = fallbacks[name]
+    if not targets:
+        return False
+    tree = material_obj.read_typetree()
+    saved = tree.get("m_SavedProperties")
+    if not isinstance(saved, dict):
+        return False
+    floats = saved.get("m_Floats")
+    if not isinstance(floats, list):
+        return False
+    changed = False
+    seen_names = set()
+    for i, pair in enumerate(floats):
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and isinstance(pair[0], str)):
+            continue
+        name = pair[0]
+        if name in targets:
+            seen_names.add(name)
+            if float(pair[1]) != targets[name]:
+                floats[i] = [name, targets[name]]
+                changed = True
+    # 材质浮点表缺失耦合字段时补齐（shader 按属性默认值读取会导致
+    # 同样的采样错位——与 Rendezvous 手工修复字段集对齐）
+    for name, value in targets.items():
+        if name not in seen_names:
+            floats.append([name, value])
+            changed = True
+    if changed:
+        material_obj.save_typetree(tree)
+    return changed
+
+
 def _patch_atlas_texture(env, atlas_obj, payload: TmpBundlePayload) -> dict | None:
     """把游戏图集 Texture2D 替换为 bundle 图集（含真实像素）。
 
@@ -1028,16 +1146,32 @@ def replace_tmp_fonts_in_container(
                 atlas_obj.save_typetree(atlas_tree)
                 if changed:
                     obj.save_typetree(tree)
+                # A15：图集耦合材质浮点同步（material 未解析不阻断替换
+                # ——运行时插件兜底，但消费者记录诚实标注）
+                material_obj = _resolve_material_obj(env, tree, obj)
+                material_synced = False
+                if material_obj is not None:
+                    try:
+                        material_synced = _sync_material_floats(
+                            material_obj, payload,
+                            payload.atlas_width, payload.atlas_height)
+                    except Exception:  # noqa: BLE001
+                        material_synced = False
                 patched.append((obj, atlas_obj))
                 patched_keys.add(_object_key(obj))
                 patched_keys.add(_object_key(atlas_obj))
+                if material_synced and material_obj is not None:
+                    patched_keys.add(_object_key(material_obj))
                 replaced += 1
                 consumers.append(FontConsumer(
                     cid, "tmp_font", static_replaced=True,
                     font_scalars=payload.charset,
                     layout_ok=True, unity_version=unity_version,
+                    material_resolved=material_obj is not None,
                     ref=f"bundle {payload.font_name} 已替换动态字体 · "
-                        f"{len(payload.charset)} 字符"))
+                        f"{len(payload.charset)} 字符"
+                        + ("" if material_synced
+                           else " · 材质浮点未同步（图集-材质失配风险）")))
                 continue
             game_chars = set(_tmp_chars(tree))
             if required is not None:
@@ -1081,16 +1215,31 @@ def replace_tmp_fonts_in_container(
             atlas_obj.save_typetree(atlas_tree)
             if changed:
                 obj.save_typetree(tree)
+            # A15：图集耦合材质浮点同步（UI 消失但可点击根因）
+            material_obj = _resolve_material_obj(env, tree, obj)
+            material_synced = False
+            if material_obj is not None:
+                try:
+                    material_synced = _sync_material_floats(
+                        material_obj, payload,
+                        payload.atlas_width, payload.atlas_height)
+                except Exception:  # noqa: BLE001
+                    material_synced = False
             patched.append((obj, atlas_obj))
             patched_keys.add(_object_key(obj))
             patched_keys.add(_object_key(atlas_obj))
+            if material_synced and material_obj is not None:
+                patched_keys.add(_object_key(material_obj))
             replaced += 1
             consumers.append(FontConsumer(
                 cid, "tmp_font", static_replaced=True,
                 font_scalars=payload.charset,   # 替换后真实字形 = bundle 字符集
                 layout_ok=True, unity_version=unity_version,
+                material_resolved=material_obj is not None,
                 ref=f"bundle {payload.font_name} 已替换 · "
-                    f"{len(payload.charset)} 字符"))
+                    f"{len(payload.charset)} 字符"
+                    + ("" if material_synced
+                       else " · 材质浮点未同步（图集-材质失配风险）")))
         if not patched:
             return 0, skipped, consumers
         _replace_and_swap(
@@ -1156,6 +1305,36 @@ def _verify_tmp_saved(saved: Path, payload: TmpBundlePayload, replaced: int,
                 if isinstance(data, (bytes, bytearray, list)) \
                         and bytes(data) == payload.atlas_stream:
                     atlas_verified += 1
+            # A15：材质图集耦合浮点必须已同步（_GradientScale 等描述
+            # 旧图集 → SDF 采样错位 → UI 不可见但可点击）
+            material_obj = _resolve_material_obj(verify, tree, obj)
+            if material_obj is not None:
+                saved_props = (material_obj.read_typetree()
+                               .get("m_SavedProperties") or {})
+                floats = saved_props.get("m_Floats") or []
+                pairs = {str(n): float(v) for n, v in floats
+                         if isinstance(n, str)
+                         and isinstance(v, (int, float))}
+                bundle_floats = dict(payload.material_floats)
+                for name in _ATLAS_COUpled_FLOATS:
+                    if name not in pairs:
+                        continue  # 材质本无该字段：未注入，不误杀
+                    if pairs[name] <= 0:
+                        raise ValueError(
+                            f"TMP 材质浮点非法（{name}="
+                            f"{pairs[name]}）: {saved.name}")
+                    if name in bundle_floats:
+                        expected = bundle_floats[name]
+                    elif name == "_TextureWidth":
+                        expected = float(payload.atlas_width)
+                    elif name == "_TextureHeight":
+                        expected = float(payload.atlas_height)
+                    else:
+                        continue  # _GradientScale 无权威值时不强检
+                    if pairs[name] != expected:
+                        raise ValueError(
+                            f"TMP 材质图集耦合浮点未同步（{name}="
+                            f"{pairs[name]}，期望 {expected}）: {saved.name}")
         if matched < replaced:
             raise ValueError(
                 f"TMP 替换重开验证不一致: {saved.name} "
