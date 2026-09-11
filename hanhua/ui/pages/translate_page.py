@@ -164,6 +164,10 @@ class TranslatePage(QWidget):
         self.state = state
         self.window = window
         self._worker: Worker | None = None
+        # 0.51.2 crash B：项目切换时仍在运行的翻译 worker 引用退休列表
+        # ——_on_project 不再直接丢引用（GC 删 QObject → 信号源已删崩溃），
+        # 改存此处，等 finished/error 回调自然清理。
+        self._retired_workers: list[Worker] = []
         self._write_worker_task: Worker | None = None
         self._active_run: _TranslationRun | None = None
         self._running = False
@@ -2183,7 +2187,13 @@ class TranslatePage(QWidget):
         """
         if self.state.project is None:
             return
-        store = self.state.project.store
+        # 0.51.2 crash A：analysisChanged 可能在项目切换过渡期命中
+        # 未就绪的 project（crash.log 728 处 'Project' object has no
+        # attribute 'store'，每会话 5 连 traceback）。getattr 守卫 +
+        # 早退，等下一个就绪信号再刷。
+        store = getattr(self.state.project, "store", None)
+        if store is None:
+            return
         self._chips_token += 1
         self._chips_loading = True
         token = self._chips_token
@@ -2318,11 +2328,34 @@ class TranslatePage(QWidget):
         self._running = False
         self.state.translation_running = False
         self._write_terminal_message = ""
-        self._worker = None
         self._last_stats = None
         self._last_review_summary = None
         self._stream_last_done = 0
         self._last_review = None
+        # 0.51.2 翻译中途崩溃（crash B）根因修复：原实现此处无条件
+        # self._worker = None——翻译 worker 仍在池线程运行时丢掉 Worker
+        # 包装器的最后引用，Python GC 删掉无 parent 的 WorkerSignals
+        # QObject，worker 线程继续 emit 即抛
+        # "RuntimeError: Signal source has been deleted"，错误处理链
+        # （on_log→signals.log.emit / signals.review_summary.emit /
+        # Worker.run 的 error.emit）三连失败 → 进程崩溃。大游戏翻译
+        # 运行数小时 + 审校处置串行阶段极易中途切项目，正是「翻译到
+        # 一半就崩」的触发面。引用移交退休列表：worker 因
+        # _on_project_changing→stop() 的取消请求自然退出后由
+        # finished/error 回调清理（worker 未退出也不泄漏 UI 资源——
+        # 只是 signals 这个 QObject 活到 run() 返回为止）。
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            retired = self._retired_workers
+            retired.append(worker)
+
+            def _retire(_result=None, w=worker, _list=retired):
+                if w in _list:
+                    _list.remove(w)
+
+            worker.signals.finished.connect(_retire)
+            worker.signals.error.connect(_retire)
         self.start_btn.setEnabled(self._active_run is None)
         self.stop_btn.setEnabled(False)
         self.retry_btn.setEnabled(False)

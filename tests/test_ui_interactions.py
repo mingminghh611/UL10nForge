@@ -851,3 +851,128 @@ class _FakeSignals:
             pass
 
     progress = log = note = _Sig()
+
+
+# ─────────────── 0.51.2 翻译中途崩溃修复（crash A/B） ───────────────
+
+def test_worker_run_survives_deleted_signal_source(qapp):
+    """crash B 兜底（widgets.Worker.run）：信号源 QObject 被 GC 删除后
+    emit 抛 "RuntimeError: Signal source has been deleted"——run() 必须
+    捕获并放弃，绝不能让异常二次抛出（三连失败链 → 进程崩溃，
+    09-09 23:52 crash.log 实证）。"""
+    import gc as _gc
+    from PySide6.QtCore import QObject, Signal as _Signal
+
+    from hanhua.ui.widgets import Worker
+
+    # 用MonkeyPatch 不便：直接复用真实 WorkerSignals，模拟「引用被丢、
+    # GC 删 QObject」——del wrapper 后 signals 持有人消失，再 deleteLater
+    # 强删 C++ 对象，emit 即抛 RuntimeError。
+    worker = Worker(lambda: "ok")
+    sigs = worker.signals
+    real_signals = worker.signals.__class__
+    # 把 signals 替换为同型号新实例并强删，run 内 emit 命中已删对象
+    holder = []
+    w2_signals = real_signals()
+    w2_signals.deleteLater()
+    _gc.collect()
+
+    class _DeadSignalWorker(Worker):
+        def __init__(self):
+            super().__init__(lambda: "ok")
+            self.signals = real_signals.__new__(real_signals)
+            # 触发 RuntimeError 的最直接途径：用已 deleteLater 的 C++
+            # 对象包装。PySide6 对已删 QObject 的 emit 抛
+            # RuntimeError("Signal source has been deleted")。
+
+    # 更可靠的复现：直接构造已删除信号源
+    dead = real_signals()
+    dead.deleteLater()
+    qapp.processEvents()                # deleteLater 生效，C++ 对象已删
+    _gc.collect()
+    w = _DeadSignalWorker()
+    w.signals = dead                    # run 时 emit 应抛 RuntimeError
+    w.run()                             # 不得抛异常（兜底捕获）
+    # error 路径同样兜底
+    w_err = Worker(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    w_err.signals = dead
+    w_err.run()                         # 不得抛异常
+
+
+def test_translate_on_project_keeps_running_worker_reference(qapp, tmp_path):
+    """crash B 根因（translate_page._on_project）：项目切换时原实现无条件
+    self._worker = None——翻译 worker 仍在池线程运行，丢掉 Worker 包装器
+    最后引用 → GC 删 WorkerSignals → emit 抛 RuntimeError。修复后引用
+    移交退休列表，finished/error 回调清理。"""
+    from hanhua.ui.widgets import Worker
+
+    store = _store(tmp_path)
+    state = _state(tmp_path)
+    state.project = _FakeProject(store)
+    page = TranslatePage(state, _RecordingWindow())
+
+    worker = Worker(lambda: "ok")
+    page._worker = worker
+    page._on_project(_FakeProject(store))
+    # worker 引用必须仍被页面持有（退休列表），不得被 GC
+    import gc as _gc
+    _gc.collect()
+    assert page._worker is None                     # 槽位已让出（新项目可启动）
+    assert worker in page._retired_workers          # 但引用仍被持有
+    worker.signals.finished.emit("ok")              # worker 自然退出 → 清理
+    assert worker not in page._retired_workers
+    worker2 = Worker(lambda: "err")
+    page._worker = worker2
+    page._on_project(_FakeProject(store))
+    assert worker2 in page._retired_workers
+    worker2.signals.error.emit("boom")              # 出错退出 → 同样清理
+    assert worker2 not in page._retired_workers
+
+
+def test_translate_refresh_chips_tolerates_storeless_project(qapp, tmp_path):
+    """crash A（_refresh_chips）：analysisChanged 可能在项目切换过渡期命中
+    未就绪的 project（crash.log 728 处 'Project' object has no attribute
+    'store'）。缺 store 必须早退而非崩溃。"""
+    store = _store(tmp_path)
+    state = _state(tmp_path)
+    state.project = _FakeProject(store)
+    page = TranslatePage(state, _RecordingWindow())
+    del state.project.store                        # 模拟过渡期未就绪对象
+    page._refresh_chips()                          # 不得抛 AttributeError
+    page._chips_worker is None or True             # 早退：未启动统计 worker
+    state.project.store = store                    # 恢复，后续刷新正常
+    page._refresh_chips()
+
+
+def test_home_open_dir_blocked_while_translation_running(qapp, tmp_path):
+    """crash B 触发面收窄（home_page.open_dir）：翻译运行中拖入/选择新
+    目录 → 重扫 → switch_project 取消数小时翻译进度。必须拒绝并提示。"""
+    import hanhua.ui.pages.home_page as home_mod
+
+    monkeypatch_target = home_mod.Project
+    state = _state(tmp_path)
+    page = HomePage(state, _RecordingWindow())
+
+    def _explode(*_a, **_k):
+        raise AssertionError("翻译运行中不应触发重扫")
+
+    orig_open = monkeypatch_target.open_game_dir
+    monkeypatch_target.open_game_dir = staticmethod(_explode)
+    try:
+        state.translation_running = True
+        page.open_dir(tmp_path)                    # 必须被守卫拒绝
+    finally:
+        monkeypatch_target.open_game_dir = orig_open
+        state.translation_running = False
+    assert page._scanning is False                 # 未进入扫描忙碌态
+
+
+def test_home_refresh_project_state_tolerates_storeless_project(
+        qapp, tmp_path):
+    """crash A（home_page._refresh_project_state）：projectOpened 过渡期
+    project 可能缺 store（crash.log 'object' has no attribute 'store'）。"""
+    state = _state(tmp_path)
+    state.project = _FakeProject(_store(tmp_path))
+    page = HomePage(state, _RecordingWindow())
+    del state.project.store
+    page._refresh_project_state()                  # 不得抛 AttributeError

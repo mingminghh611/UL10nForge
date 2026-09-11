@@ -465,6 +465,15 @@ class HomePage(QWidget):
     def open_dir(self, path: Path):
         if self._scanning:
             return
+        # 0.51.2 crash B 触发面收窄：翻译运行中重扫 → switch_project →
+        # 翻译页 _on_project 重建界面。翻译 worker 靠退休引用保活后已
+        # 不会崩（widgets.run 兜底），但重扫会取消数小时的翻译进度
+        # （stop() 只是请求，审校处置串行段还要跑完）——直接拒绝并
+        # 提示，与「扫描互斥」同款守卫。
+        if getattr(self.state, "translation_running", False):
+            Toast.show(self, "翻译正在进行，请等翻译完成后再打开其他游戏"
+                             "（可用「停止」先结束本轮）", "warning")
+            return
         path = Path(path)
         if not path.is_dir():
             Toast.show(self, "请选择有效的文件夹", "warning")
@@ -858,7 +867,13 @@ class HomePage(QWidget):
     def _refresh_project_state(self):
         """数据带 + 健康度 + 推荐 + 英雄区（#2：全量统计后台线程）。"""
         project = self.state.project
-        store = project.store
+        # 0.51.2 crash A：projectOpened/analysisChanged 可能在过渡期命中
+        # 未完全就绪的 project（crash.log 实证 'object'/'Project' has
+        # no attribute 'store'）。与 _refresh_dashboard 同款 getattr
+        # 守卫，缺 store 按无数据处理而非崩溃。
+        store = getattr(project, "store", None)
+        if store is None:
+            return
         self._dashboard_token += 1
         self._dashboard_loading = True
         token = self._dashboard_token

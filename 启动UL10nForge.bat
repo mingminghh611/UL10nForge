@@ -1,58 +1,50 @@
 @echo off
-chcp 65001 >nul
-title UL10nForge 0.51.1
+rem ============================================================
+rem  UL10nForge 0.51.2 - one-click launcher
+rem  - Bundled python: runtime\python (zero env dependency)
+rem  - Double-click to start (no console window)
+rem  - Debug mode: run "%~nx0" debug   to keep console open
+rem  - Self-check:  run "%~nx0" --check
+rem
+rem  NOTE: keep this file ASCII-only with CRLF line endings.
+rem  cmd.exe pre-reads the batch under the OEM code page (GBK on
+rem  zh-CN Windows); non-ASCII bytes break its line parser and
+rem  the launcher dies instantly. Chinese text shown to users
+rem  must live in main.py (GUI), not here.
+rem ============================================================
+title UL10nForge 0.51.2
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
-
-rem ============================================================
-rem  UL10nForge 0.51.1 - one-click launcher
-rem  - 内置 Python(runtime\python):解压即用,零环境依赖
-rem  - Double-click to start (no console window)
-rem  - Debug mode: run "%~nx0 debug" to keep console open
-rem ============================================================
 
 set "BUILTIN_PY=runtime\python\python.exe"
 set "BUILTIN_PYW=runtime\python\pythonw.exe"
 
-rem ---- 优先使用内置 Python(随包分发,依赖已全部装好)----
+rem ---- prefer bundled python (ships with the package) ----
 set "PY=%BUILTIN_PY%"
 if exist "%BUILTIN_PY%" goto :py_ok
 
-rem ---- 内置缺失:回退系统 Python(仅开发环境)----
+rem ---- bundled python missing: fall back to system python (dev only) ----
 set "PY=python"
 where python >nul 2>nul || set "PY=py"
-where %PY% >nul 2>nul || (
-    echo [ERROR] 内置 Python 缺失(runtime\python),且系统未安装 Python。
-    echo 请重新解压完整包;开发环境请安装 Python 3.10+ 并勾选
-    echo "Add python.exe to PATH"。
-    pause
-    exit /b 1
-)
+where %PY% >nul 2>nul || goto :no_python
 
-rem ---- 系统 Python 依赖检查:缺失则自动安装 ----
+rem ---- system python deps check: auto install when missing ----
 %PY% -c "import PySide6, httpx, chardet, UnityPy, dnfile" >nul 2>nul
 if errorlevel 1 (
     echo [INFO] First run: installing dependencies...
     %PY% -m pip install -r requirements.txt
-    if errorlevel 1 (
-        echo.
-        echo [ERROR] Dependency install failed. Check network and retry.
-        pause
-        exit /b 1
-    )
+    if errorlevel 1 goto :deps_fail
     echo [OK] Dependencies installed.
 )
 
 :py_ok
 
-rem ---- self check: verify only (for testing) ----
+rem ---- self check: verify only, for testing ----
 if /i "%~1"=="--check" (
     echo [OK] Python: %PY%
     %PY% --version
     %PY% -c "import PySide6, httpx, chardet, UnityPy, dnfile; print('[OK] deps complete')"
-    if errorlevel 1 (
-        echo [INFO] deps missing - will auto install on next launch.
-    )
+    if errorlevel 1 echo [INFO] deps missing - will auto install on next launch.
     exit /b 0
 )
 
@@ -79,3 +71,18 @@ if not errorlevel 1 (
 
 %PY% main.py
 pause
+exit /b 0
+
+:no_python
+echo [ERROR] Bundled python missing: runtime\python
+echo [ERROR] No system Python found either.
+echo Please re-extract the full package. For development,
+echo install Python 3.10+ and enable "Add python.exe to PATH".
+pause
+exit /b 1
+
+:deps_fail
+echo.
+echo [ERROR] Dependency install failed. Check network and retry.
+pause
+exit /b 1

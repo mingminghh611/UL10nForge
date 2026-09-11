@@ -618,6 +618,21 @@ class Worker(QRunnable):
         try:
             result = self.fn(*self.args, **self.kwargs)
         except Exception as e:  # noqa: BLE001
-            self.signals.error.emit(str(e))
+            try:
+                self.signals.error.emit(str(e))
+            except RuntimeError:
+                # 0.51.2 翻译中途崩溃（crash B）兜底：页面在 worker 运行
+                # 中丢弃 Worker 引用时（_on_project 置 _worker=None），
+                # Python GC 会删掉无 parent 的 WorkerSignals QObject；
+                # 此后工作线程任何 emit 都抛
+                # "RuntimeError: Signal source has been deleted"。
+                # 信号源已死 = 结果已无人接收，静默放弃即可——绝不能
+                # 让异常从 run() 二次抛出（QThreadPool 打印后线程死亡，
+                # 进程状态不确定）。emit 本身无 is_current_project 守卫
+                # （守卫只在主线程接收端），这里是最后一道防线。
+                pass
         else:
-            self.signals.finished.emit(result)
+            try:
+                self.signals.finished.emit(result)
+            except RuntimeError:
+                pass  # 同上：信号源已被 GC，结果无人接收，放弃

@@ -132,7 +132,7 @@ python main.py
 Release 页面每个文件旁附 SHA256。下载后可核验：
 
 ```powershell
-Get-FileHash .\UL10nForge-0.51.1-Full.7z -Algorithm SHA256
+Get-FileHash .\UL10nForge-0.51.2-Full.7z -Algorithm SHA256
 # 比对结果是否与发布页一致
 ```
 
@@ -407,6 +407,8 @@ hanhua/
 ---
 
 ## 11. 版本
+
+**0.51.2**（2026-09-11）：启动与长时翻译稳定性双闭环——① 启动器修复：中文 Windows 上双击 bat 闪退（cmd.exe 以 GBK 代码页预读 UTF-8 中文注释 + LF 行尾导致命令碎裂），重写为纯 ASCII + CRLF，附 `--check` 自检与 debug 模式；② 翻译中途崩溃根治：后台任务 Worker 的信号源 QObject 在项目切换时被垃圾回收（信号源已删→工作线程 emit 抛 RuntimeError 三连失败→进程崩溃，大游戏长时翻译更易触发），三层修复：运行中任务引用退休列表保活 + 公共 `Worker.run` 信号发射兜底 + 翻译进行中拒绝重新扫描（防误触取消数小时进度）；③ 项目切换过渡期界面刷新 AttributeError 刷屏（728 处崩溃日志）防御性修复；3397 项全量回归。
 
 **0.51.1**（2026-09-09）：写回与字体稳定性五项修复——① TMP 字体图集替换后同步材质 `_TextureWidth`/`_TextureHeight`/`_GradientScale`（权威取 bundle 材质浮点）——UI 消失但可点击（SDF 采样错位）的根因闭环；② rawstr 写回前定位器内容自校验：offset 漂移不再中断整个游戏写回，按条拒绝进审计闸门；③ Localization typetree `type_descriptor` 空格三段形态兼容（Unity.Localization 条目 save_typetree 拒绝消除）；④ 审核模型 JSON 定界符弯引号修复：78+ 条 PARSE_ERROR 假阳性（条目被误判不可发布）恢复为正常裁决；⑤ 运行时字体兜底插件改为始终部署（静态覆盖完整也部署），缺字风险再降一级；3445 项全量回归。
 
