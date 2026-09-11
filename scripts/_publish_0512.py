@@ -130,23 +130,33 @@ def _create_release(body: str) -> dict:
     return release
 
 
-def _upload_asset(release_id: int, path: Path) -> None:
+def _upload_asset(release_id: int, path: Path, retries: int = 4) -> None:
     url = (f"https://uploads.github.com/repos/{REPO}/releases/"
            f"{release_id}/assets?name={path.name}")
     total = path.stat().st_size
-    start = time.monotonic()
     # 请求体必须是 bytes：传文件对象时 urllib 不计算 Content-Length
     # → GitHub 返回 400 Bad Content-Length（2GB 分卷上传必现）。
     body = path.read_bytes()
-    req = Request(url, data=body,
-                  headers={**_headers(),
-                           "Content-Type": "application/octet-stream"},
-                  method="POST")
-    try:
-        with urlopen(req, timeout=3600) as r:
-            result = json.loads(r.read().decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"上传失败 {path.name}: {exc}") from exc
+    start = time.monotonic()
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        req = Request(url, data=body,
+                      headers={**_headers(),
+                               "Content-Type": "application/octet-stream"},
+                      method="POST")
+        try:
+            with urlopen(req, timeout=3600) as r:
+                result = json.loads(r.read().decode("utf-8"))
+            break
+        except Exception as exc:  # noqa: BLE001
+            # 大分卷直连上传常见瞬断（SSL EOF / 连接重置）——指数退避重试
+            last_exc = exc
+            wait = min(30 * attempt, 90)
+            print(f"[retry {attempt}/{retries}] {path.name}: {exc}"
+                  f"——{wait}s 后重试")
+            time.sleep(wait)
+    else:
+        raise RuntimeError(f"上传失败 {path.name}: {last_exc}")
     elapsed = time.monotonic() - start
     print(f"[ok] {path.name} 已上传 "
           f"({total / 1e9:.2f} GB · {total / 1e6 / max(elapsed, 0.1):.1f} MB/s)"
