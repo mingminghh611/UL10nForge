@@ -576,7 +576,7 @@ function renderEditorList() {
               <div class="entry-badges">${buildEntryBadgesHtml(e)}</div>
             </div>
             <div class="entry-actions">
-              <button class="row-btn btn-save-row" hidden>保存</button>
+              ${isSkipped ? "" : `<button class="row-btn btn-save-row" title="保存并同步到游戏 (Ctrl+Enter)">保存</button>`}
               ${isSkipped ? "" : `<button class="row-btn btn-retrans-row" title="重新翻译">重译</button>`}
               ${hasPrev ? `<button class="row-btn btn-undo-row" title="还原为：${escapeHtml(e.prev_translation)}">还原</button>` : ""}
               ${skipToggleHtml}
@@ -603,10 +603,18 @@ function renderEditorList() {
     };
     autoResize();
 
-    const saveIfDirty = async () => {
+    let saveFlashTimer = null;
+    const saveEntry = async ({ force = false } = {}) => {
+      if (!saveBtn) return;
       const val = ta.value;
-      if (val === ta.dataset.origVal) return;
+      const dirty = val !== ta.dataset.origVal;
+      if (!dirty && !force) return;
+      if (!dirty && !val.trim()) {
+        ta.focus();
+        return toast("请先输入译文", "err");
+      }
       saveBtn.disabled = true;
+      saveBtn.textContent = "保存中…";
       try {
         const res = await api(`/api/projects/${state.project.id}/entries/${id}`, {
           method: "PATCH",
@@ -614,14 +622,19 @@ function renderEditorList() {
         });
         ta.dataset.origVal = res.entry.translation;
         ta.classList.remove("dirty");
-        saveBtn.hidden = true;
         saveBtn.classList.remove("save-active");
         state.stats = res.stats;
         renderWorkbench();
         const badges = row.querySelector(".entry-badges");
         badges.innerHTML = buildEntryBadgesHtml(res.entry);
-        toast("译文已保存并自动保护（已同步到游戏）");
+        clearTimeout(saveFlashTimer);
+        saveBtn.textContent = "已保存";
+        saveFlashTimer = setTimeout(() => {
+          if (saveBtn) saveBtn.textContent = "保存";
+        }, 1200);
+        toast("译文已保存并同步到游戏");
       } catch (err) {
+        saveBtn.textContent = "保存";
         toast(err.message, "err");
       } finally {
         saveBtn.disabled = false;
@@ -632,21 +645,30 @@ function renderEditorList() {
       autoResize();
       const dirty = ta.value !== ta.dataset.origVal;
       ta.classList.toggle("dirty", dirty);
-      saveBtn.hidden = !dirty;
-      saveBtn.classList.toggle("save-active", dirty);
+      if (saveBtn) {
+        saveBtn.classList.toggle("save-active", dirty);
+        if (dirty) {
+          clearTimeout(saveFlashTimer);
+          saveBtn.textContent = "保存";
+        }
+      }
     });
 
     ta.addEventListener("keydown", (ev) => {
       if ((ev.ctrlKey || ev.metaKey) && ev.key === "Enter") {
         ev.preventDefault();
-        saveIfDirty();
+        saveEntry({ force: true });
       }
     });
     ta.addEventListener("blur", () => {
-      if (ta.value !== ta.dataset.origVal) saveIfDirty();
+      if (ta.value !== ta.dataset.origVal) saveEntry({ force: false });
     });
 
-    saveBtn.addEventListener("click", saveIfDirty);
+    if (saveBtn) {
+      // Prevent textarea blur from double-firing right before click
+      saveBtn.addEventListener("mousedown", (ev) => ev.preventDefault());
+      saveBtn.addEventListener("click", () => saveEntry({ force: true }));
+    }
 
     if (retransBtn) {
       retransBtn.addEventListener("click", async () => {
