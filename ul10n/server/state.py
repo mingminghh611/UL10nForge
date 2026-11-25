@@ -461,6 +461,7 @@ class AppServices:
             server_port=cfg.server_port,
             loader=target_loader,
             target_lang=cfg.target_lang,
+            font_id=cfg.font_id,
         )
         store = self.project_store(project_id)
         store.set_kv("hook_manifest", result.manifest)
@@ -489,6 +490,7 @@ class AppServices:
             loader=project.loader,
             target_lang=cfg.target_lang,
             preexisting_loader=bool(manifest.get("preexisting_loader", False)),
+            font_id=cfg.font_id,
         )
 
     def uninstall_project_hook(self, project_id: str) -> dict[str, Any]:
@@ -517,6 +519,7 @@ class AppServices:
             curated_dict_text=dict_text,
             loader=project.loader,
             target_lang=cfg.target_lang,
+            font_id=cfg.font_id,
         )
         safe_name = "".join(c for c in project.name if c not in r'\/:*?"<>|').strip() or "UnityGame"
         return zip_bytes, f"{safe_name}_中文离线补丁.zip"

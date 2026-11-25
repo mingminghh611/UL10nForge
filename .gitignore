@@ -20,6 +20,7 @@ Thumbs.db
 models/*.gguf
 runtime/
 fonts/SimplifiedChinese/*.ttf
-fonts/TMP_Font_AssetBundles/notoserif_*
+fonts/SimplifiedChinese/*.otf
+fonts/TMP_Font_AssetBundles/*_sdf_*
 resources/hook_kits/*.zip
 resources/hook_kits/*.exe

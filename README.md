@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Unity-Mono%20%7C%20IL2CPP-000000?style=flat-square&logo=unity&logoColor=white" alt="Unity Mono & IL2CPP" />
   <img src="https://img.shields.io/badge/Backend-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Windows" />
-  <img src="https://img.shields.io/badge/Tests-21%20Passing-2ea87e?style=flat-square" alt="21 Tests Passing" />
+  <img src="https://img.shields.io/badge/Tests-22%20Passing-2ea87e?style=flat-square" alt="22 Tests Passing" />
 </p>
 
 <p>
@@ -48,7 +48,7 @@
 ### 1. 100% 游戏安全与全版本兼容
 - **自动识别 Unity 工程结构**：纯 Python 探测 `Mono / IL2CPP`、`x64 / x86`、Unity 具体版本号与多层嵌套目录，自动提示检测到的反作弊/加壳保护文件（如 `CARLProtect`）。
 - **IL2CPP 专属安全加固**：针对 IL2CPP 游戏仅启用稳定的 `UGUI` 与 `TextMeshPro` 钩子，自动关闭易引发 `Il2CppInterop` 报错的裁剪框架与纹理/作用域钩子，写入 `DisableTextMeshProScrollInEffects=True`、`TemplateAllNumberAway=True`、`UnityLogListening=false` 与静默安全模式。
-- **字体版本精确匹配**：根据 Unity 版本自动匹配 `u2019 / u2021 / u2022 / u6000` 预编译 TMP 中文字体包，Unity `< 2019` 自动跳过不兼容字体包，避免老游戏乱码或崩溃。
+- **多套风格字体 + 实时样式预览**：内置 **思源宋体（经典衬线）**、**霞鹜文楷（温润手写）**、**缝合像素（复古点阵）** 三套 4 版本（`u2019 / u2021 / u2022 / u6000`）TMP SDF 字体包；字号、行距与防溢出自动缩放全部按最优参数自动配置，界面只保留点选字体与真实 `.ttf` 游戏画面实时预览，Unity `< 2019` 自动跳过不兼容包。
 - **启动自愈与精准卸载**：点击「启动游戏」自动确保插件部署、安全配置与最新词典同步；卸载严格按部署清单清理，绝不误删玩家原有的其他 Mod。
 
 ### 2. 纯静态安全预扫 × 实时动态补全
@@ -170,8 +170,8 @@ UL10nForge/
 │   └── llama-vulkan/                        # llama-server Vulkan 通用后端
 ├── resources/hook_kits/                     # BepInEx 5/6、MelonLoader、XUAT 5.6.3.1 插件包
 └── fonts/
-    ├── SimplifiedChinese/                   # NotoSerifCJKsc-Medium.ttf
-    └── TMP_Font_AssetBundles/               # notoserif_sdf_u2019 / u2021 / u2022 / u6000
+    ├── SimplifiedChinese/                   # NotoSerifCJKsc / LXGWWenKai / fusion-pixel (.ttf)
+    └── TMP_Font_AssetBundles/               # 三套字体 × 四版本 (u2019 / u2021 / u2022 / u6000)
 ```
 
 ---
@@ -186,11 +186,12 @@ UL10nForge/
 ├── pytest.ini                     # 测试配置
 ├── docs/
 │   └── architecture.md            # 分层架构设计文档
-├── tests/                         # 自动化回归测试套件（21 项测试）
+├── tests/                         # 自动化回归测试套件（22 项测试）
 └── ul10n/
     ├── core/                      # 领域模型、持久化与纯规则层
     │   ├── models.py              # 核心数据模型与设置项
     │   ├── db.py                  # 双 SQLite 仓库（global.db + 单游戏 project.db，WAL）
+    │   ├── fonts.py               # 多字体目录发现、预览文件服务与 TMP 版本包匹配
     │   ├── game_detector.py       # Unity 版本 / Mono & IL2CPP / PE 架构 / 保护文件探测
     │   ├── hook_deployer.py       # Hook 无损部署、IL2CPP 加固、安全卸载与离线补丁打包
     │   ├── text_scanner.py        # 纯静态 Unity UI 组件只读扫描器
@@ -223,7 +224,7 @@ UL10nForge/
 pytest -v
 ```
 
-21 项自动化测试覆盖：Unity 游戏识别与嵌套目录探测、Mono / IL2CPP Hook 安全部署与卸载（含保护原有 Mod）、XUAT 编解码 round-trip 校验、多语种质量门、云端多网关 URL 规范化与省 Token 批处理回退、智能审校与复审、极速直翻（关闭推理）模式与音效设置持久化、术语/记忆完整增删改查以及全链路 HTTP API。
+22 项自动化测试覆盖：Unity 游戏识别与嵌套目录探测、Mono / IL2CPP Hook 安全部署与卸载（含保护原有 Mod）、多字体目录发现/真字体预览/无缝切换与离线补丁打包、XUAT 编解码 round-trip 校验、多语种质量门、云端多网关 URL 规范化与省 Token 批处理回退、智能审校与复审、极速直翻（关闭推理）模式与音效设置持久化、术语/记忆完整增删改查以及全链路 HTTP API。
 
 ---
 

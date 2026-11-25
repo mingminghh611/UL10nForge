@@ -1244,9 +1244,189 @@ html, body {
   color: var(--text-secondary);
 }
 
+/* ── Font Studio (Selection + Real Typeface Game Preview) ──────────── */
+
+.font-studio-card {
+  margin-top: 18px;
+}
+
+.font-auto-hint {
+  font-size: 12px;
+  align-self: center;
+}
+
+.font-studio-body {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.95fr) minmax(320px, 1.25fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+.font-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.font-option-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 13px 15px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.16s, background 0.16s, box-shadow 0.16s;
+}
+.font-option-card:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.font-option-card.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.font-option-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.font-option-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.font-option-name {
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.25;
+  color: var(--text-primary);
+}
+.font-option-tag {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 99px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.font-option-card.active .font-option-tag {
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--accent);
+}
+.font-option-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.font-option-radio {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1.8px solid var(--border-strong);
+  flex-shrink: 0;
+  position: relative;
+  transition: border-color 0.16s;
+}
+.font-option-card.active .font-option-radio {
+  border-color: var(--accent);
+}
+.font-option-card.active .font-option-radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.font-preview-stage {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 18px 20px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong);
+  background: radial-gradient(circle at 85% 12%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 58%),
+              var(--bg-elevated);
+}
+
+.fp-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.fp-loc {
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+.fp-stat {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.fp-menu-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.fp-menu-chip {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+.fp-menu-chip.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+.fp-dialogue {
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+  border: 1px solid var(--border);
+}
+.fp-speaker {
+  font-size: 12.5px;
+  color: var(--accent);
+  margin-bottom: 6px;
+  letter-spacing: 0.04em;
+}
+.fp-line {
+  margin: 0;
+  font-size: 15.5px;
+  line-height: 1.72;
+  color: var(--text-primary);
+}
+
+.fp-caption {
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  text-align: right;
+}
+
 @media (max-width: 960px) {
   .app-shell { grid-template-columns: 1fr; }
   .sidebar { display: none; }
-  .hero-grid, .settings-grid, .export-grid { grid-template-columns: 1fr; }
+  .hero-grid, .settings-grid, .export-grid, .font-studio-body { grid-template-columns: 1fr; }
   .entry-row, .editor-head-row { grid-template-columns: 1fr; }
 }

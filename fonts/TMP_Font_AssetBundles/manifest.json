@@ -1,42 +1,91 @@
 {
-  "schema_version": 2,
-  "description": "TMP_FontAsset 字体包（Noto Serif CJK SC Medium 宋体中等字重，单字体收敛），按 Unity 版本选择，用于静态字体替换路径，彻底避免游戏内缺字/豆腐块。",
-  "source": "fonts/SDF_Font_Asset/NotoSerifCJKsc-Medium SDF.asset（用户导出）+ scripts/build_tmp_font_bundles.py",
-  "tmp_versions": {
-    "tmp2": "TextMeshPro 2.x/3.x（Unity 2019+）——Noto Serif CJK SC Medium，中文全覆盖"
-  },
-  "charset_contract": {
-    "cjk_range": [
-      19968,
-      40959
-    ],
-    "min_cjk_count": 3000,
-    "ascii_range": [
-      33,
-      126
-    ],
-    "note": "每个 bundle 的字符表必须覆盖 CJK 基本区 ≥ min_cjk_count 且包含全部可打印 ASCII——Phase 2 逐码点验证基准"
-  },
-  "integrity": {
-    "notoserif_sdf_u2019": {
-      "sha256": "1d8b51cf53ad3a6eecd8d62ab1b50e510e1fbfa15b735cb4f4db051df5997f35",
-      "unity": "2019 ~ 2020",
-      "tmp_layout": "tmp2"
+  "schema_version": 3,
+  "description": "UL10nForge 多字体 TMP_FontAsset（SDF）字体包清单，按 Unity 版本（u2019 / u2021 / u2022 / u6000）自动匹配。",
+  "default_font": "notoserif",
+  "fonts": {
+    "notoserif": {
+      "name": "思源宋体",
+      "tag": "经典衬线",
+      "desc": "端庄沉稳，适合暗黑奇幻、悬疑恐怖与复古剧情",
+      "preview_ttf": "NotoSerifCJKsc-Medium.ttf",
+      "bundle_prefix": "notoserif_sdf",
+      "ugui_font": "Microsoft YaHei",
+      "chars": 8361,
+      "cjk": 7877,
+      "integrity": {
+        "notoserif_sdf_u2019": {
+          "sha256": "1d8b51cf53ad3a6eecd8d62ab1b50e510e1fbfa15b735cb4f4db051df5997f35",
+          "unity": "2019 ~ 2021.2"
+        },
+        "notoserif_sdf_u2021": {
+          "sha256": "0f4ac3cee25cf611a4f64d16377baf74b6f306bcd39aa9fd9eefc4d0d500310e",
+          "unity": "2021.3"
+        },
+        "notoserif_sdf_u2022": {
+          "sha256": "000452a9d2ec27852a9b871fafce2df51a87df3cc736bd20d46ff75877ece1a4",
+          "unity": "2022 ~ 2023"
+        },
+        "notoserif_sdf_u6000": {
+          "sha256": "ea195ca5b82cb37fa53b839db01515bdc7d8bb9c65bc4a8ae392155762054cdd",
+          "unity": "6000.0+"
+        }
+      }
     },
-    "notoserif_sdf_u2021": {
-      "sha256": "0f4ac3cee25cf611a4f64d16377baf74b6f306bcd39aa9fd9eefc4d0d500310e",
-      "unity": "2021",
-      "tmp_layout": "tmp2"
+    "lxgwwenkai": {
+      "name": "霞鹜文楷",
+      "tag": "温润手写",
+      "desc": "柔和自然、长文阅读舒适，适合视觉小说与剧情 RPG",
+      "preview_ttf": "LXGWWenKai-Regular.ttf",
+      "bundle_prefix": "lxgwwenkai_sdf",
+      "ugui_font": "KaiTi",
+      "chars": 8361,
+      "cjk": 7877,
+      "integrity": {
+        "lxgwwenkai_sdf_u2019": {
+          "sha256": "016054f0e825f1d972ed25cff43435966c874f8872c8ab86058b4ad61b5b7e0a",
+          "unity": "2019 ~ 2021.2"
+        },
+        "lxgwwenkai_sdf_u2021": {
+          "sha256": "88ee9444c59821a322b326da4bbe2b02313f5c4b7787ce5b621888687b0eb522",
+          "unity": "2021.3"
+        },
+        "lxgwwenkai_sdf_u2022": {
+          "sha256": "3d1c153a1f21ef51571787a55cd6c045bb1b40c61b414f98d6b19d6c486d0620",
+          "unity": "2022 ~ 2023"
+        },
+        "lxgwwenkai_sdf_u6000": {
+          "sha256": "6634982c39b01dd0425fafa0f37aa42f90c15501c057d424018ce540d2650abc",
+          "unity": "6000.0+"
+        }
+      }
     },
-    "notoserif_sdf_u2022": {
-      "sha256": "000452a9d2ec27852a9b871fafce2df51a87df3cc736bd20d46ff75877ece1a4",
-      "unity": "2022",
-      "tmp_layout": "tmp2"
-    },
-    "notoserif_sdf_u6000": {
-      "sha256": "ea195ca5b82cb37fa53b839db01515bdc7d8bb9c65bc4a8ae392155762054cdd",
-      "unity": "6000.0+",
-      "tmp_layout": "tmp2"
+    "fusionpixel": {
+      "name": "缝合像素",
+      "tag": "复古点阵",
+      "desc": "锐利 10px 点阵风格，适合像素独立与复古横版游戏",
+      "preview_ttf": "fusion-pixel-10px-monospaced-zh_hans.ttf",
+      "bundle_prefix": "fusionpixel_sdf",
+      "ugui_font": "Microsoft YaHei",
+      "chars": 6479,
+      "cjk": 6270,
+      "integrity": {
+        "fusionpixel_sdf_u2019": {
+          "sha256": "710777f8a8e3a5cc5d044fa5ccd0cc614c9cb9d5356d051d779681cbc2226df8",
+          "unity": "2019 ~ 2021.2"
+        },
+        "fusionpixel_sdf_u2021": {
+          "sha256": "2482a63a9afd4ceaafbdee64cb468e0e958e53fda39fbe458c2dec5694a24e5e",
+          "unity": "2021.3"
+        },
+        "fusionpixel_sdf_u2022": {
+          "sha256": "4556021547acdb1398a52dc3f22ef4a2ae129430517a5783dacc6da22bf3e77a",
+          "unity": "2022 ~ 2023"
+        },
+        "fusionpixel_sdf_u6000": {
+          "sha256": "5aa00936f641a1e79a6c5b5216a1c9c6cf790256a96e462180b49999fd32c1e1",
+          "unity": "6000.0+"
+        }
+      }
     }
   }
 }

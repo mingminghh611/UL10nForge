@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ul10n.core.game_detector import select_tmp_bundle_name
+from ul10n.core.fonts import DEFAULT_FONT_ID, resolve_bundle_file
 from ul10n.core.models import GameInfo
 
 
@@ -225,6 +225,7 @@ def deploy_hook(
     server_port: int,
     loader: str | None = None,
     target_lang: str = "zh-CN",
+    font_id: str = DEFAULT_FONT_ID,
 ) -> DeployResult:
     """Deploy BepInEx/MelonLoader + XUAT + Chinese Font fallback into a Unity game directory."""
     game_dir = Path(game_info.game_dir).resolve()
@@ -268,9 +269,9 @@ def deploy_hook(
     paths["font_dir"].mkdir(parents=True, exist_ok=True)
     paths["config"].parent.mkdir(parents=True, exist_ok=True)
 
-    # Deploy matching TMP SDF AssetBundle for TextMeshPro fallback (skipped for Unity < 2019)
-    bundle_name = select_tmp_bundle_name(game_info.unity_version)
-    bundle_src = (app_root / "fonts" / "TMP_Font_AssetBundles" / bundle_name) if bundle_name else None
+    # Deploy matching TMP SDF AssetBundle for selected font (skipped for Unity < 2019)
+    bundle_src, font_opt = resolve_bundle_file(app_root, game_info.unity_version, font_id)
+    bundle_name = bundle_src.name if bundle_src is not None else ""
     fallback_tmp_rel = ""
     if bundle_src is not None and bundle_src.is_file():
         bundle_dst = paths["font_dir"] / bundle_name
@@ -288,8 +289,8 @@ def deploy_hook(
         written_files.append(rel_auto)
         created_files.append(rel_auto)
 
-    ttf_src = app_root / "fonts" / "SimplifiedChinese" / "NotoSerifCJKsc-Medium.ttf"
-    if ttf_src.is_file():
+    ttf_src = font_opt.preview_ttf_path
+    if ttf_src is not None and ttf_src.is_file():
         ttf_dst = paths["font_dir"] / ttf_src.name
         existed = ttf_dst.exists()
         shutil.copy2(ttf_src, ttf_dst)
@@ -332,7 +333,7 @@ def deploy_hook(
     cfg_text = _build_xuat_config(
         endpoint_url=endpoint_url,
         fallback_tmp_font_rel=fallback_tmp_rel,
-        override_font_name="Microsoft YaHei",
+        override_font_name=font_opt.ugui_font,
         target_lang=target_lang,
         is_il2cpp=(runtime_type == "il2cpp"),
     )
@@ -378,6 +379,7 @@ def refresh_hook_config(
     loader: str | None = None,
     target_lang: str = "zh",
     preexisting_loader: bool = False,
+    font_id: str = DEFAULT_FONT_ID,
 ) -> None:
     """Fast (<2ms) self-healing config refresh called before launching an already-deployed game.
 
@@ -397,15 +399,13 @@ def refresh_hook_config(
     if not paths["auto_file"].exists():
         paths["auto_file"].write_text("", encoding="utf-8", newline="\n")
 
-    bundle_name = select_tmp_bundle_name(game_info.unity_version)
+    bundle_src, font_opt = resolve_bundle_file(app_root, game_info.unity_version, font_id)
     fallback_tmp_rel = ""
-    if bundle_name:
-        bundle_dst = paths["font_dir"] / bundle_name
+    if bundle_src is not None and bundle_src.is_file():
+        bundle_dst = paths["font_dir"] / bundle_src.name
         if not bundle_dst.is_file():
-            bundle_src = app_root / "fonts" / "TMP_Font_AssetBundles" / bundle_name
-            if bundle_src.is_file():
-                paths["font_dir"].mkdir(parents=True, exist_ok=True)
-                shutil.copy2(bundle_src, bundle_dst)
+            paths["font_dir"].mkdir(parents=True, exist_ok=True)
+            shutil.copy2(bundle_src, bundle_dst)
         if bundle_dst.is_file():
             fallback_tmp_rel = bundle_dst.relative_to(game_dir).as_posix().replace("/", "\\")
 
@@ -434,7 +434,7 @@ def refresh_hook_config(
     cfg_text = _build_xuat_config(
         endpoint_url=endpoint_url,
         fallback_tmp_font_rel=fallback_tmp_rel,
-        override_font_name="Microsoft YaHei",
+        override_font_name=font_opt.ugui_font,
         target_lang=target_lang,
         is_il2cpp=(game_info.runtime_type == "il2cpp"),
     )
@@ -532,6 +532,7 @@ def build_standalone_patch_zip(
     curated_dict_text: str,
     loader: str | None = None,
     target_lang: str = "zh-CN",
+    font_id: str = DEFAULT_FONT_ID,
 ) -> bytes:
     """Build a standalone, zero-dependency offline Chinese patch `.zip` ready to share."""
     import io
@@ -542,9 +543,9 @@ def build_standalone_patch_zip(
 
     kits_dir = app_root / "resources" / "hook_kits"
     loader_zip, xuat_zip = _select_kit_zips(kits_dir, runtime_type, arch, chosen_loader)
-    bundle_name = select_tmp_bundle_name(game_info.unity_version)
-    bundle_src = app_root / "fonts" / "TMP_Font_AssetBundles" / bundle_name
-    ttf_src = app_root / "fonts" / "SimplifiedChinese" / "NotoSerifCJKsc-Medium.ttf"
+    bundle_src, font_opt = resolve_bundle_file(app_root, game_info.unity_version, font_id)
+    bundle_name = bundle_src.name if bundle_src is not None else ""
+    ttf_src = font_opt.preview_ttf_path
 
     base_prefix = "AutoTranslator" if chosen_loader == "melonloader" else "BepInEx"
     cfg_rel = "AutoTranslator/Config.ini" if chosen_loader == "melonloader" else "BepInEx/config/AutoTranslatorConfig.ini"
@@ -566,12 +567,12 @@ def build_standalone_patch_zip(
                     added.add(rel)
 
         fallback_tmp_rel = ""
-        if bundle_name and bundle_src.is_file():
+        if bundle_name and bundle_src is not None and bundle_src.is_file():
             rel = f"{font_prefix}/{bundle_name}"
             out_zf.write(bundle_src, arcname=rel)
             added.add(rel)
             fallback_tmp_rel = rel.replace("/", "\\")
-        if ttf_src.is_file():
+        if ttf_src is not None and ttf_src.is_file():
             rel = f"{font_prefix}/{ttf_src.name}"
             out_zf.write(ttf_src, arcname=rel)
             added.add(rel)
@@ -582,7 +583,7 @@ def build_standalone_patch_zip(
         cfg_text = _build_xuat_config(
             endpoint_url="",
             fallback_tmp_font_rel=fallback_tmp_rel,
-            override_font_name="Microsoft YaHei",
+            override_font_name=font_opt.ugui_font,
             target_lang=target_lang,
             offline_only=True,
             is_il2cpp=(runtime_type == "il2cpp"),

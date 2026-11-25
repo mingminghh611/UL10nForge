@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>UL10nForge · Unity 汉化工作台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2.6" />
+  <link rel="stylesheet" href="/static/styles.css?v=2.7" />
 </head>
 <body>
   <div class="app-shell">
@@ -506,6 +506,38 @@
               </div>
             </div>
           </div>
+
+          <!-- Game Display Font Picker & Live Style Preview -->
+          <div class="card font-studio-card">
+            <div class="card-head">
+              <div>
+                <div class="eyebrow">游戏内显示字体</div>
+                <h3 class="card-title">选择字体与实时样式预览</h3>
+              </div>
+              <span class="muted-hint font-auto-hint">字号、行距与防溢出已自动优化，点选即可生效</span>
+            </div>
+
+            <div class="font-studio-body">
+              <div class="font-picker-list" id="font-picker-list" role="radiogroup" aria-label="游戏显示字体"></div>
+
+              <div class="font-preview-stage" id="font-preview-stage">
+                <div class="fp-topbar">
+                  <span class="fp-loc">章节 III · 迷雾灯塔</span>
+                  <span class="fp-stat">HP 180 / 200 · Lv.24</span>
+                </div>
+                <div class="fp-menu-row">
+                  <span class="fp-menu-chip active">继续游戏</span>
+                  <span class="fp-menu-chip">物品背包</span>
+                  <span class="fp-menu-chip">系统设置</span>
+                </div>
+                <div class="fp-dialogue">
+                  <div class="fp-speaker">守灯人</div>
+                  <p class="fp-line">「前方雾气渐浓，提灯的微光只能照亮三步之内。你确定要推开这扇铁门吗？」</p>
+                </div>
+                <div class="fp-caption" id="font-preview-caption">当前预览：思源宋体</div>
+              </div>
+            </div>
+          </div>
         </section>
       </main>
     </div>
@@ -701,6 +733,6 @@
   <!-- Toast Container -->
   <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 
-  <script type="module" src="/static/app.js?v=2.6"></script>
+  <script type="module" src="/static/app.js?v=2.7"></script>
 </body>
 </html>

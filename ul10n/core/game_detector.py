@@ -207,11 +207,11 @@ def detect_game(game_dir: str | Path) -> GameInfo:
 
 # Exact Unity build versions of the shipped TMP SDF AssetBundles (sorted newest -> oldest).
 # Unity AssetBundles are forward-compatible (game_version >= bundle_version), never backward-compatible.
-_TMP_BUNDLES_BY_MIN_VERSION: tuple[tuple[tuple[int, int, int], str], ...] = (
-    ((6000, 3, 0), "notoserif_sdf_u6000"),
-    ((2022, 3, 61), "notoserif_sdf_u2022"),
-    ((2021, 3, 33), "notoserif_sdf_u2021"),
-    ((2019, 1, 0), "notoserif_sdf_u2019"),
+_TMP_BUNDLE_SUFFIXES_BY_MIN_VERSION: tuple[tuple[tuple[int, int, int], str], ...] = (
+    ((6000, 3, 0), "u6000"),
+    ((2022, 3, 61), "u2022"),
+    ((2021, 3, 33), "u2021"),
+    ((2019, 1, 0), "u2019"),
 )
 
 
@@ -222,18 +222,19 @@ def _parse_unity_tuple(unity_version: str) -> tuple[int, int, int] | None:
     return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
-def select_tmp_bundle_name(unity_version: str) -> str:
+def select_tmp_bundle_name(unity_version: str, font_prefix: str = "notoserif_sdf") -> str:
     """Pick the newest pre-built TMP SDF AssetBundle whose build version <= game's Unity version.
 
     Returns empty string for Unity < 2019.1.0 (e.g. Unity 5.x/2017/2018) so we never feed
     an incompatible Unity 2019+ AssetBundle into an older engine.
     """
+    prefix = (font_prefix or "notoserif_sdf").strip() or "notoserif_sdf"
     ver = _parse_unity_tuple(unity_version)
     if ver is None:
-        return "notoserif_sdf_u2019"
+        return f"{prefix}_u2019"
     if ver < (2019, 1, 0):
         return ""
-    for min_ver, name in _TMP_BUNDLES_BY_MIN_VERSION:
+    for min_ver, suffix in _TMP_BUNDLE_SUFFIXES_BY_MIN_VERSION:
         if ver >= min_ver:
-            return name
+            return f"{prefix}_{suffix}"
     return ""

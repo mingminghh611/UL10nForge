@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from ul10n import VERSION
 from ul10n.core.exporter import export_entries_as_format
+from ul10n.core.fonts import get_font_option, list_fonts
 from ul10n.core.game_detector import detect_protection_markers
 from ul10n.core.hook_deployer import get_xuat_paths
 from ul10n.core.models import (
@@ -1505,7 +1506,25 @@ def create_app(
         svc.global_store.delete_memory(src_hash)
         return {"ok": True}
 
-    # ── Settings & Runtime ────────────────────────────────────────────────
+    # ── Settings, Fonts & Runtime ─────────────────────────────────────────
+
+    @app.get("/api/fonts")
+    async def get_fonts():
+        fonts = [f.to_dict() for f in list_fonts(svc.app_root)]
+        return {"fonts": fonts, "active_font_id": svc.settings().font_id}
+
+    @app.get("/api/fonts/{font_id}/file")
+    async def get_font_preview_file(font_id: str):
+        opt = get_font_option(svc.app_root, font_id)
+        if opt.id != font_id.strip().lower() or opt.preview_ttf_path is None or not opt.preview_ttf_path.is_file():
+            raise HTTPException(status_code=404, detail="字体预览文件不存在")
+        ext = opt.preview_ttf_path.suffix.lower()
+        media_type = "font/otf" if ext == ".otf" else "font/ttf"
+        return FileResponse(
+            str(opt.preview_ttf_path),
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     @app.get("/api/settings")
     async def get_settings():
@@ -1538,11 +1557,19 @@ def create_app(
             else:
                 merged[k] = v
         updated = AppSettings.from_dict(merged)
+        updated.font_id = get_font_option(svc.app_root, updated.font_id).id
         svc.global_store.save_settings(updated)
         if old.hardware_mode != updated.hardware_mode:
             await asyncio.to_thread(svc.runtime.stop_all)
         elif updated.disable_reasoning and not old.disable_reasoning:
             await asyncio.to_thread(svc.runtime.stop_role, "reason")
+        if old.font_id != updated.font_id and svc.active_project_id:
+            proj = svc.global_store.get_project(svc.active_project_id)
+            if proj and proj.hook_deployed:
+                try:
+                    await asyncio.to_thread(svc.refresh_project_hook_config, proj.id)
+                except Exception:
+                    pass
         return {"settings": _mask_settings_dict(updated), "runtime": svc.runtime_status()}
 
     @app.get("/api/runtime/status")

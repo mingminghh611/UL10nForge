@@ -165,6 +165,7 @@ class AppSettings:
     auto_sync_xuat: bool = True
     disable_reasoning: bool = False  # True = skip context inference & AI review, direct translate -> deploy
     sound_effects: bool = True       # Subtle UI feedback chimes
+    font_id: str = "notoserif"       # Selected in-game Chinese font (notoserif | lxgwwenkai | fusionpixel)
     translate_role: RoleEndpointConfig = field(
         default_factory=lambda: RoleEndpointConfig(mode="local", temperature=0.25, max_tokens=1024)
     )
@@ -181,6 +182,7 @@ class AppSettings:
             "auto_sync_xuat": self.auto_sync_xuat,
             "disable_reasoning": self.disable_reasoning,
             "sound_effects": self.sound_effects,
+            "font_id": self.font_id,
             "translate_role": self.translate_role.to_dict(),
             "reason_role": self.reason_role.to_dict(),
         }
@@ -197,6 +199,7 @@ class AppSettings:
             auto_sync_xuat=bool(data.get("auto_sync_xuat", True)),
             disable_reasoning=bool(data.get("disable_reasoning", False)),
             sound_effects=bool(data.get("sound_effects", True)),
+            font_id=str(data.get("font_id", "notoserif") or "notoserif"),
             translate_role=RoleEndpointConfig.from_dict(data.get("translate_role")),
             reason_role=RoleEndpointConfig.from_dict(data.get("reason_role")),
         )

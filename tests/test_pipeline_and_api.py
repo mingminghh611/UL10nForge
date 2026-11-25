@@ -984,5 +984,58 @@ def test_disable_reasoning_mode_and_sound_settings(tmp_path: Path):
             assert entries["Whispering Lantern"].review_level == ""
 
 
+def test_multi_font_catalog_preview_and_deploy_switch(tmp_path: Path):
+    import io
+    import zipfile
+
+    game_dir = tmp_path / "FontSwitchGame"
+    (game_dir / "FontSwitchGame_Data" / "Managed").mkdir(parents=True)
+    # Mark Unity 2022.3.62f1 so u2022 bundle is chosen
+    (game_dir / "FontSwitchGame_Data" / "globalgamemanagers").write_bytes(b"\x00" * 32 + b"2022.3.62f1\x00")
+
+    app = create_app(app_root=APP_ROOT, data_dir=tmp_path / "data")
+    with TestClient(app) as client:
+        r_fonts = client.get("/api/fonts")
+        assert r_fonts.status_code == 200
+        body = r_fonts.json()
+        by_id = {f["id"]: f for f in body["fonts"]}
+        assert body["active_font_id"] == "notoserif"
+        assert {"notoserif", "lxgwwenkai", "fusionpixel"}.issubset(by_id.keys())
+        for fid in ("notoserif", "lxgwwenkai", "fusionpixel"):
+            assert by_id[fid]["has_preview"] is True
+            assert len(by_id[fid]["versions"]) == 4
+            r_ttf = client.get(by_id[fid]["preview_url"])
+            assert r_ttf.status_code == 200
+            assert len(r_ttf.content) > 100_000
+
+        # Open & deploy with default font (notoserif)
+        pid = client.post("/api/projects/open", json={"game_dir": str(game_dir)}).json()["project"]["id"]
+        r_dep = client.post(f"/api/projects/{pid}/deploy", json={})
+        assert r_dep.status_code == 200
+        assert r_dep.json()["deploy"]["font_bundle"] == "notoserif_sdf_u2022"
+
+        # Switch to fusionpixel -> immediately refreshes active deployed game's config & bundle
+        r_set = client.put("/api/settings", json={"font_id": "fusionpixel"})
+        assert r_set.status_code == 200
+        assert r_set.json()["settings"]["font_id"] == "fusionpixel"
+
+        cfg_ini = (game_dir / "BepInEx" / "config" / "AutoTranslatorConfig.ini").read_text(encoding="utf-8")
+        assert "FallbackFontTextMeshPro=BepInEx\\Translation\\zh\\Fonts\\fusionpixel_sdf_u2022" in cfg_ini
+        assert "EnableUIResizing=True" in cfg_ini
+        assert "ResizeUILineSpacingScale=0.85" in cfg_ini
+        assert (game_dir / "BepInEx" / "Translation" / "zh" / "Fonts" / "fusionpixel_sdf_u2022").is_file()
+
+        # Standalone patch zip also packages the newly selected font (lxgwwenkai)
+        client.put("/api/settings", json={"font_id": "lxgwwenkai"})
+        r_zip = client.get(f"/api/projects/{pid}/export-patch")
+        assert r_zip.status_code == 200
+        with zipfile.ZipFile(io.BytesIO(r_zip.content), "r") as zf:
+            names = set(zf.namelist())
+            assert "BepInEx/Translation/zh/Fonts/lxgwwenkai_sdf_u2022" in names
+            zcfg = zf.read("BepInEx/config/AutoTranslatorConfig.ini").decode("utf-8")
+            assert "lxgwwenkai_sdf_u2022" in zcfg
+
+
+
 
 

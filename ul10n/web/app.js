@@ -7,6 +7,7 @@ const state = {
   stats: null,
   context: null,
   settings: null,
+  fonts: [],
   runtime: null,
   task: null,
   liveFeed: [],
@@ -256,14 +257,17 @@ function switchTab(tab) {
 /* ── Data Loading & Rendering ──────────────────────────────────────── */
 
 async function bootstrap() {
-  const [projRes, setRes, taskRes] = await Promise.all([
+  const [projRes, setRes, taskRes, fontRes] = await Promise.all([
     api("/api/projects"),
     api("/api/settings"),
     api("/api/tasks/current"),
+    api("/api/fonts").catch(() => ({ fonts: [] })),
   ]);
 
   state.settings = setRes.settings;
   state.runtime = setRes.runtime;
+  state.fonts = fontRes.fonts || [];
+  registerFontFaces(state.fonts);
   applyTheme(state.settings.theme);
   applySoundUI(state.settings.sound_effects);
   applyReasoningMode(state.settings.disable_reasoning);
@@ -1059,7 +1063,99 @@ async function loadGlossaryView() {
   );
 }
 
-/* ── Settings ──────────────────────────────────────────────────────── */
+/* ── Settings & Font Studio ────────────────────────────────────────── */
+
+function registerFontFaces(fonts) {
+  let styleEl = document.getElementById("ul10n-font-faces");
+  if (!styleEl) {
+    styleEl = document.createElement("style");
+    styleEl.id = "ul10n-font-faces";
+    document.head.appendChild(styleEl);
+  }
+  const rules = (fonts || [])
+    .filter((f) => f.has_preview && f.preview_url)
+    .map(
+      (f) =>
+        `@font-face { font-family: "ul10n-font-${f.id}"; src: url("${f.preview_url}"); font-display: swap; }`
+    );
+  styleEl.textContent = rules.join("\n");
+}
+
+function applyFontPreview(fontOpt) {
+  const stage = $("#font-preview-stage");
+  const cap = $("#font-preview-caption");
+  if (!stage || !fontOpt) return;
+  const family = fontOpt.has_preview
+    ? `"ul10n-font-${fontOpt.id}", "Microsoft YaHei", sans-serif`
+    : `"Microsoft YaHei", sans-serif`;
+  stage.style.fontFamily = family;
+  if (cap) {
+    cap.textContent = `当前预览：${fontOpt.name}（${fontOpt.tag}）· 切换后自动同步到游戏`;
+  }
+}
+
+function renderFontPicker() {
+  const box = $("#font-picker-list");
+  if (!box) return;
+  const fonts = state.fonts || [];
+  if (!fonts.length) {
+    box.innerHTML = `<div class="muted-hint">未检测到可用字体包</div>`;
+    return;
+  }
+  const activeId = state.settings?.font_id || fonts[0].id;
+  const activeOpt = fonts.find((f) => f.id === activeId) || fonts[0];
+
+  box.innerHTML = fonts
+    .map((f) => {
+      const isAct = f.id === activeOpt.id;
+      const nameStyle = f.has_preview
+        ? `style='font-family: "ul10n-font-${escapeHtml(f.id)}", sans-serif'`
+        : "";
+      return `
+        <button type="button" class="font-option-card ${isAct ? "active" : ""}" data-font-id="${escapeHtml(f.id)}" role="radio" aria-checked="${isAct}">
+          <div class="font-option-main">
+            <div class="font-option-head">
+              <span class="font-option-name" ${nameStyle}>${escapeHtml(f.name)}</span>
+              <span class="font-option-tag">${escapeHtml(f.tag)}</span>
+            </div>
+            <span class="font-option-desc">${escapeHtml(f.desc)}</span>
+          </div>
+          <span class="font-option-radio" aria-hidden="true"></span>
+        </button>
+      `;
+    })
+    .join("");
+
+  applyFontPreview(activeOpt);
+
+  $$("#font-picker-list .font-option-card").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const fid = btn.dataset.fontId;
+      const opt = fonts.find((f) => f.id === fid);
+      if (!opt) return;
+      if (state.settings?.font_id === fid) {
+        sfx.tap();
+        applyFontPreview(opt);
+        return;
+      }
+      sfx.tap();
+      if (state.settings) state.settings.font_id = fid;
+      renderFontPicker();
+      try {
+        const res = await api("/api/settings", {
+          method: "PUT",
+          body: { font_id: fid },
+        });
+        state.settings = res.settings;
+        renderFontPicker();
+        sfx.save();
+        toast(`游戏显示字体已切换为「${opt.name}」`);
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    });
+  });
+}
 
 function renderSettings() {
   const s = state.settings;
@@ -1084,6 +1180,7 @@ function renderSettings() {
   applyTheme(s.theme);
   applySoundUI(s.sound_effects);
   applyReasoningMode(s.disable_reasoning);
+  renderFontPicker();
   renderRuntime();
 }
 
@@ -1104,6 +1201,7 @@ async function saveSettingsFromUI() {
     disable_reasoning: $("#chk-disable-reasoning").checked,
     sound_effects: $("#chk-sound-effects").checked,
     auto_sync_xuat: $("#chk-auto-sync").checked,
+    font_id: state.settings?.font_id || "notoserif",
     translate_role: {
       ...(state.settings?.translate_role || {}),
       mode,
