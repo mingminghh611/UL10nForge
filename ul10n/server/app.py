@@ -945,9 +945,10 @@ def create_app(
                 task.message = "已完成接入，当前无静态文本，请启动游戏以实时捕获翻译"
                 return
 
-            # Stage 2: Context inference + auto glossary extraction
+            # Stage 2: Context inference + auto glossary extraction (skipped when disable_reasoning=True)
+            skip_reasoning = bool(cfg.disable_reasoning)
             ctx = store.load_context()
-            if not ctx.is_ready and not cancel.is_set():
+            if not skip_reasoning and not ctx.is_ready and not cancel.is_set():
                 task.message = "② 正在分析游戏语境与专有名词..."
                 emit()
                 r_cli = svc.runtime.create_client_for_role("reason", cfg)
@@ -963,21 +964,23 @@ def create_app(
             targets = [
                 e for e in store.all_entries((STATUS_PENDING, STATUS_FAILED)) if not e.locked
             ]
-            review_est = min(req.review_limit, len(targets) + store.stats().get("translated", 0)) if req.run_review else 0
+            do_review = bool(req.run_review) and not skip_reasoning
+            review_est = min(req.review_limit, len(targets) + store.stats().get("translated", 0)) if do_review else 0
             task.total = max(1, len(targets) + review_est)
             tr_done = 0
             cloud_tokens = 0
             if targets and not cancel.is_set():
-                task.message = f"③ 正在批量翻译 ({len(targets)} 条)..."
+                step_tr = "②" if skip_reasoning else "③"
+                task.message = f"{step_tr} 正在批量翻译 ({len(targets)} 条)..."
                 emit()
                 tr_done, _tr_fail, tok = _run_concurrent_translate(
                     project_id, targets, task, cancel, emit, retranslate_all=False, base_offset=0
                 )
                 cloud_tokens += tok
 
-            # Stage 4: Fast batched AI review & auto-fix
+            # Stage 4: Fast batched AI review & auto-fix (skipped when disable_reasoning=True)
             fixed_count = 0
-            if req.run_review and not cancel.is_set():
+            if do_review and not cancel.is_set():
                 rev_candidates = [
                     e for e in store.all_entries((STATUS_TRANSLATED, STATUS_FLAGGED))
                     if not e.locked and (not e.review_level or e.status == STATUS_FLAGGED)
@@ -1033,15 +1036,16 @@ def create_app(
                         reason_cli.close()
                         tr_cli.close()
 
-            # Stage 5: Deploy Hook & export curated dictionary (+ regex rules)
+            # Stage 5: Deploy Hook & export curated dictionary
             if not cancel.is_set():
+                step_dep = "③" if skip_reasoning else "⑤"
                 refreshed_proj = svc.global_store.get_project(project_id)
                 if req.deploy_hook and refreshed_proj and not refreshed_proj.hook_deployed:
-                    task.message = "⑤ 正在接入无损汉化插件并同步词典..."
+                    task.message = f"{step_dep} 正在接入无损汉化插件并同步词典..."
                     emit()
                     svc.deploy_project_hook(project_id)
                 else:
-                    task.message = "⑤ 正在同步词典到游戏目录..."
+                    task.message = f"{step_dep} 正在同步词典到游戏目录..."
                     emit()
                     svc.export_xuat_to_game(project_id)
 
@@ -1116,6 +1120,11 @@ def create_app(
 
     @app.post("/api/projects/{project_id}/tasks/context")
     async def start_context_build(project_id: str):
+        if svc.settings().disable_reasoning:
+            raise HTTPException(
+                status_code=400,
+                detail="当前已开启「关闭推理与审校」模式，如需识别语境请先在设置中关闭该选项",
+            )
         project = svc.global_store.get_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="项目不存在")
@@ -1160,6 +1169,11 @@ def create_app(
 
     @app.post("/api/projects/{project_id}/tasks/review")
     async def start_batch_review(project_id: str, req: BatchReviewReq):
+        if svc.settings().disable_reasoning:
+            raise HTTPException(
+                status_code=400,
+                detail="当前已开启「关闭推理与审校」模式，如需 AI 审校请先在设置中关闭该选项",
+            )
         project = svc.global_store.get_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="项目不存在")
@@ -1527,6 +1541,8 @@ def create_app(
         svc.global_store.save_settings(updated)
         if old.hardware_mode != updated.hardware_mode:
             await asyncio.to_thread(svc.runtime.stop_all)
+        elif updated.disable_reasoning and not old.disable_reasoning:
+            await asyncio.to_thread(svc.runtime.stop_role, "reason")
         return {"settings": _mask_settings_dict(updated), "runtime": svc.runtime_status()}
 
     @app.get("/api/runtime/status")

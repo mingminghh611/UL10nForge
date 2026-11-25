@@ -60,12 +60,161 @@ async function api(path, options = {}) {
 }
 
 function toast(message, type = "ok") {
+  if (type === "err") sfx.error();
   const stack = $("#toast-stack");
   const el = document.createElement("div");
   el.className = `toast ${type}`;
   el.textContent = message;
   stack.appendChild(el);
   setTimeout(() => el.remove(), 3400);
+}
+
+/* ── Minimalist Synthesized UI Sound Effects (Web Audio API) ───────── */
+
+const sfx = (() => {
+  let ctx = null;
+  function getCtx() {
+    if (typeof window === "undefined") return null;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    if (!ctx) ctx = new AC();
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    return ctx;
+  }
+  function isEnabled(force = false) {
+    if (force) return true;
+    return state.settings ? state.settings.sound_effects !== false : true;
+  }
+  function tone(freq, { delay = 0, duration = 0.14, gain = 0.042, type = "sine", endFreq = null } = {}) {
+    try {
+      const c = getCtx();
+      if (!c) return;
+      const t0 = c.currentTime + delay;
+      const osc = c.createOscillator();
+      const g = c.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, t0);
+      if (endFreq && endFreq !== freq) {
+        osc.frequency.exponentialRampToValueAtTime(endFreq, t0 + duration);
+      }
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(gain, t0 + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
+      osc.connect(g);
+      g.connect(c.destination);
+      osc.start(t0);
+      osc.stop(t0 + duration + 0.02);
+    } catch {
+      // Ignore audio errors in unsupported or restricted environments
+    }
+  }
+  return {
+    tap() {
+      if (!isEnabled()) return;
+      tone(680, { duration: 0.048, gain: 0.026, endFreq: 480 });
+    },
+    toggle(on, { force = false } = {}) {
+      if (!isEnabled(force)) return;
+      if (on) {
+        tone(523.25, { duration: 0.085, gain: 0.036 });
+        tone(659.25, { delay: 0.045, duration: 0.11, gain: 0.038 });
+      } else {
+        tone(587.33, { duration: 0.075, gain: 0.032 });
+        tone(440.0, { delay: 0.045, duration: 0.1, gain: 0.03 });
+      }
+    },
+    save() {
+      if (!isEnabled()) return;
+      tone(659.25, { duration: 0.12, gain: 0.038 });
+      tone(987.77, { delay: 0.055, duration: 0.2, gain: 0.036 });
+    },
+    done() {
+      if (!isEnabled()) return;
+      tone(523.25, { duration: 0.18, gain: 0.038 });
+      tone(659.25, { delay: 0.06, duration: 0.2, gain: 0.04 });
+      tone(783.99, { delay: 0.12, duration: 0.24, gain: 0.042 });
+      tone(1046.5, { delay: 0.19, duration: 0.36, gain: 0.034 });
+    },
+    launch() {
+      if (!isEnabled()) return;
+      tone(587.33, { duration: 0.14, gain: 0.038, type: "triangle" });
+      tone(880.0, { delay: 0.065, duration: 0.18, gain: 0.038 });
+      tone(1174.66, { delay: 0.13, duration: 0.28, gain: 0.032 });
+    },
+    error() {
+      if (!isEnabled()) return;
+      tone(235, { duration: 0.11, gain: 0.044, type: "triangle", endFreq: 210 });
+      tone(175, { delay: 0.095, duration: 0.16, gain: 0.04, type: "triangle", endFreq: 158 });
+    },
+  };
+})();
+
+function applySoundUI(enabled) {
+  const on = enabled !== false;
+  const btn = $("#btn-sound");
+  if (btn) {
+    btn.classList.toggle("muted", !on);
+    btn.title = on ? "界面音效：已开启（点击静音）" : "界面音效：已静音（点击开启）";
+  }
+  const icoOn = $("#icon-sound-on");
+  const icoOff = $("#icon-sound-off");
+  if (icoOn) icoOn.hidden = !on;
+  if (icoOff) icoOff.hidden = on;
+  const chk = $("#chk-sound-effects");
+  if (chk) chk.checked = on;
+}
+
+function applyReasoningMode(disabled) {
+  const off = Boolean(disabled);
+  const heroGrid = $("#wb-hero-grid");
+  if (heroGrid) heroGrid.classList.toggle("no-context", off);
+
+  const ctxCard = $("#wb-context-card");
+  if (ctxCard) ctxCard.hidden = off;
+
+  const directPill = $("#wb-direct-pill");
+  if (directPill) directPill.hidden = !off;
+
+  const btnReview = $("#btn-start-review");
+  if (btnReview) btnReview.hidden = off;
+
+  const btnReviewFull = $("#btn-review-full");
+  if (btnReviewFull) btnReviewFull.hidden = off;
+
+  const pillReviewed = $("#pill-reviewed");
+  if (pillReviewed) pillReviewed.hidden = off;
+  if (off && state.editor.status === "reviewed") {
+    state.editor.status = "all";
+    $$("#editor-filters .pill").forEach((b) => b.classList.toggle("active", b.dataset.status === "all"));
+  }
+
+  const cardRs = $("#card-rs-wrap");
+  if (cardRs) cardRs.hidden = off;
+
+  const apiRs = $("#api-rs-block");
+  if (apiRs) apiRs.hidden = off;
+
+  const clearCtxWrap = $("#clear-context-wrap");
+  if (clearCtxWrap) clearCtxWrap.hidden = off;
+
+  const navLbl = $("#nav-editor-label");
+  if (navLbl) navLbl.textContent = off ? "译文编辑" : "译文审校";
+
+  const engEyebrow = $("#settings-engine-eyebrow");
+  if (engEyebrow) engEyebrow.textContent = off ? "翻译引擎" : "推理与翻译引擎";
+
+  const step2 = $("#empty-step-2");
+  if (step2) step2.innerHTML = off ? "<span>2</span> 快速批量翻译" : "<span>2</span> 翻译与审校修正";
+
+  const autoBtn = $("#btn-auto-localize");
+  if (autoBtn) {
+    autoBtn.title = off
+      ? "自动依次完成：扫描纯静态界面 → 批量翻译 → 接入游戏（已跳过推理建模与审校重译）"
+      : "自动依次完成：扫描纯静态界面 → 提取语境与术语 → 并发翻译 → 智能审校 → 接入游戏";
+  }
+
+  const chk = $("#chk-disable-reasoning");
+  if (chk) chk.checked = off;
 }
 
 function escapeHtml(s) {
@@ -116,6 +265,8 @@ async function bootstrap() {
   state.settings = setRes.settings;
   state.runtime = setRes.runtime;
   applyTheme(state.settings.theme);
+  applySoundUI(state.settings.sound_effects);
+  applyReasoningMode(state.settings.disable_reasoning);
   renderRuntime();
   renderSettings();
 
@@ -236,6 +387,7 @@ function renderWorkbench() {
 
   renderContextCard();
   renderLiveFeed();
+  applyReasoningMode(state.settings?.disable_reasoning);
 }
 
 function renderContextCard() {
@@ -510,10 +662,11 @@ function buildEntryBadgesHtml(e) {
     e.source === "xuat_live"
       ? `<span class="badge live">实时</span>`
       : `<span class="badge static">静态</span>`;
+  const hideReview = Boolean(state.settings?.disable_reasoning);
   const revBadge =
-    e.status !== "skipped" && e.review_level === "FIXED"
+    !hideReview && e.status !== "skipped" && e.review_level === "FIXED"
       ? `<span class="badge translated">已审校·已修正</span>`
-      : e.status !== "skipped" && e.review_level === "PASS"
+      : !hideReview && e.status !== "skipped" && e.review_level === "PASS"
       ? `<span class="badge">已审校</span>`
       : "";
   return (
@@ -632,6 +785,7 @@ function renderEditorList() {
         saveFlashTimer = setTimeout(() => {
           if (saveBtn) saveBtn.textContent = "保存";
         }, 1200);
+        sfx.save();
         toast("译文已保存并同步到游戏");
       } catch (err) {
         saveBtn.textContent = "保存";
@@ -802,6 +956,7 @@ async function loadGlossaryView() {
           inp.dataset.orig = val;
           const badge = inp.closest(".simple-row").querySelector(".badge");
           if (badge) badge.textContent = "已修改";
+          sfx.save();
           toast("翻译记忆已更新");
         } catch (err) {
           toast(err.message, "err");
@@ -875,6 +1030,7 @@ async function loadGlossaryView() {
         srcInp.dataset.orig = term;
         dstInp.dataset.orig = translation;
         catSel.dataset.orig = category;
+        sfx.save();
         toast("术语已更新");
       } catch (err) {
         toast(err.message, "err");
@@ -914,8 +1070,9 @@ function renderSettings() {
   $("#settings-api-panel").hidden = mode !== "api";
 
   $$("#seg-hardware button").forEach((b) => b.classList.toggle("active", b.dataset.val === s.hardware_mode));
-  $("#chk-single-model").checked = Boolean(s.use_single_model);
+  $("#chk-disable-reasoning").checked = Boolean(s.disable_reasoning);
   $("#chk-auto-sync").checked = Boolean(s.auto_sync_xuat);
+  $("#chk-sound-effects").checked = s.sound_effects !== false;
 
   $("#api-tr-url").value = s.translate_role?.base_url || "";
   $("#api-tr-model").value = s.translate_role?.model || "";
@@ -925,6 +1082,8 @@ function renderSettings() {
   $("#api-rs-key").value = s.reason_role?.api_key || "";
 
   applyTheme(s.theme);
+  applySoundUI(s.sound_effects);
+  applyReasoningMode(s.disable_reasoning);
   renderRuntime();
 }
 
@@ -942,7 +1101,8 @@ async function saveSettingsFromUI() {
   const payload = {
     theme,
     hardware_mode,
-    use_single_model: $("#chk-single-model").checked,
+    disable_reasoning: $("#chk-disable-reasoning").checked,
+    sound_effects: $("#chk-sound-effects").checked,
     auto_sync_xuat: $("#chk-auto-sync").checked,
     translate_role: {
       ...(state.settings?.translate_role || {}),
@@ -963,6 +1123,7 @@ async function saveSettingsFromUI() {
   state.settings = res.settings;
   state.runtime = res.runtime;
   renderSettings();
+  sfx.save();
   toast("设置已保存");
 }
 
@@ -1007,6 +1168,7 @@ function connectEvents() {
       }
     } else if (msg.type === "task_done") {
       applyTaskState(msg.data);
+      if (msg.data.status === "completed") sfx.done();
       if (msg.data.message) {
         toast(msg.data.message, msg.data.status === "failed" ? "err" : "ok");
       }
@@ -1069,28 +1231,53 @@ async function nativePickAndOpen() {
 }
 
 function openCmdPalette() {
+  const noReason = Boolean(state.settings?.disable_reasoning);
+  const soundOn = state.settings?.sound_effects !== false;
   const actions = [
     { label: "打开 Unity 游戏文件夹", run: () => openModal("modal-open-path") },
     { label: "前往工作台", run: () => switchTab("workbench") },
-    { label: "前往译文审校（查看与修改译文）", run: () => switchTab("editor") },
+    { label: noReason ? "前往译文编辑（查看与修改译文）" : "前往译文审校（查看与修改译文）", run: () => switchTab("editor") },
     { label: "前往术语与记忆", run: () => switchTab("glossary") },
     { label: "前往设置", run: () => switchTab("settings") },
+    {
+      label: noReason ? "恢复推理与智能审校模式" : "关闭推理与审校（切换为极速直翻）",
+      run: () => {
+        const chk = $("#chk-disable-reasoning");
+        if (chk) {
+          chk.checked = !noReason;
+          chk.dispatchEvent(new Event("change"));
+        }
+      },
+    },
+    { label: soundOn ? "关闭界面交互音效（静音）" : "开启界面交互音效", run: () => $("#btn-sound").click() },
     { label: "切换深色 / 浅色外观", run: () => $("#btn-theme").click() },
   ];
   if (state.project) {
-    actions.unshift(
-      { label: "一键自动汉化（扫描+语境+翻译+审校+接入）", run: () => $("#btn-auto-localize").click() },
+    const projActions = [
+      {
+        label: noReason
+          ? "一键自动汉化（扫描+翻译+接入）"
+          : "一键自动汉化（扫描+语境+翻译+审校+接入）",
+        run: () => $("#btn-auto-localize").click(),
+      },
       { label: "导出汉化文本（JSON / TXT / MD / CSV）与离线补丁", run: () => openModal("modal-export") },
       { label: "呼出 / 隐藏游戏内悬浮编辑窗 (Alt+L)", run: () => $("#btn-toggle-overlay").click() },
       { label: "批量查找替换译文", run: () => openModal("modal-replace") },
       { label: "启动当前游戏（自动接入并同步最新词典）", run: () => $("#btn-launch-game").click() },
       { label: "扫描静态文本", run: () => $("#btn-scan-texts").click() },
       { label: "开始批量翻译待翻词条", run: () => $("#btn-start-translate").click() },
-      { label: "智能审校（筛选高风险词条并克制修正）", run: () => $("#btn-start-review").click() },
-      { label: "深度全量审校（不跳过短文本）", run: () => $("#btn-review-full").click() },
       { label: "清空当前游戏翻译与扫描记录", run: () => openModal("modal-clear") },
-      { label: "自动识别游戏语境", run: () => $("#btn-infer-context").click() }
-    );
+    ];
+    if (!noReason) {
+      projActions.splice(
+        7,
+        0,
+        { label: "智能审校（筛选高风险词条并克制修正）", run: () => $("#btn-start-review").click() },
+        { label: "深度全量审校（不跳过短文本）", run: () => $("#btn-review-full").click() },
+        { label: "自动识别游戏语境", run: () => $("#btn-infer-context").click() }
+      );
+    }
+    actions.unshift(...projActions);
   }
   const render = (q = "") => {
     const low = q.trim().toLowerCase();
@@ -1115,10 +1302,23 @@ function openCmdPalette() {
 /* ── Event Bindings ────────────────────────────────────────────────── */
 
 function bindEvents() {
-  $$(".nav-item").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
+  $$(".nav-item").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      if (state.tab !== btn.dataset.tab) sfx.tap();
+      switchTab(btn.dataset.tab);
+    })
+  );
+
+  $("#wb-direct-pill").addEventListener("click", () => {
+    sfx.tap();
+    switchTab("settings");
+  });
 
   $("#project-select").addEventListener("change", (e) => {
-    if (e.target.value) selectProject(e.target.value);
+    if (e.target.value) {
+      sfx.tap();
+      selectProject(e.target.value);
+    }
   });
 
   $("#btn-open-game").addEventListener("click", () => openModal("modal-open-path"));
@@ -1130,9 +1330,59 @@ function bindEvents() {
   });
   $("#btn-modal-open-confirm").addEventListener("click", () => openGameDir($("#modal-path-input").value));
 
+  const setSoundEnabled = async (enabled) => {
+    const next = Boolean(enabled);
+    if (state.settings) state.settings.sound_effects = next;
+    applySoundUI(next);
+    if (next) sfx.toggle(true, { force: true });
+    await api("/api/settings", { method: "PUT", body: { sound_effects: next } }).catch(() => {});
+  };
+
+  $("#btn-sound").addEventListener("click", () => {
+    const current = state.settings ? state.settings.sound_effects !== false : true;
+    setSoundEnabled(!current);
+  });
+
+  $("#chk-sound-effects").addEventListener("change", (e) => {
+    setSoundEnabled(e.target.checked);
+  });
+
+  $("#chk-disable-reasoning").addEventListener("change", async (e) => {
+    const disabled = Boolean(e.target.checked);
+    sfx.toggle(disabled);
+    applyReasoningMode(disabled);
+    try {
+      const res = await api("/api/settings", {
+        method: "PUT",
+        body: { disable_reasoning: disabled },
+      });
+      state.settings = res.settings;
+      state.runtime = res.runtime;
+      renderRuntime();
+      applyReasoningMode(res.settings.disable_reasoning);
+      toast(
+        disabled
+          ? "已关闭推理与审校，开启极速直翻模式"
+          : "已恢复语境分析与智能审校功能"
+      );
+    } catch (err) {
+      e.target.checked = !disabled;
+      applyReasoningMode(!disabled);
+      toast(err.message, "err");
+    }
+  });
+
+  $("#chk-auto-sync").addEventListener("change", async (e) => {
+    const enabled = Boolean(e.target.checked);
+    sfx.toggle(enabled);
+    if (state.settings) state.settings.auto_sync_xuat = enabled;
+    await api("/api/settings", { method: "PUT", body: { auto_sync_xuat: enabled } }).catch(() => {});
+  });
+
   $("#btn-theme").addEventListener("click", async () => {
     const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
     applyTheme(next);
+    sfx.toggle(next === "light");
     if (state.settings) {
       state.settings.theme = next;
       await api("/api/settings", { method: "PUT", body: { theme: next } }).catch(() => {});
@@ -1176,10 +1426,12 @@ function bindEvents() {
   $("#btn-auto-localize").addEventListener("click", async () => {
     if (!state.project) return;
     try {
+      const noReason = Boolean(state.settings?.disable_reasoning);
       const res = await api(`/api/projects/${state.project.id}/tasks/auto`, {
         method: "POST",
-        body: { run_review: true, deploy_hook: true, review_limit: 200 },
+        body: { run_review: !noReason, deploy_hook: true, review_limit: 200 },
       });
+      sfx.launch();
       applyTaskState(res.task, { fromHttpStart: true });
     } catch (err) {
       toast(err.message, "err");
@@ -1217,6 +1469,7 @@ function bindEvents() {
       if (res.auto_deployed) {
         await selectProject(state.project.id);
       }
+      sfx.launch();
       const prefix = res.auto_deployed ? "已自动接入插件并启动" : "已同步词典并启动";
       toast(`${prefix} ${res.executable}，游戏中按 Alt+L 可呼出悬浮改译窗`);
     } catch (err) {
@@ -1308,6 +1561,7 @@ function bindEvents() {
       document.body.appendChild(a);
       a.click();
       a.remove();
+      sfx.done();
       toast(`已开始导出 ${fmt.toUpperCase()} 文件`);
     });
   });
@@ -1320,6 +1574,7 @@ function bindEvents() {
     document.body.appendChild(a);
     a.click();
     a.remove();
+    sfx.done();
     toast("正在打包独立离线中文补丁 (.zip)…");
   });
 
@@ -1346,6 +1601,7 @@ function bindEvents() {
       state.stats = res.stats;
       renderWorkbench();
       if (state.tab === "editor") loadEntries();
+      if (res.replaced > 0) sfx.save();
       toast(res.replaced > 0 ? `已批量替换 ${res.replaced} 条译文并同步` : "未匹配到包含该词组的译文");
     } catch (err) {
       toast(err.message, "err");
@@ -1360,6 +1616,7 @@ function bindEvents() {
     try {
       const res = await api(`/api/projects/${state.project.id}/scan`, { method: "POST" });
       await selectProject(state.project.id);
+      sfx.done();
       toast(res.added > 0 ? `静态文本扫描完成，新增 ${res.added} 条词条` : `静态文本扫描完成，当前共 ${res.stats.total} 条词条`);
     } catch (err) {
       toast(err.message, "err");
@@ -1495,6 +1752,7 @@ function bindEvents() {
     state.context = res.context;
     renderContextCard();
     closeModal("modal-context");
+    sfx.save();
     toast("游戏语境已保存");
   });
 
@@ -1511,6 +1769,7 @@ function bindEvents() {
 
   $$("#editor-sources button").forEach((btn) => {
     btn.addEventListener("click", () => {
+      sfx.tap();
       $$("#editor-sources button").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       state.editor.source = btn.dataset.source;
@@ -1521,6 +1780,7 @@ function bindEvents() {
 
   $$("#editor-filters .pill").forEach((pill) => {
     pill.addEventListener("click", () => {
+      sfx.tap();
       $$("#editor-filters .pill").forEach((b) => b.classList.remove("active"));
       pill.classList.add("active");
       state.editor.status = pill.dataset.status;
@@ -1541,6 +1801,7 @@ function bindEvents() {
   // Glossary & Memory
   $$(".subtab").forEach((btn) =>
     btn.addEventListener("click", () => {
+      sfx.tap();
       $$(".subtab").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       state.glossarySubtab = btn.dataset.subtab;
@@ -1565,6 +1826,7 @@ function bindEvents() {
       $("#term-src").value = "";
       $("#term-dst").value = "";
       loadGlossaryView();
+      sfx.save();
       toast("术语已添加");
     } catch (err) {
       toast(err.message, "err");
@@ -1637,6 +1899,7 @@ function bindEvents() {
   $$(".segmented").forEach((seg) => {
     seg.querySelectorAll("button").forEach((btn) => {
       btn.addEventListener("click", () => {
+        sfx.tap();
         seg.querySelectorAll("button").forEach((b) => b.classList.remove("active"));
         btn.classList.add("active");
         if (seg.id === "seg-mode") {

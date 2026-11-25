@@ -163,7 +163,9 @@ class AppSettings:
     hardware_mode: str = "auto"     # auto | gpu | cpu
     server_port: int = 18765
     auto_sync_xuat: bool = True
-    use_single_model: bool = False  # True = reuse reason/translate single local model
+    disable_reasoning: bool = False  # True = skip context inference & AI review, direct translate -> deploy
+    sound_effects: bool = True       # Subtle UI feedback chimes
+    use_single_model: bool = False   # Legacy compatibility field
     translate_role: RoleEndpointConfig = field(
         default_factory=lambda: RoleEndpointConfig(mode="local", temperature=0.25, max_tokens=1024)
     )
@@ -178,6 +180,8 @@ class AppSettings:
             "hardware_mode": self.hardware_mode,
             "server_port": self.server_port,
             "auto_sync_xuat": self.auto_sync_xuat,
+            "disable_reasoning": self.disable_reasoning,
+            "sound_effects": self.sound_effects,
             "use_single_model": self.use_single_model,
             "translate_role": self.translate_role.to_dict(),
             "reason_role": self.reason_role.to_dict(),
@@ -193,6 +197,8 @@ class AppSettings:
             hardware_mode=str(data.get("hardware_mode", "auto") or "auto"),
             server_port=int(data.get("server_port", 18765) or 18765),
             auto_sync_xuat=bool(data.get("auto_sync_xuat", True)),
+            disable_reasoning=bool(data.get("disable_reasoning", False)),
+            sound_effects=bool(data.get("sound_effects", True)),
             use_single_model=bool(data.get("use_single_model", False)),
             translate_role=RoleEndpointConfig.from_dict(data.get("translate_role")),
             reason_role=RoleEndpointConfig.from_dict(data.get("reason_role")),

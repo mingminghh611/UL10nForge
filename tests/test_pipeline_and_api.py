@@ -1,10 +1,11 @@
 """End-to-end tests for FastAPI backend, XUAT real-time endpoint, inline edit, context & reviewer."""
 from pathlib import Path
+import time
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from ul10n.core.models import Entry, GameContext, STATUS_TRANSLATED
+from ul10n.core.models import Entry, GameContext, STATUS_PENDING, STATUS_TRANSLATED
 from ul10n.engine.context_builder import infer_game_context
 from ul10n.engine.llm_client import ChatResult
 from ul10n.engine.reviewer import review_and_refine_entry
@@ -904,6 +905,84 @@ def test_v2_4_compatibility_skip_reviewed_glossary_and_memory_crud(tmp_path: Pat
         r_m_clr = client.delete("/api/memory")
         assert r_m_clr.status_code == 200 and r_m_clr.json()["removed"] == 1
         assert client.get("/api/memory").json()["total"] == 0
+
+
+def test_disable_reasoning_mode_and_sound_settings(tmp_path: Path):
+    game_dir = tmp_path / "DirectTranslateGame"
+    (game_dir / "DirectTranslateGame_Data" / "Managed").mkdir(parents=True)
+    app = create_app(app_root=APP_ROOT, data_dir=tmp_path / "data")
+    svc = app.state.services
+
+    with TestClient(app) as client:
+        # 1. Default settings: disable_reasoning=False, sound_effects=True
+        s0 = client.get("/api/settings").json()["settings"]
+        assert s0["disable_reasoning"] is False
+        assert s0["sound_effects"] is True
+
+        # 2. Enabling disable_reasoning stops local reason engine & persists both flags
+        stopped_roles: list[str] = []
+        with patch.object(svc.runtime, "stop_role", side_effect=lambda r: stopped_roles.append(r)):
+            r_put = client.put(
+                "/api/settings",
+                json={"disable_reasoning": True, "sound_effects": False},
+            )
+            assert r_put.status_code == 200
+            s1 = r_put.json()["settings"]
+            assert s1["disable_reasoning"] is True
+            assert s1["sound_effects"] is False
+            assert stopped_roles == ["reason"]
+
+        pid = client.post("/api/projects/open", json={"game_dir": str(game_dir)}).json()["project"]["id"]
+        store = svc.project_store(pid)
+        store.upsert_entry("Whispering Lantern", "", status=STATUS_PENDING)
+        store.upsert_entry("Ancient Crossroads", "", status=STATUS_PENDING)
+
+        # 3. Context & review endpoints are cleanly blocked with HTTP 400
+        assert client.post(f"/api/projects/{pid}/tasks/context").status_code == 400
+        assert client.post(f"/api/projects/{pid}/tasks/review", json={}).status_code == 400
+
+        # 4. One-click auto-localize skips context inference & review completely (never touches reason role)
+        roles_requested: list[str] = []
+
+        class ExactMatchClient(FakeLLMClient):
+            def chat(self, messages, **_kwargs):
+                user_msg = messages[-1]["content"].strip()
+                last_line = user_msg.splitlines()[-1].strip()
+                for k, v in self._responses.items():
+                    if k in last_line:
+                        return ChatResult(content=v)
+                return super().chat(messages)
+
+        def fake_client_factory(role: str, cfg):
+            roles_requested.append(role)
+            if role == "reason":
+                raise AssertionError("reason role must not be invoked when disable_reasoning=True")
+            return ExactMatchClient({"Whispering Lantern": "低语提灯", "Ancient Crossroads": "古老十字路口"})
+
+        with patch.object(svc.runtime, "create_client_for_role", side_effect=fake_client_factory):
+            r_auto = client.post(
+                f"/api/projects/{pid}/tasks/auto",
+                json={"run_review": True, "deploy_hook": False},
+            )
+            assert r_auto.status_code == 200
+            # Wait briefly for background task thread to finish
+            cur = None
+            for _ in range(80):
+                cur = client.get("/api/tasks/current").json()["task"]
+                if cur and cur["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+            assert cur and cur["status"] == "completed", cur
+            assert "reason" not in roles_requested
+            assert "translate" in roles_requested
+            # Context stays empty and entries are translated without review
+            assert store.load_context().genre == ""
+            entries = {e.original: e for e in store.all_entries()}
+            assert entries["Whispering Lantern"].translation == "低语提灯"
+            assert entries["Ancient Crossroads"].translation == "古老十字路口"
+            assert entries["Whispering Lantern"].review_level == ""
+
 
 
 

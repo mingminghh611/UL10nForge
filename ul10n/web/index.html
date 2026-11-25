@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>UL10nForge · Unity 汉化工作台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2.4" />
+  <link rel="stylesheet" href="/static/styles.css?v=2.6" />
 </head>
 <body>
   <div class="app-shell">
@@ -31,7 +31,7 @@
         </button>
         <button class="nav-item" data-tab="editor">
           <svg viewBox="0 0 20 20" fill="none"><path d="M4 5.5h12M4 10h8M4 14.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M13.5 11.5l3 3-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <span>译文审校</span>
+          <span id="nav-editor-label">译文审校</span>
           <span class="nav-badge" id="nav-entry-badge" hidden>0</span>
         </button>
         <button class="nav-item" data-tab="glossary">
@@ -90,6 +90,10 @@
           <button class="btn-icon" id="btn-cmd" title="快捷指令 (Ctrl+K)">
             <span class="kbd">⌘K</span>
           </button>
+          <button class="btn-icon" id="btn-sound" title="界面音效：已开启（点击静音）" aria-label="切换界面音效">
+            <svg id="icon-sound-on" viewBox="0 0 20 20" fill="none"><path d="M4.2 8H7l3.6-3v10L7 12H4.2a.8.8 0 0 1-.8-.8V8.8a.8.8 0 0 1 .8-.8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M13.3 7.6a3.4 3.4 0 0 1 0 4.8M15.4 5.6a6.2 6.2 0 0 1 0 8.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <svg id="icon-sound-off" viewBox="0 0 20 20" fill="none" hidden><path d="M4.2 8H7l3.6-3v10L7 12H4.2a.8.8 0 0 1-.8-.8V8.8a.8.8 0 0 1 .8-.8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M13.2 8.2l3.6 3.6M16.8 8.2l-3.6 3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </button>
           <button class="btn-icon" id="btn-theme" title="切换深色 / 浅色外观" aria-label="切换主题">
             <svg id="icon-sun" viewBox="0 0 20 20" fill="none" hidden><circle cx="10" cy="10" r="3.5" stroke="currentColor" stroke-width="1.6"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             <svg id="icon-moon" viewBox="0 0 20 20" fill="none"><path d="M15.8 12.6A6.5 6.5 0 0 1 7.4 4.2a6.5 6.5 0 1 0 8.4 8.4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
@@ -121,7 +125,7 @@
             </div>
             <div class="empty-steps">
               <div class="step-chip"><span>1</span> 扫描静态文本</div>
-              <div class="step-chip"><span>2</span> 翻译与审校修正</div>
+              <div class="step-chip" id="empty-step-2"><span>2</span> 翻译与审校修正</div>
               <div class="step-chip"><span>3</span> 进游戏按 Alt+L 随时改译</div>
             </div>
           </div>
@@ -129,7 +133,7 @@
 
         <!-- TAB 1: WORKBENCH -->
         <section id="tab-workbench" class="tab-view" hidden>
-          <div class="hero-grid">
+          <div class="hero-grid" id="wb-hero-grid">
             <!-- Game Status & Progress Card -->
             <div class="card hero-card">
               <div class="card-head">
@@ -138,7 +142,10 @@
                   <h2 class="game-title" id="wb-game-name">—</h2>
                   <p class="game-sub" id="wb-game-meta">—</p>
                 </div>
-                <span class="status-pill" id="wb-hook-pill">未接入</span>
+                <div class="pill-group">
+                  <button type="button" class="status-pill direct-pill" id="wb-direct-pill" title="已关闭推理与审校，直接翻译接入（点击前往设置调整）" hidden>极速直翻</button>
+                  <span class="status-pill" id="wb-hook-pill">未接入</span>
+                </div>
               </div>
 
               <div class="protection-banner" id="wb-protection-warn" hidden></div>
@@ -213,7 +220,7 @@
             </div>
 
             <!-- Game Context Card -->
-            <div class="card context-card">
+            <div class="card context-card" id="wb-context-card">
               <div class="card-head">
                 <div>
                   <div class="eyebrow">游戏语境</div>
@@ -279,7 +286,7 @@
               <button class="pill active" data-status="all">全部</button>
               <button class="pill" data-status="pending">待翻译 <span class="pill-count tabular" data-count="pending">0</span></button>
               <button class="pill" data-status="translated">已翻译 <span class="pill-count tabular" data-count="translated">0</span></button>
-              <button class="pill" data-status="reviewed">已审校 <span class="pill-count tabular" data-count="reviewed">0</span></button>
+              <button class="pill" id="pill-reviewed" data-status="reviewed">已审校 <span class="pill-count tabular" data-count="reviewed">0</span></button>
               <button class="pill" data-status="edited">已修改 <span class="pill-count tabular" data-count="edited">0</span></button>
               <button class="pill" data-status="attention">需处理 <span class="pill-count tabular" data-count="attention">0</span></button>
               <button class="pill" data-status="skipped">不翻译 <span class="pill-count tabular" data-count="skipped">0</span></button>
@@ -358,7 +365,7 @@
             <div class="card">
               <div class="card-head">
                 <div>
-                  <div class="eyebrow">推理与翻译引擎</div>
+                  <div class="eyebrow" id="settings-engine-eyebrow">推理与翻译引擎</div>
                   <h3 class="card-title">本地离线或云端 API</h3>
                 </div>
               </div>
@@ -374,6 +381,20 @@
                 </div>
               </div>
 
+              <div class="setting-row setting-row-highlight">
+                <div>
+                  <div class="setting-name">
+                    关闭推理与审校
+                    <span class="setting-tag">极速直翻</span>
+                  </div>
+                  <div class="setting-desc">开启后不再加载推理模型建立语境，并隐藏所有审校与语境按钮；点击「一键自动汉化」时跳过建模与审校重译，直接扫描、翻译并接入游戏，更省显存与耗时</div>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="chk-disable-reasoning" />
+                  <span class="slider"></span>
+                </label>
+              </div>
+
               <div id="settings-local-panel">
                 <div class="setting-row">
                   <div>
@@ -385,17 +406,6 @@
                     <button type="button" data-val="gpu">优先 GPU</button>
                     <button type="button" data-val="cpu">纯 CPU</button>
                   </div>
-                </div>
-
-                <div class="setting-row">
-                  <div>
-                    <div class="setting-name">单模型极简模式</div>
-                    <div class="setting-desc">关闭时：翻译模型负责快速翻译、推理模型按需审校与语境分析（用完自动释放显存）</div>
-                  </div>
-                  <label class="switch">
-                    <input type="checkbox" id="chk-single-model" />
-                    <span class="slider"></span>
-                  </label>
                 </div>
 
                 <div class="model-cards">
@@ -410,7 +420,7 @@
                       <button class="btn btn-ghost btn-sm" id="btn-stop-tr">停止</button>
                     </div>
                   </div>
-                  <div class="model-mini-card">
+                  <div class="model-mini-card" id="card-rs-wrap">
                     <div>
                       <div class="model-role">语境与审校引擎（按需自动启停）</div>
                       <div class="model-name" id="card-rs-name">—</div>
@@ -436,7 +446,7 @@
                   </div>
                 </div>
 
-                <div class="api-block">
+                <div class="api-block" id="api-rs-block">
                   <div class="setting-name">审校与语境接口（留空则自动复用翻译接口）</div>
                   <div class="form-grid">
                     <input class="input" id="api-rs-url" placeholder="接口地址（可选，留空复用上方地址）" />
@@ -465,6 +475,17 @@
                 </div>
                 <label class="switch">
                   <input type="checkbox" id="chk-auto-sync" checked />
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+              <div class="setting-row">
+                <div>
+                  <div class="setting-name">界面交互音效</div>
+                  <div class="setting-desc">保存译文、切换选项、任务完成与启动游戏时提供轻柔的听觉反馈（右上角也可随时静音）</div>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="chk-sound-effects" checked />
                   <span class="slider"></span>
                 </label>
               </div>
@@ -640,7 +661,7 @@
           <input type="checkbox" id="clear-game-dict" checked />
           <span>同时清空游戏目录里的旧词典文件（避免重新导入旧记录）</span>
         </label>
-        <label class="inline-check">
+        <label class="inline-check" id="clear-context-wrap">
           <input type="checkbox" id="clear-context" checked />
           <span>同时清空该游戏的语境档案</span>
         </label>
@@ -680,6 +701,6 @@
   <!-- Toast Container -->
   <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 
-  <script type="module" src="/static/app.js?v=2.5"></script>
+  <script type="module" src="/static/app.js?v=2.6"></script>
 </body>
 </html>
