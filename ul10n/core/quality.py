@@ -41,9 +41,9 @@ _JP_KR_RE = re.compile(r"[\u3040-\u30ff\uac00-\ud7af]")
 _LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _ZH_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]")
 
-# Placeholders & markup tags that MUST survive translation intact
+# Placeholders & markup tags that MUST survive translation intact (XUAT {{A}} templates first!)
 _PLACEHOLDER_RE = re.compile(
-    r"(\{[0-9A-Za-z_.:,-]+\}|%[0-9$.+-]*[sdifuxX%]|\$\{[A-Za-z0-9_.]+\})"
+    r"(\{\{[0-9A-Za-z_]+\}\}|\{[0-9A-Za-z_.:,-]+\}|%[0-9$.+-]*[sdifuxX%]|\$\{[A-Za-z0-9_.]+\})"
 )
 _RICHTEXT_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_-]*(?:=[^<>]*)?>")
 _ONLY_SYMBOL_NUM_RE = re.compile(r"^[\s0-9.,:;!?+\-*/=%$€£¥()\[\]{}<>|_~`#@&^'\"\\/]+$")
@@ -163,6 +163,8 @@ def check_translation_quality(original: str, translation: str) -> QualityCheckRe
     # 4. Suspicious prompt echo / hallucination markers
     if any(marker in tr for marker in ("Translate the following", "翻译结果：", "译文：", "[来源文件]")):
         reasons.append("疑似包含提示词回显")
+    if " || " in tr and "||" not in src:
+        reasons.append("译文包含异常分隔符 ||")
 
     # 5. Severe length runaway (model hallucinating/looping)
     if len(src) >= 10 and len(tr) > max(len(src) * 4, 240):
@@ -187,8 +189,8 @@ def check_translation_quality(original: str, translation: str) -> QualityCheckRe
 
 
 def clean_model_output(text: str) -> str:
-    """Strip common model wrapper noise (quotes, markdown fences, prefixes)."""
-    s = (text or "").strip()
+    """Strip common model wrapper noise (think blocks, quotes, markdown fences, prefixes, || echoes)."""
+    s = re.sub(r"<think>.*?</think>", "", (text or ""), flags=re.S | re.I).strip()
     if s.startswith("```"):
         s = re.sub(r"^```[A-Za-z0-9_-]*\s*|\s*```$", "", s).strip()
     for prefix in ("译文：", "译文:", "翻译：", "翻译:", "Translation:", "Output:"):
@@ -198,6 +200,11 @@ def clean_model_output(text: str) -> str:
         inner = s[1:-1].strip()
         if inner and '"' not in inner:
             s = inner
+    # Collapse echoed "A || A" repetition emitted occasionally by small models
+    if " || " in s:
+        parts = [p.strip() for p in s.split(" || ") if p.strip()]
+        if parts and len(set(parts)) == 1:
+            s = parts[0]
     return s
 
 

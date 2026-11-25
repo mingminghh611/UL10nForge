@@ -32,6 +32,7 @@ from ul10n.core.models import (
     STATUS_TRANSLATED,
     VALID_STATUSES,
 )
+from ul10n.core.quality import check_translation_quality, is_translatable, lookup_builtin_ui
 from ul10n.core.xuat_codec import decode_xuat_line
 from ul10n.engine.context_builder import infer_game_context, sync_context_terms_to_glossary
 from ul10n.engine.llm_client import LLMClient, is_hy_mt_model
@@ -174,6 +175,13 @@ def _content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{encoded}"
 
 
+def _safe_prewarm(svc: AppServices, hardware_mode: str) -> None:
+    try:
+        svc.runtime.ensure_local_server("translate", hardware_mode=hardware_mode)
+    except Exception:
+        pass
+
+
 def create_app(
     app_root: str | Path | None = None,
     data_dir: str | Path | None = None,
@@ -261,6 +269,32 @@ def create_app(
                 },
             )
             return live_entry.translation
+
+        # 0ms zero-model fast paths BEFORE ever touching llama-server / cloud API
+        if not is_translatable(text):
+            return text
+        builtin = lookup_builtin_ui(text)
+        if builtin:
+            entry = store.upsert_entry(
+                text, builtin, status=STATUS_TRANSLATED, source="xuat_live", quality_note=""
+            )
+            svc.schedule_xuat_sync(pid)
+            svc.bus.publish(
+                "live_entry",
+                {"project_id": pid, "entry": entry.to_dict(), "stats": store.stats(), "from_cache": True},
+            )
+            return builtin
+        mem_hit = svc.global_store.get_memory(text, cfg.target_lang)
+        if mem_hit and check_translation_quality(text, mem_hit).passed:
+            entry = store.upsert_entry(
+                text, mem_hit, status=STATUS_TRANSLATED, source="xuat_live", quality_note=""
+            )
+            svc.schedule_xuat_sync(pid)
+            svc.bus.publish(
+                "live_entry",
+                {"project_id": pid, "entry": entry.to_dict(), "stats": store.stats(), "from_cache": True},
+            )
+            return mem_hit
 
         # Singleflight dedup: identical concurrent live requests wait for the leader
         sf_key = (pid, text)
@@ -492,6 +526,14 @@ def create_app(
         else:
             await asyncio.to_thread(svc.refresh_project_hook_config, project_id)
             await asyncio.to_thread(svc.export_xuat_to_game, project_id)
+
+        # Pre-warm local translation engine asynchronously so first in-game live text never cold-stalls
+        cfg = svc.settings()
+        if cfg.translate_role.mode == "local":
+            threading.Thread(
+                target=lambda: _safe_prewarm(svc, cfg.hardware_mode),
+                daemon=True,
+            ).start()
 
         cmd = [str(exe)]
         if req and req.borderless:

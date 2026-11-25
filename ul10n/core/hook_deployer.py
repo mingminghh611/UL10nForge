@@ -164,6 +164,7 @@ def _build_xuat_config(
         "EnableSilentMode=True\n"
         "EnableTranslationScoping=False\n"
         "DisableTextMeshProScrollInEffects=True\n"
+        "TemplateAllNumberAway=True\n"
         "ReloadTranslationsOnFileChange=True\n"
         "\n"
         "[Texture]\n"
@@ -237,12 +238,21 @@ def deploy_hook(
     kits_dir = app_root / "resources" / "hook_kits"
     loader_zip, xuat_zip = _select_kit_zips(kits_dir, runtime_type, arch, chosen_loader)
 
-    # Detect if player already has BepInEx / MelonLoader installed (e.g. other mods)
-    preexisting_loader = (
-        (game_dir / "BepInEx" / "core").is_dir()
-        if chosen_loader == "bepinex"
-        else (game_dir / "MelonLoader").is_dir()
-    )
+    # Detect if player already had third-party mods installed (ignore our own XUnity files on redeploy)
+    if chosen_loader == "bepinex":
+        plugins_dir = game_dir / "BepInEx" / "plugins"
+        other_plugins = [
+            p for p in (plugins_dir.iterdir() if plugins_dir.is_dir() else [])
+            if not p.name.lower().startswith(("xunity.", "readme (autotranslator)"))
+        ]
+        preexisting_loader = (game_dir / "BepInEx" / "core").is_dir() and bool(other_plugins)
+    else:
+        mods_dir = game_dir / "Mods"
+        other_mods = [
+            p for p in (mods_dir.iterdir() if mods_dir.is_dir() else [])
+            if not p.name.lower().startswith("xunity.")
+        ]
+        preexisting_loader = (game_dir / "MelonLoader").is_dir() and bool(other_mods)
 
     written_files: list[str] = []
     created_files: list[str] = []
@@ -399,15 +409,15 @@ def refresh_hook_config(
         if bundle_dst.is_file():
             fallback_tmp_rel = bundle_dst.relative_to(game_dir).as_posix().replace("/", "\\")
 
-    if chosen_loader == "bepinex" and not preexisting_loader:
+    if chosen_loader == "bepinex" and (not preexisting_loader or game_info.runtime_type == "il2cpp"):
         bep_cfg = game_dir / "BepInEx" / "config" / "BepInEx.cfg"
         if bep_cfg.is_file():
             try:
                 raw_bep = bep_cfg.read_text(encoding="utf-8", errors="ignore")
                 patched = raw_bep.replace("UnityLogListening = true", "UnityLogListening = false")
-                # Also silence BepInEx popup console window to prevent console clutter/encoding issues
+                # Also silence BepInEx popup console window (stay strictly inside [Logging.Console] section!)
                 patched = re.sub(
-                    r"(\[Logging\.Console\][\s\S]*?\nEnabled\s*=\s*)true\b",
+                    r"(\[Logging\.Console\][^\[]*?\nEnabled\s*=\s*)true\b",
                     r"\1false",
                     patched,
                     count=1,
