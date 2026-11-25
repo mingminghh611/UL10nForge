@@ -22,3 +22,4 @@ runtime/
 fonts/SimplifiedChinese/*.ttf
 fonts/TMP_Font_AssetBundles/notoserif_*
 resources/hook_kits/*.zip
+resources/hook_kits/*.exe

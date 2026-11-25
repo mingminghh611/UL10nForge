@@ -267,8 +267,6 @@ class LlamaRuntimeManager:
     @staticmethod
     def _role_cfg(settings: AppSettings, role: str) -> RoleEndpointConfig:
         if role == "reason":
-            if settings.use_single_model:
-                return settings.translate_role
             rs = settings.reason_role
             tr = settings.translate_role
             # When using cloud API and reason endpoint is left blank (or shares URL with blank key),
@@ -290,15 +288,14 @@ class LlamaRuntimeManager:
 
     def create_client_for_role(self, role: str, settings: AppSettings) -> LLMClient:
         """Return a ready LLMClient for `translate` or `reason`, auto-starting local server if needed."""
-        effective_role = "translate" if (role == "reason" and settings.use_single_model) else role
-        cfg = self._role_cfg(settings, effective_role)
+        cfg = self._role_cfg(settings, role)
 
         if cfg.mode == "api":
             if not cfg.base_url or not cfg.model:
                 raise RuntimeError(f"在线 API（{role}）尚未填写接口地址或模型名。")
             return LLMClient(cfg.base_url, cfg.api_key, cfg.model)
 
-        srv = self.ensure_local_server(effective_role, hardware_mode=settings.hardware_mode)
+        srv = self.ensure_local_server(role, hardware_mode=settings.hardware_mode)
         return LLMClient(srv.base_url, srv.api_key, srv.model_path.stem)
 
     def ensure_local_server(self, role: str, *, hardware_mode: str = "auto") -> ManagedServer:
