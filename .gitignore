@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+# Local runtime data & secrets
+data/
+logs/
+*.log
+*.db
+*.db-wal
+*.db-shm
+.env
+.DS_Store
+Thumbs.db
+
+# Large local payloads (shipped separately in release bundles)
+models/*.gguf
+runtime/
+fonts/SimplifiedChinese/*.ttf
+fonts/TMP_Font_AssetBundles/notoserif_*
+resources/hook_kits/*.zip

@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UL10nForge · Unity 汉化工作台</title>
+  <link rel="stylesheet" href="/static/styles.css?v=2.2" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Left Navigation Rail -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 28 28" fill="none">
+            <rect x="2" y="2" width="24" height="24" rx="7" stroke="currentColor" stroke-width="1.8"/>
+            <path d="M9 9v6.5a5 5 0 0 0 10 0V9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="14" cy="10" r="1.8" fill="currentColor"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">UL10nForge</span>
+          <span class="brand-sub">Unity 汉化工作台</span>
+        </div>
+      </div>
+
+      <nav class="nav" aria-label="主导航">
+        <button class="nav-item active" data-tab="workbench">
+          <svg viewBox="0 0 20 20" fill="none"><rect x="3" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="11" y="3" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="11" y="11" width="6" height="6" rx="1.5" stroke="currentColor" stroke-width="1.6"/></svg>
+          <span>工作台</span>
+        </button>
+        <button class="nav-item" data-tab="editor">
+          <svg viewBox="0 0 20 20" fill="none"><path d="M4 5.5h12M4 10h8M4 14.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M13.5 11.5l3 3-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>译文审校</span>
+          <span class="nav-badge" id="nav-entry-badge" hidden>0</span>
+        </button>
+        <button class="nav-item" data-tab="glossary">
+          <svg viewBox="0 0 20 20" fill="none"><path d="M5 4h8.5a2 2 0 0 1 2 2v10H5a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 5 4z" stroke="currentColor" stroke-width="1.6"/><path d="M7 8h5M7 11.5h3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <span>术语与记忆</span>
+        </button>
+        <button class="nav-item" data-tab="settings">
+          <svg viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="2.7" stroke="currentColor" stroke-width="1.6"/><path d="M10 3v2M10 15v2M3 10h2M15 10h2M5.05 5.05l1.4 1.4M13.55 13.55l1.4 1.4M14.95 5.05l-1.4 1.4M6.45 13.55l-1.4 1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          <span>设置</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button class="engine-pill" id="engine-status-btn" title="点击启动或管理翻译引擎">
+          <span class="dot" id="engine-dot"></span>
+          <div class="engine-meta">
+            <span class="engine-title" id="engine-label">检测引擎中…</span>
+            <span class="engine-sub" id="engine-sub">本地离线</span>
+          </div>
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <div class="workspace">
+      <header class="topbar">
+        <div class="project-bar">
+          <div class="project-select-wrap">
+            <select id="project-select" class="project-select" aria-label="当前游戏">
+              <option value="">尚未打开游戏</option>
+            </select>
+          </div>
+          <button class="btn btn-subtle" id="btn-open-game">
+            <svg viewBox="0 0 18 18" fill="none"><path d="M9 3.5v11M3.5 9h11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            <span>打开游戏</span>
+          </button>
+        </div>
+
+        <!-- Global Live Progress Bar (shown while a task runs or briefly on completion) -->
+        <div class="global-progress" id="global-progress" hidden>
+          <div class="gp-body">
+            <div class="gp-info">
+              <span class="gp-dot"></span>
+              <span class="gp-stage" id="gp-stage">处理中</span>
+              <span class="gp-text" id="gp-text">准备中…</span>
+              <span class="gp-metrics tabular" id="gp-metrics"></span>
+            </div>
+            <div class="gp-track">
+              <div class="gp-fill" id="gp-fill" style="width:0%"></div>
+            </div>
+          </div>
+          <button class="btn-icon-sm" id="btn-cancel-task" title="停止当前任务">停止</button>
+        </div>
+
+        <div class="topbar-actions">
+          <button class="btn-icon" id="btn-cmd" title="快捷指令 (Ctrl+K)">
+            <span class="kbd">⌘K</span>
+          </button>
+          <button class="btn-icon" id="btn-theme" title="切换深色 / 浅色外观" aria-label="切换主题">
+            <svg id="icon-sun" viewBox="0 0 20 20" fill="none" hidden><circle cx="10" cy="10" r="3.5" stroke="currentColor" stroke-width="1.6"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M15.3 4.7l-1.4 1.4M6.1 13.9l-1.4 1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+            <svg id="icon-moon" viewBox="0 0 20 20" fill="none"><path d="M15.8 12.6A6.5 6.5 0 0 1 7.4 4.2a6.5 6.5 0 1 0 8.4 8.4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="content">
+        <!-- Empty Onboarding View -->
+        <section id="view-empty" class="empty-stage" hidden>
+          <div class="empty-card">
+            <div class="empty-icon">
+              <svg viewBox="0 0 36 36" fill="none">
+                <rect x="4" y="4" width="28" height="28" rx="9" stroke="currentColor" stroke-width="1.8"/>
+                <path d="M12 12v8a6 6 0 0 0 12 0v-8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+                <circle cx="18" cy="13" r="2.2" fill="currentColor"/>
+              </svg>
+            </div>
+            <h1>打开一款 Unity 游戏开始汉化</h1>
+            <p class="empty-desc">
+              不改动游戏原文件。自动扫描静态文本并支持游戏内实时补全，随时查看、修改、还原并导出中文补丁。
+            </p>
+            <div class="empty-actions">
+              <button class="btn btn-primary btn-lg" id="btn-empty-pick">选择游戏文件夹</button>
+            </div>
+            <div class="empty-path-row">
+              <input id="input-empty-path" class="input" type="text" placeholder="或粘贴游戏目录路径，按回车打开…" />
+              <button class="btn btn-subtle" id="btn-empty-open-path">打开</button>
+            </div>
+            <div class="empty-steps">
+              <div class="step-chip"><span>1</span> 扫描静态文本</div>
+              <div class="step-chip"><span>2</span> 翻译与审校修正</div>
+              <div class="step-chip"><span>3</span> 进游戏按 Alt+L 随时改译</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 1: WORKBENCH -->
+        <section id="tab-workbench" class="tab-view" hidden>
+          <div class="hero-grid">
+            <!-- Game Status & Progress Card -->
+            <div class="card hero-card">
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">当前游戏</div>
+                  <h2 class="game-title" id="wb-game-name">—</h2>
+                  <p class="game-sub" id="wb-game-meta">—</p>
+                </div>
+                <span class="status-pill" id="wb-hook-pill">未接入</span>
+              </div>
+
+              <!-- Progress Ring + Clean Stats -->
+              <div class="progress-panel">
+                <div class="ring-wrap">
+                  <svg class="progress-ring" viewBox="0 0 100 100">
+                    <circle class="ring-bg" cx="50" cy="50" r="42" />
+                    <circle class="ring-fg" id="wb-ring-fg" cx="50" cy="50" r="42" stroke-dasharray="263.89" stroke-dashoffset="263.89" />
+                  </svg>
+                  <div class="ring-center">
+                    <span class="ring-pct tabular" id="wb-pct">0%</span>
+                    <span class="ring-label">完成度</span>
+                  </div>
+                </div>
+
+                <div class="stat-grid">
+                  <div class="stat-item">
+                    <span class="stat-num tabular" id="st-total">0</span>
+                    <span class="stat-lbl">总词条</span>
+                  </div>
+                  <div class="stat-item accent">
+                    <span class="stat-num tabular" id="st-done">0</span>
+                    <span class="stat-lbl">已翻译</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-num tabular" id="st-pending">0</span>
+                    <span class="stat-lbl">待翻译</span>
+                  </div>
+                  <div class="stat-item warn">
+                    <span class="stat-num tabular" id="st-flagged">0</span>
+                    <span class="stat-lbl">需复核</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Primary Action Row (3 core actions only) -->
+              <div class="action-primary-row">
+                <button class="btn btn-primary" id="btn-auto-localize" title="自动依次完成：扫描纯静态界面 → 提取语境与术语 → 并发翻译 → 智能审校 → 接入游戏">一键自动汉化</button>
+                <button class="btn btn-accent-soft" id="btn-launch-game" title="自动确保汉化插件已接入且词典最新后启动游戏">启动游戏</button>
+                <button class="btn btn-subtle" id="btn-open-export">导出…</button>
+              </div>
+
+              <!-- Secondary Fine-Control Row (quiet & minimal) -->
+              <div class="action-secondary-row">
+                <button class="btn btn-subtle btn-sm" id="btn-scan-texts" title="仅只读扫描百分百安全的纯静态界面文本，其余动态与剧情文本交由钩子实时捕获">扫描静态文本</button>
+                <button class="btn btn-subtle btn-sm" id="btn-start-translate">批量翻译</button>
+                <button class="btn btn-subtle btn-sm" id="btn-start-review" title="智能筛选长句/否定句/术语冲突并代入游戏视角克制修正">智能审校</button>
+                <div class="more-menu-wrap">
+                  <button class="btn btn-ghost btn-sm" id="btn-wb-more">更多 ▾</button>
+                  <div class="more-menu" id="wb-more-menu" hidden>
+                    <button class="more-item" id="btn-review-full">深度全量审校</button>
+                    <label class="more-item" title="无边框窗口模式启动，确保游戏中按 Alt+L 悬浮窗始终置顶">
+                      <span>无边框启动游戏</span>
+                      <input type="checkbox" id="chk-launch-borderless" />
+                    </label>
+                    <div class="more-item" id="wb-loader-wrap" hidden>
+                      <span>加载器</span>
+                      <select id="wb-loader-select" style="padding:2px 6px;border-radius:6px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);font:inherit;font-size:12px">
+                        <option value="bepinex">BepInEx 6</option>
+                        <option value="melonloader">MelonLoader</option>
+                      </select>
+                    </div>
+                    <div class="more-divider"></div>
+                    <button class="more-item danger" id="btn-open-clear">清空本游戏记录…</button>
+                    <button class="more-item danger" id="btn-uninstall-hook" hidden>卸载汉化插件</button>
+                    <button class="more-item danger" id="btn-delete-project">从列表移除项目</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Game Context Card -->
+            <div class="card context-card">
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">游戏语境</div>
+                  <h3 class="card-title">文风与专名设定</h3>
+                </div>
+                <div class="card-head-actions">
+                  <button class="btn btn-ghost btn-sm" id="btn-sync-ctx-glossary" title="将识别出的角色名与专名导入本游戏术语表" hidden>导入术语</button>
+                  <button class="btn btn-ghost btn-sm" id="btn-edit-context">编辑</button>
+                  <button class="btn btn-subtle btn-sm" id="btn-infer-context">自动识别</button>
+                </div>
+              </div>
+              <div id="wb-context-body" class="context-body">
+                <p class="muted-hint">尚未生成语境档案。点击「自动识别」将根据游戏文本归纳类型、文风与专名。</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live Translation Stream -->
+          <div class="card live-card">
+            <div class="card-head">
+              <div>
+                <div class="eyebrow">词条动态</div>
+                <h3 class="card-title">最近更新</h3>
+              </div>
+              <div class="card-head-actions">
+                <button class="btn btn-ghost btn-sm" id="btn-toggle-overlay" title="游戏中也可直接按 Alt+L 呼出或收起悬浮编辑窗">悬浮窗 (Alt+L)</button>
+                <button class="btn btn-ghost btn-sm" id="btn-quick-add">+ 添加词条</button>
+                <button class="btn btn-subtle btn-sm" id="btn-goto-editor">全部词条 →</button>
+              </div>
+            </div>
+            <div id="live-feed" class="live-feed">
+              <div class="feed-empty">
+                接入游戏并启动后，画面中出现的文本会自动实时翻译并显示在这里；点击任意一条即可立即修改译文。
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 2: EDITOR (原文 / 译文逐条查看与修改) -->
+        <section id="tab-editor" class="tab-view" hidden>
+          <div class="editor-source-row">
+            <div class="source-seg" id="editor-sources" role="tablist" aria-label="文本来源">
+              <button type="button" class="active" data-source="all">全部来源 <span class="pill-count tabular" data-count="total">0</span></button>
+              <button type="button" data-source="static">静态文本 <span class="pill-count tabular" data-count="static">0</span></button>
+              <button type="button" data-source="live">实时翻译 <span class="pill-count tabular" data-count="live">0</span></button>
+            </div>
+            <div class="editor-toolbar-right">
+              <button class="btn btn-ghost btn-sm" id="btn-open-replace">查找替换</button>
+              <button class="btn btn-ghost btn-sm" id="btn-editor-export">导出</button>
+              <button class="btn btn-ghost btn-sm" id="btn-editor-overlay" title="游戏中按 Alt+L 呼出悬浮编辑窗">悬浮窗 (Alt+L)</button>
+              <button class="btn btn-subtle btn-sm" id="btn-editor-add">+ 添加</button>
+              <button class="btn btn-primary btn-sm" id="btn-editor-translate">翻译待翻</button>
+            </div>
+          </div>
+
+          <div class="editor-toolbar">
+            <div class="search-box">
+              <svg viewBox="0 0 20 20" fill="none"><circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M13.5 13.5L17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              <input id="editor-search" type="text" placeholder="搜索原文或译文… (按 / 聚焦)" />
+            </div>
+
+            <div class="filter-pills" id="editor-filters">
+              <button class="pill active" data-status="all">全部状态</button>
+              <button class="pill" data-status="pending">待翻译 <span class="pill-count tabular" data-count="pending">0</span></button>
+              <button class="pill" data-status="translated">已翻译 <span class="pill-count tabular" data-count="translated">0</span></button>
+              <button class="pill" data-status="edited">已精修 <span class="pill-count tabular" data-count="edited">0</span></button>
+              <button class="pill" data-status="flagged">需复核 <span class="pill-count tabular" data-count="flagged">0</span></button>
+              <button class="pill" data-status="failed">失败 <span class="pill-count tabular" data-count="failed">0</span></button>
+              <button class="pill" data-status="skipped">不翻译 <span class="pill-count tabular" data-count="skipped">0</span></button>
+            </div>
+          </div>
+
+          <div class="editor-list-card">
+            <div class="editor-head-row">
+              <span>原文</span>
+              <span>译文（直接输入修改，失焦或 Ctrl+Enter 自动保存并实时同步到游戏）</span>
+              <span class="col-actions">操作</span>
+            </div>
+            <div id="editor-list" class="editor-list"></div>
+            <div class="editor-pagination" id="editor-pagination">
+              <span class="muted-hint tabular" id="editor-page-info">共 0 条</span>
+              <div class="page-btns">
+                <button class="btn btn-ghost btn-sm" id="btn-prev-page">上一页</button>
+                <button class="btn btn-ghost btn-sm" id="btn-next-page">下一页</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 3: GLOSSARY & MEMORY -->
+        <section id="tab-glossary" class="tab-view" hidden>
+          <div class="subtab-bar">
+            <button class="subtab active" data-subtab="project-glossary">本游戏术语</button>
+            <button class="subtab" data-subtab="global-glossary">全局术语库</button>
+            <button class="subtab" data-subtab="global-memory">跨游戏翻译记忆</button>
+          </div>
+
+          <div class="card" id="panel-glossary">
+            <form class="inline-form" id="form-add-term">
+              <input class="input" id="term-src" placeholder="原文专名（如 Excalibur）" required />
+              <input class="input" id="term-dst" placeholder="固定译名（如 誓约胜利之剑）" required />
+              <select class="input input-sm" id="term-cat">
+                <option value="术语">术语</option>
+                <option value="角色">角色</option>
+                <option value="地名">地名</option>
+                <option value="物品">物品</option>
+                <option value="UI">UI</option>
+              </select>
+              <button class="btn btn-primary" type="submit">添加术语</button>
+            </form>
+            <div id="glossary-list" class="simple-list"></div>
+          </div>
+
+          <div class="card" id="panel-memory" hidden>
+            <div class="inline-form">
+              <input class="input" id="memory-search" placeholder="搜索已沉淀的跨游戏记忆…" />
+            </div>
+            <div id="memory-list" class="simple-list"></div>
+          </div>
+        </section>
+
+        <!-- TAB 4: SETTINGS -->
+        <section id="tab-settings" class="tab-view" hidden>
+          <div class="settings-grid">
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">推理与翻译引擎</div>
+                  <h3 class="card-title">本地离线或云端 API</h3>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <div>
+                  <div class="setting-name">运行方式</div>
+                  <div class="setting-desc">本地离线不上传任何文本；也可切换至任意 OpenAI 兼容云端接口</div>
+                </div>
+                <div class="segmented" id="seg-mode">
+                  <button type="button" data-val="local" class="active">本地离线</button>
+                  <button type="button" data-val="api">在线 API</button>
+                </div>
+              </div>
+
+              <div id="settings-local-panel">
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-name">硬件加速模式</div>
+                    <div class="setting-desc" id="set-gpu-hint">自动优先使用独立显卡，兼容 CUDA / Vulkan / 纯 CPU</div>
+                  </div>
+                  <div class="segmented" id="seg-hardware">
+                    <button type="button" data-val="auto" class="active">自动</button>
+                    <button type="button" data-val="gpu">优先 GPU</button>
+                    <button type="button" data-val="cpu">纯 CPU</button>
+                  </div>
+                </div>
+
+                <div class="setting-row">
+                  <div>
+                    <div class="setting-name">单模型极简模式</div>
+                    <div class="setting-desc">关闭时：翻译模型负责快速翻译、推理模型按需审校与语境分析（用完自动释放显存）</div>
+                  </div>
+                  <label class="switch">
+                    <input type="checkbox" id="chk-single-model" />
+                    <span class="slider"></span>
+                  </label>
+                </div>
+
+                <div class="model-cards">
+                  <div class="model-mini-card">
+                    <div>
+                      <div class="model-role">主翻译引擎</div>
+                      <div class="model-name" id="card-tr-name">—</div>
+                    </div>
+                    <div class="model-actions">
+                      <span class="badge" id="card-tr-state">未启动</span>
+                      <button class="btn btn-subtle btn-sm" id="btn-warm-tr">启动</button>
+                      <button class="btn btn-ghost btn-sm" id="btn-stop-tr">停止</button>
+                    </div>
+                  </div>
+                  <div class="model-mini-card">
+                    <div>
+                      <div class="model-role">语境与审校引擎（按需自动启停）</div>
+                      <div class="model-name" id="card-rs-name">—</div>
+                    </div>
+                    <div class="model-actions">
+                      <span class="badge" id="card-rs-state">按需待命</span>
+                      <button class="btn btn-ghost btn-sm" id="btn-stop-rs">释放显存</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div id="settings-api-panel" hidden>
+                <div class="api-block">
+                  <div class="setting-name">翻译接口（OpenAI 兼容）</div>
+                  <div class="form-grid">
+                    <input class="input" id="api-tr-url" placeholder="接口地址，如 https://api.deepseek.com/v1" />
+                    <input class="input" id="api-tr-model" placeholder="模型名称，如 deepseek-chat" />
+                    <input class="input" id="api-tr-key" type="password" placeholder="API Key" />
+                  </div>
+                  <div class="api-actions">
+                    <button class="btn btn-subtle btn-sm" id="btn-test-tr-api">测试连接</button>
+                  </div>
+                </div>
+
+                <div class="api-block">
+                  <div class="setting-name">审校与语境接口（留空则自动复用翻译接口）</div>
+                  <div class="form-grid">
+                    <input class="input" id="api-rs-url" placeholder="接口地址（可选，留空复用上方地址）" />
+                    <input class="input" id="api-rs-model" placeholder="模型名称（可选，留空复用上方模型）" />
+                    <input class="input" id="api-rs-key" type="password" placeholder="API Key（可选，留空复用上方 Key）" />
+                  </div>
+                  <div class="api-actions">
+                    <button class="btn btn-subtle btn-sm" id="btn-test-rs-api">测试审校接口</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <div class="eyebrow">通用偏好</div>
+                  <h3 class="card-title">同步与外观</h3>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <div>
+                  <div class="setting-name">修改译文后自动同步到游戏</div>
+                  <div class="setting-desc">保存任意译文修改时自动更新游戏词典，游戏中实时生效</div>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="chk-auto-sync" checked />
+                  <span class="slider"></span>
+                </label>
+              </div>
+
+              <div class="setting-row">
+                <div>
+                  <div class="setting-name">界面外观</div>
+                  <div class="setting-desc">可随时在右上角一键切换深色或浅色模式</div>
+                </div>
+                <div class="segmented" id="seg-theme">
+                  <button type="button" data-val="dark" class="active">深色暗夜</button>
+                  <button type="button" data-val="light">浅色极简</button>
+                </div>
+              </div>
+
+              <div class="setting-footer">
+                <button class="btn btn-primary" id="btn-save-settings">保存设置</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- Modal: Quick Add / Import Entries -->
+  <div class="modal-backdrop" id="modal-import" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3>添加或批量粘贴词条</h3>
+        <button class="btn-icon-sm" data-close-modal="modal-import">✕</button>
+      </div>
+      <p class="muted-hint">每行一条原文，或使用 <code>原文=译文</code> 格式（兼容 XUAT 词典格式）。</p>
+      <textarea id="import-textarea" class="textarea" rows="8" placeholder="Press any key to continue&#10;New Game=新游戏&#10;Welcome back, traveler."></textarea>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" data-close-modal="modal-import">取消</button>
+        <button class="btn btn-primary" id="btn-confirm-import">添加到当前游戏</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Edit Game Context -->
+  <div class="modal-backdrop" id="modal-context" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3>编辑游戏语境档案</h3>
+        <button class="btn-icon-sm" data-close-modal="modal-context">✕</button>
+      </div>
+      <div class="form-stack">
+        <input class="input" id="ctx-genre" placeholder="游戏类型（如 角色扮演 / 视觉小说）" />
+        <input class="input" id="ctx-setting" placeholder="题材背景（如 中世纪奇幻 / 赛博朋克）" />
+        <input class="input" id="ctx-style" placeholder="语言风格（如 UI 简洁干练，对话口语自然）" />
+        <textarea class="textarea" id="ctx-summary" rows="2" placeholder="一句话游戏简介"></textarea>
+        <input class="input" id="ctx-characters" placeholder="主要角色（用中文逗号或英文逗号分隔）" />
+        <input class="input" id="ctx-notes" placeholder="翻译注意点（用逗号分隔）" />
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" data-close-modal="modal-context">取消</button>
+        <button class="btn btn-primary" id="btn-save-context">保存语境</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Deploy Choice (when IL2CPP offers MelonLoader fallback) -->
+  <div class="modal-backdrop" id="modal-open-path" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3>打开 Unity 游戏目录</h3>
+        <button class="btn-icon-sm" data-close-modal="modal-open-path">✕</button>
+      </div>
+      <div class="form-stack">
+        <button class="btn btn-primary" id="btn-modal-native-pick">浏览选择游戏文件夹…</button>
+        <div class="divider-text">或粘贴完整路径</div>
+        <input class="input" id="modal-path-input" placeholder="例如 D:\Games\MyUnityGame" />
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" data-close-modal="modal-open-path">取消</button>
+        <button class="btn btn-subtle" id="btn-modal-open-confirm">打开目录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Export Translations & Standalone Patch -->
+  <div class="modal-backdrop" id="modal-export" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3>导出汉化文本与离线补丁</h3>
+        <button class="btn-icon-sm" data-close-modal="modal-export">✕</button>
+      </div>
+
+      <div class="export-section" style="margin-top:0">
+        <div class="export-section-title">文本导出范围</div>
+        <select id="export-scope" class="input">
+          <option value="done">已翻译与人工精修词条（推荐）</option>
+          <option value="all">全部词条（含待翻）</option>
+          <option value="live">仅游戏内实时翻译词条</option>
+          <option value="edited">仅人工精修词条</option>
+        </select>
+      </div>
+
+      <div class="export-section">
+        <div class="export-section-title">选择文本格式（包含原文与对应译文）</div>
+        <div class="export-grid">
+          <button class="export-tile" data-export-fmt="json">
+            <span class="export-tile-name">JSON (.json)</span>
+            <span class="export-tile-desc">结构化原文、译文与状态数据</span>
+          </button>
+          <button class="export-tile" data-export-fmt="txt">
+            <span class="export-tile-name">词典 TXT (.txt)</span>
+            <span class="export-tile-desc">标准 原文=译文 词典格式</span>
+          </button>
+          <button class="export-tile" data-export-fmt="bilingual">
+            <span class="export-tile-name">双语对照 TXT (.txt)</span>
+            <span class="export-tile-desc">逐段原文与译文，便于校对阅读</span>
+          </button>
+          <button class="export-tile" data-export-fmt="md">
+            <span class="export-tile-name">Markdown (.md)</span>
+            <span class="export-tile-desc">清晰表格对照，适合文档归档</span>
+          </button>
+          <button class="export-tile" data-export-fmt="csv">
+            <span class="export-tile-name">CSV 表格 (.csv)</span>
+            <span class="export-tile-desc">Excel 直接打开，中文无乱码</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="export-section">
+        <div class="export-section-title">分享给其他玩家</div>
+        <div class="export-patch-box">
+          <div>
+            <div class="export-tile-name">独立离线汉化补丁 (.zip)</div>
+            <div class="export-tile-desc">含插件、中文字体与全部词典，解压即玩，无需本工具与联网</div>
+          </div>
+          <button class="btn btn-primary btn-sm" id="btn-export-patch">打包下载</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Bulk Find & Replace -->
+  <div class="modal-backdrop" id="modal-replace" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3>批量查找替换译文</h3>
+        <button class="btn-icon-sm" data-close-modal="modal-replace">✕</button>
+      </div>
+      <p class="muted-hint">替换前的译文会自动保留历史版本，可随时在列表中单条还原。</p>
+      <div class="form-stack">
+        <input class="input" id="replace-find" placeholder="查找译文中的词组（如 视角）" />
+        <input class="input" id="replace-with" placeholder="替换为（如 镜头）" />
+        <label class="inline-check">
+          <input type="checkbox" id="replace-only-unlocked" />
+          <span>跳过已人工精修的词条</span>
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" data-close-modal="modal-replace">取消</button>
+        <button class="btn btn-primary" id="btn-confirm-replace">执行替换并同步</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Clear Project Records -->
+  <div class="modal-backdrop" id="modal-clear" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3>清空当前游戏记录</h3>
+        <button class="btn-icon-sm" data-close-modal="modal-clear">✕</button>
+      </div>
+      <p class="muted-hint">将清空该游戏的所有翻译与扫描词条（不影响游戏原文件与已安装的插件）。</p>
+      <div class="form-stack">
+        <label class="inline-check">
+          <input type="checkbox" id="clear-game-dict" checked />
+          <span>同时清空游戏目录里的旧词典文件（避免重新导入旧记录）</span>
+        </label>
+        <label class="inline-check">
+          <input type="checkbox" id="clear-context" checked />
+          <span>同时清空该游戏的语境档案</span>
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" data-close-modal="modal-clear">取消</button>
+        <button class="btn btn-subtle" id="btn-confirm-clear-only">仅清空归零</button>
+        <button class="btn btn-primary" id="btn-confirm-clear-rescan">清空并重扫纯静态文本</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Command Palette (Ctrl+K) -->
+  <div class="modal-backdrop" id="modal-cmd" hidden>
+    <div class="cmd-palette">
+      <input id="cmd-input" class="cmd-input" placeholder="输入快捷指令…" autocomplete="off" />
+      <div id="cmd-list" class="cmd-list"></div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+  <script type="module" src="/static/app.js?v=2.3"></script>
+</body>
+</html>

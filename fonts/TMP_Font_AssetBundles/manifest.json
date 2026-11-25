@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "description": "TMP_FontAsset 字体包（Noto Serif CJK SC Medium 宋体中等字重，单字体收敛），按 Unity 版本选择，用于静态字体替换路径，彻底避免游戏内缺字/豆腐块。",
+  "source": "fonts/SDF_Font_Asset/NotoSerifCJKsc-Medium SDF.asset（用户导出）+ scripts/build_tmp_font_bundles.py",
+  "tmp_versions": {
+    "tmp2": "TextMeshPro 2.x/3.x（Unity 2019+）——Noto Serif CJK SC Medium，中文全覆盖"
+  },
+  "charset_contract": {
+    "cjk_range": [
+      19968,
+      40959
+    ],
+    "min_cjk_count": 3000,
+    "ascii_range": [
+      33,
+      126
+    ],
+    "note": "每个 bundle 的字符表必须覆盖 CJK 基本区 ≥ min_cjk_count 且包含全部可打印 ASCII——Phase 2 逐码点验证基准"
+  },
+  "integrity": {
+    "notoserif_sdf_u2019": {
+      "sha256": "1d8b51cf53ad3a6eecd8d62ab1b50e510e1fbfa15b735cb4f4db051df5997f35",
+      "unity": "2019 ~ 2020",
+      "tmp_layout": "tmp2"
+    },
+    "notoserif_sdf_u2021": {
+      "sha256": "0f4ac3cee25cf611a4f64d16377baf74b6f306bcd39aa9fd9eefc4d0d500310e",
+      "unity": "2021",
+      "tmp_layout": "tmp2"
+    },
+    "notoserif_sdf_u2022": {
+      "sha256": "000452a9d2ec27852a9b871fafce2df51a87df3cc736bd20d46ff75877ece1a4",
+      "unity": "2022",
+      "tmp_layout": "tmp2"
+    },
+    "notoserif_sdf_u6000": {
+      "sha256": "ea195ca5b82cb37fa53b839db01515bdc7d8bb9c65bc4a8ae392155762054cdd",
+      "unity": "6000.0+",
+      "tmp_layout": "tmp2"
+    }
+  }
+}
