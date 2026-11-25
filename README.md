@@ -93,29 +93,39 @@ flowchart LR
 
 ## 下载与安装
 
-### 方式一：网盘下载完整整合包（推荐，单包解压即用）
+### 方式一：网盘下载（推荐，高速下载）
 
-如果你从网盘下载，推荐直接下载 **完整版单包 `UL10nForge-v1.0.0-Full-AllInOne.zip`**——已内置主程序、便携 Python、BepInEx/MelonLoader/XUAT 钩子包、三套四版本中文字体、CUDA/Vulkan 本地引擎以及翻译+审校双模型，**无需分卷合并、无需任何环境配置**，解压后双击 **`启动UL10nForge.bat`** 即可直接离线使用（也可在设置里切换在线 API）。
-
-> **网盘下载链接（内含 `UL10nForge-v1.0.0-Full-AllInOne.zip` 完整版与分卷版）**
+> **网盘下载链接**
 > - 夸克网盘：`[在此填入你的网盘链接]`（提取码：`[待填写]`）
 > - 百度网盘：`[在此填入你的网盘链接]`（提取码：`[待填写]`）
 
-### 方式二：GitHub Releases 分卷下载（按需组合）
+### 方式二：GitHub Releases 下载（完整版分卷 / 按需精简包）
 
-受 GitHub 单文件 2 GB 限制，Releases 页面提供按模块拆分的分卷包，可按自己的使用方式按需下载，**全部解压到同一个文件夹**（保证解压出同一个 `UL10nForge` 目录）即可：
+前往本仓库右侧 [Releases](https://github.com/mingminghh611/UL10nForge/releases) 下载。受单文件 2 GB 限制，提供以下两种下载方式，**二选一即可**：
+
+#### 选项 A：完整版（全包含分卷，一次解压即用，最省心）
+
+内置主程序、便携 Python、BepInEx/MelonLoader/XUAT 钩子包、三套四版本中文字体、CUDA/Vulkan 本地引擎以及翻译+审校双模型。
+
+- 下载全部 `UL10nForge-v1.0.0-Full.7z.001` ~ `.003`（共 3 个分卷，每个 ≤ 1.85 GB）放到**同一个文件夹**；
+- 使用 **7-Zip / Bandizip / WinRAR** 右键解压 **`.001`** 即可自动合并出完整的 `UL10nForge` 文件夹；
+- 无需配置环境，离线直接可用，也可随时在设置里切换在线 API。
+
+#### 选项 B：按需精简包（只用在线 API 或不想下审校模型时选这个）
+
+按需下载下方压缩包，**全部解压到同一个目录**（保证合并到同一个 `UL10nForge` 文件夹）：
 
 | 压缩包文件名 | 包含内容 | 适用人群 |
 | :--- | :--- | :--- |
-| `UL10nForge-v1.0.0-Core.zip` | 主程序 + 内置便携 Python + BepInEx/MelonLoader/XUAT 钩子包 + 三套四版本中文字体 | **必下**（仅用在线 API 只下这一个就行） |
+| `UL10nForge-v1.0.0-Core.zip` | 主程序 + 内置便携 Python + BepInEx/MelonLoader/XUAT 钩子包 + 三套四版本中文字体 | **必下**（仅用在线 API 只下这一个就行，约 485 MB） |
 | `UL10nForge-v1.0.0-LocalEngine.zip` | 本地推理运行库（CUDA + Vulkan） | 用本地离线翻译时必下 |
 | `UL10nForge-v1.0.0-Model-Translate-HyMT3.zip` | 本地主翻译模型（Hy-MT3 1.8B） | 用本地离线翻译时必下 |
-| `UL10nForge-v1.0.0-Model-Reason-Qwen3.5.7z.001` / `.002` | 本地背景与审校模型（Qwen3.5 4B，用 7-Zip / Bandizip 解压 `.001`） | 可选（开「关闭推理与审校」直翻可不下） |
+| `UL10nForge-v1.0.0-Model-Reason-Qwen3.5.7z.001` / `.002` | 本地背景与审校模型（Qwen3.5 4B，解压 `.001`） | 可选（开「关闭推理与审校」直翻可不下） |
 
 > 组合速查：
-> - **纯在线 API**：只下 `Core.zip`
-> - **本地离线直翻**：下 `Core.zip` + `LocalEngine.zip` + `Model-Translate-HyMT3.zip`
-> - **本地完整版**：下上面全部 5 个文件（或直接去网盘下 `Full-AllInOne.zip` 单包）
+> - **纯在线 API**：只下 `Core.zip`（1 个文件）
+> - **本地离线直翻**：下 `Core.zip` + `LocalEngine.zip` + `Model-Translate-HyMT3.zip`（3 个文件）
+> - **本地全功能完整版**：直接选上面 **选项 A** 的 `Full.7z.001` ~ `.003`（3 个文件）
 
 解压完成后，双击文件夹内的 **`启动UL10nForge.bat`**，会自动在浏览器打开工作台（默认 `http://127.0.0.1:18765`）。
 
