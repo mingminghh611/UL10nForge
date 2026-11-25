@@ -163,7 +163,7 @@ class LLMClient:
             timeout=timeout,
             trust_env=not self.is_loopback,
             verify=not self.is_loopback,
-            limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+            limits=httpx.Limits(max_connections=24, max_keepalive_connections=16),
         )
 
     @property

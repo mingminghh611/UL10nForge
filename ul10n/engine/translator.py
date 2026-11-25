@@ -116,9 +116,9 @@ def build_translation_messages(
         ])
         return [{"role": "user", "content": "\n".join(lines)}]
 
-    # General instruction LLM (Qwen3.5 / cloud OpenAI-compatible) — compact high-signal prompt
+    # General instruction LLM (Qwen3.5 / cloud OpenAI-compatible) — compact high-signal game-localization prompt
     sys_lines = [
-        f"游戏本地化翻译为{lang_name}：准确自然，保留占位符({{0}}/%s)、富文本标签与换行，只输出译文。",
+        f"你是中文游戏本地化译者，将游戏文本自然准确地译为{lang_name}：贴合游戏语境与口吻，避免机翻腔；按钮菜单简洁有力；严格保留占位符({{0}}/%s)、富文本标签(<color=...>)、按键名与换行，只输出译文。",
     ]
     if context.is_ready:
         ctx_bits = [
@@ -155,8 +155,8 @@ def _build_cloud_batch_messages(
     """Compact JSON-keyed batch prompt saving 70-85% cloud input tokens with strict ID alignment."""
     lang_name = _TARGET_LANG_NAMES.get(target_lang.casefold(), "Simplified Chinese")
     sys_lines = [
-        f"游戏本地化批量翻译为{lang_name}。",
-        "规则：保留所有占位符({0}/%s)、富文本标签(<color=...>)、数字与换行(\\n)；按编号逐条翻译，只输出严格JSON对象 {\"1\":\"译文1\",...}，不遗漏不解释。",
+        f"你是中文游戏本地化译者，将下列游戏文本自然准确地批量译为{lang_name}（避免机翻腔，按钮简洁）。",
+        "规则：保留所有占位符({0}/%s)、富文本标签(<color=...>)、按键名、数字与换行(\\n)；按编号逐条翻译，只输出严格JSON对象 {\"1\":\"译文1\",...}，不遗漏不解释。",
     ]
     if context.is_ready:
         ctx_bits = [

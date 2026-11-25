@@ -210,8 +210,8 @@ function applyReasoningMode(disabled) {
   const autoBtn = $("#btn-auto-localize");
   if (autoBtn) {
     autoBtn.title = off
-      ? "自动依次完成：扫描纯静态界面 → 批量翻译 → 接入游戏（已跳过推理建模与审校重译）"
-      : "自动依次完成：扫描纯静态界面 → 提取语境与术语 → 并发翻译 → 智能审校 → 接入游戏";
+      ? "自动完成：扫描界面文本 → 批量翻译 → 接入游戏（已跳过背景识别与审校）"
+      : "自动完成：扫描界面文本 → 识别游戏背景 → 批量翻译 → 审校 → 接入游戏";
   }
 
   const chk = $("#chk-disable-reasoning");
@@ -1460,8 +1460,8 @@ function bindEvents() {
       applyReasoningMode(res.settings.disable_reasoning);
       toast(
         disabled
-          ? "已关闭推理与审校，开启极速直翻模式"
-          : "已恢复语境分析与智能审校功能"
+          ? "已关闭推理与审校，切换为直翻模式"
+          : "已恢复游戏背景识别与审校功能"
       );
     } catch (err) {
       e.target.checked = !disabled;

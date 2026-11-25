@@ -168,6 +168,7 @@ class LlamaRuntimeManager:
         }
         self._servers: dict[str, ManagedServer] = {}
         self._starting: set[str] = set()
+        self._client_pool: dict[tuple[str, str, str, str, str, bool], LLMClient] = {}
         self._job_handle = _create_kill_on_close_job()
         self._nvidia_gpu = _detect_nvidia_gpu()
         self._stop_reaper = threading.Event()
@@ -286,17 +287,70 @@ class LlamaRuntimeManager:
             return rs
         return settings.translate_role
 
-    def create_client_for_role(self, role: str, settings: AppSettings) -> LLMClient:
+    def _get_or_create_pooled_client(
+        self,
+        role: str,
+        mode: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+        *,
+        live: bool = False,
+    ) -> LLMClient:
+        key = (role, mode, base_url, api_key, model, live)
+        with self._lock:
+            existing = self._client_pool.get(key)
+            if existing is not None:
+                return existing
+            # Evict stale pooled clients for the same role/live flag if endpoint changed
+            stale_keys = [k for k in self._client_pool if k[0] == role and k[5] == live and k != key]
+            stale_clients = [self._client_pool.pop(k) for k in stale_keys]
+            client = LLMClient(
+                base_url,
+                api_key,
+                model,
+                timeout=25.0 if live else 90.0,
+                max_retries=1 if live else None,
+            )
+            setattr(client, "_pooled", True)
+            self._client_pool[key] = client
+        for sc in stale_clients:
+            sc.close()
+        return client
+
+    def create_client_for_role(
+        self,
+        role: str,
+        settings: AppSettings,
+        *,
+        pooled: bool = False,
+        live: bool = False,
+    ) -> LLMClient:
         """Return a ready LLMClient for `translate` or `reason`, auto-starting local server if needed."""
         cfg = self._role_cfg(settings, role)
 
         if cfg.mode == "api":
             if not cfg.base_url or not cfg.model:
                 raise RuntimeError(f"在线 API（{role}）尚未填写接口地址或模型名。")
+            if pooled:
+                return self._get_or_create_pooled_client(
+                    role, "api", cfg.base_url, cfg.api_key, cfg.model, live=live
+                )
             return LLMClient(cfg.base_url, cfg.api_key, cfg.model)
 
         srv = self.ensure_local_server(role, hardware_mode=settings.hardware_mode)
+        if pooled:
+            return self._get_or_create_pooled_client(
+                role, "local", srv.base_url, srv.api_key, srv.model_path.stem, live=live
+            )
         return LLMClient(srv.base_url, srv.api_key, srv.model_path.stem)
+
+    def acquire_live_translate_client(self, settings: AppSettings) -> LLMClient:
+        """Return a warm keep-alive pooled client for real-time XUAT translation (0ms handshake)."""
+        # If create_client_for_role is monkeypatched (e.g. in tests), respect the patch cleanly
+        if getattr(self.create_client_for_role, "__func__", None) is not LlamaRuntimeManager.create_client_for_role:
+            return self.create_client_for_role("translate", settings)
+        return self.create_client_for_role("translate", settings, pooled=True, live=True)
 
     def ensure_local_server(self, role: str, *, hardware_mode: str = "auto") -> ManagedServer:
         # Per-role startup mutex guarantees concurrent cold-start requests never spawn duplicate servers
@@ -350,8 +404,12 @@ class LlamaRuntimeManager:
     ) -> ManagedServer:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.logs_dir / f"llama-{role}.log"
-        ctx_size = "4096" if role == "translate" else "8192"
-        parallel = "4" if role == "translate" else "1"
+        if role == "translate":
+            ctx_size = "6144" if gpu_layers > 0 else "4096"
+            parallel = "6" if gpu_layers > 0 else "4"
+        else:
+            ctx_size = "8192"
+            parallel = "1"
         cmd = [
             str(exe),
             "--model", str(model_path),
@@ -419,6 +477,10 @@ class LlamaRuntimeManager:
     def stop_role(self, role: str) -> None:
         with self._lock:
             srv = self._servers.pop(role, None)
+            stale_keys = [k for k in self._client_pool if k[0] == role]
+            stale_clients = [self._client_pool.pop(k) for k in stale_keys]
+        for sc in stale_clients:
+            sc.close()
         if srv and srv.alive:
             srv.process.terminate()
             try:
@@ -431,6 +493,10 @@ class LlamaRuntimeManager:
         self._stop_reaper.set()
         with self._lock:
             roles = list(self._servers.keys())
+            leftover_clients = list(self._client_pool.values())
+            self._client_pool.clear()
+        for c in leftover_clients:
+            c.close()
         for role in roles:
             self.stop_role(role)
         if sys.platform == "win32" and self._job_handle:

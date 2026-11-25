@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>UL10nForge · Unity 汉化工作台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2.7" />
+  <link rel="stylesheet" href="/static/styles.css?v=2.8" />
 </head>
 <body>
   <div class="app-shell">
@@ -143,7 +143,7 @@
                   <p class="game-sub" id="wb-game-meta">—</p>
                 </div>
                 <div class="pill-group">
-                  <button type="button" class="status-pill direct-pill" id="wb-direct-pill" title="已关闭推理与审校，直接翻译接入（点击前往设置调整）" hidden>极速直翻</button>
+                  <button type="button" class="status-pill direct-pill" id="wb-direct-pill" title="已关闭推理与审校，点此前往设置调整" hidden>直翻模式</button>
                   <span class="status-pill" id="wb-hook-pill">未接入</span>
                 </div>
               </div>
@@ -185,20 +185,20 @@
 
               <!-- Primary Action Row (3 core actions only) -->
               <div class="action-primary-row">
-                <button class="btn btn-primary" id="btn-auto-localize" title="自动依次完成：扫描纯静态界面 → 提取语境与术语 → 并发翻译 → 智能审校 → 接入游戏">一键自动汉化</button>
-                <button class="btn btn-accent-soft" id="btn-launch-game" title="自动确保汉化插件已接入且词典最新后启动游戏">启动游戏</button>
+                <button class="btn btn-primary" id="btn-auto-localize" title="自动完成：扫描界面文本 → 识别游戏背景 → 批量翻译 → 审校 → 接入游戏">一键自动汉化</button>
+                <button class="btn btn-accent-soft" id="btn-launch-game" title="自动检查插件并同步最新词典后启动游戏">启动游戏</button>
                 <button class="btn btn-subtle" id="btn-open-export">导出…</button>
               </div>
 
               <!-- Secondary Fine-Control Row (quiet & minimal) -->
               <div class="action-secondary-row">
-                <button class="btn btn-subtle btn-sm" id="btn-scan-texts" title="仅只读扫描百分百安全的纯静态界面文本，其余动态与剧情文本交由钩子实时捕获">扫描静态文本</button>
+                <button class="btn btn-subtle btn-sm" id="btn-scan-texts" title="只读扫描游戏内的静态界面文本，动态剧情交由游戏内钩子实时抓取">扫描界面文本</button>
                 <button class="btn btn-subtle btn-sm" id="btn-start-translate">批量翻译</button>
-                <button class="btn btn-subtle btn-sm" id="btn-start-review" title="智能筛选长句/否定句/术语冲突并代入游戏视角克制修正">智能审校</button>
+                <button class="btn btn-subtle btn-sm" id="btn-start-review" title="挑出长句、否定句和术语异常的译文进行复查修正">审校译文</button>
                 <div class="more-menu-wrap">
                   <button class="btn btn-ghost btn-sm" id="btn-wb-more">更多 ▾</button>
                   <div class="more-menu" id="wb-more-menu" hidden>
-                    <button class="more-item" id="btn-review-full">深度全量审校</button>
+                    <button class="more-item" id="btn-review-full">全部重新审校</button>
                     <label class="more-item" title="无边框窗口模式启动，确保游戏中按 Alt+L 悬浮窗始终置顶">
                       <span>无边框启动游戏</span>
                       <input type="checkbox" id="chk-launch-borderless" />
@@ -223,8 +223,8 @@
             <div class="card context-card" id="wb-context-card">
               <div class="card-head">
                 <div>
-                  <div class="eyebrow">游戏语境</div>
-                  <h3 class="card-title">文风与专名设定</h3>
+                  <div class="eyebrow">游戏背景</div>
+                  <h3 class="card-title">文风与专名</h3>
                 </div>
                 <div class="card-head-actions">
                   <button class="btn btn-ghost btn-sm" id="btn-sync-ctx-glossary" title="将识别出的角色名与专名导入本游戏术语表" hidden>导入术语</button>
@@ -233,7 +233,7 @@
                 </div>
               </div>
               <div id="wb-context-body" class="context-body">
-                <p class="muted-hint">尚未生成语境档案。点击「自动识别」将根据游戏文本归纳类型、文风与专名。</p>
+                <p class="muted-hint">还没有背景设定。点「自动识别」可根据已有文本归纳题材、文风与专有名词。</p>
               </div>
             </div>
           </div>
@@ -351,7 +351,7 @@
             <div class="glossary-tools">
               <div class="search-box" style="max-width:360px">
                 <svg viewBox="0 0 20 20" fill="none"><circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M13.5 13.5L17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
-                <input id="memory-search" type="text" placeholder="搜索已沉淀的跨游戏记忆…" />
+                <input id="memory-search" type="text" placeholder="搜索跨游戏翻译记忆…" />
               </div>
               <span class="muted-hint" style="font-size:12px">直接修改译文并回车/失焦即可更新，所有游戏共用。</span>
             </div>
@@ -385,9 +385,9 @@
                 <div>
                   <div class="setting-name">
                     关闭推理与审校
-                    <span class="setting-tag">极速直翻</span>
+                    <span class="setting-tag">直翻</span>
                   </div>
-                  <div class="setting-desc">开启后不再加载推理模型建立语境，并隐藏所有审校与语境按钮；点击「一键自动汉化」时跳过建模与审校重译，直接扫描、翻译并接入游戏，更省显存与耗时</div>
+                  <div class="setting-desc">开启后不再加载推理模型，并隐藏游戏背景与审校按钮；一键汉化会跳过背景识别和审校，直接翻译并接入游戏，更省显存也更快</div>
                 </div>
                 <label class="switch">
                   <input type="checkbox" id="chk-disable-reasoning" />
@@ -481,8 +481,8 @@
 
               <div class="setting-row">
                 <div>
-                  <div class="setting-name">界面交互音效</div>
-                  <div class="setting-desc">保存译文、切换选项、任务完成与启动游戏时提供轻柔的听觉反馈（右上角也可随时静音）</div>
+                  <div class="setting-name">界面提示音</div>
+                  <div class="setting-desc">保存译文、任务完成和启动游戏时播放轻柔提示音，右上角可随时静音</div>
                 </div>
                 <label class="switch">
                   <input type="checkbox" id="chk-sound-effects" checked />
@@ -733,6 +733,6 @@
   <!-- Toast Container -->
   <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 
-  <script type="module" src="/static/app.js?v=2.7"></script>
+  <script type="module" src="/static/app.js?v=2.8"></script>
 </body>
 </html>

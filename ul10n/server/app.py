@@ -258,6 +258,7 @@ def create_app(
         if existing and existing.translation and (
             existing.locked or existing.status in (STATUS_EDITED, STATUS_TRANSLATED)
         ):
+            svc.record_live_line(pid, text)
             live_entry = store.mark_live_seen(existing.id) if existing.id else existing
             live_entry = live_entry or existing
             svc.bus.publish(
@@ -312,6 +313,8 @@ def create_app(
         client: LLMClient | None = None
         outcome = None
         try:
+            ctx, glossary = svc.get_live_context_and_glossary(pid)
+            prev_lines = svc.recent_live_lines(pid, exclude=text)
             pipeline = TranslationPipeline(
                 svc.global_store,
                 store,
@@ -319,8 +322,16 @@ def create_app(
                 temperature=cfg.translate_role.temperature,
                 max_tokens=cfg.translate_role.max_tokens,
             )
-            client = svc.runtime.create_client_for_role("translate", cfg)
-            outcome = pipeline.translate_one(text, client, source="xuat_live")
+            client = svc.runtime.acquire_live_translate_client(cfg)
+            outcome = pipeline.translate_one(
+                text,
+                client,
+                source="xuat_live",
+                context=ctx,
+                glossary=glossary,
+                prev_originals=prev_lines,
+            )
+            svc.record_live_line(pid, text)
         except Exception as exc:
             # Never return HTTP 500 or empty string to XUAT (prevents 3x retry + SPAM SHUTDOWN)
             err_entry = store.upsert_entry(
@@ -337,7 +348,7 @@ def create_app(
             )
             return text
         finally:
-            if client:
+            if client and not getattr(client, "_pooled", False):
                 client.close()
             svc.end_live_request()
             if is_leader:
@@ -957,6 +968,7 @@ def create_app(
                     ctx = infer_game_context(r_cli, all_entries, game_name=project.name)
                     store.save_context(ctx)
                     sync_context_terms_to_glossary(ctx, store)
+                    svc.invalidate_translation_cache(project_id)
                     svc.bus.publish("context_updated", {"project_id": project_id, "context": ctx.to_dict()})
                 finally:
                     r_cli.close()
@@ -1151,12 +1163,13 @@ def create_app(
                 ctx = infer_game_context(client, entries, game_name=project.name)
                 store.save_context(ctx)
                 synced = sync_context_terms_to_glossary(ctx, store)
+                svc.invalidate_translation_cache(project_id)
                 task.current = 1
                 task.done = 1
                 task.message = (
-                    f"语境档案已生成，并自动同步 {synced} 条术语到本游戏词库"
+                    f"语境信息已更新，并导入 {synced} 条专名到本游戏术语"
                     if synced
-                    else "游戏语境档案已生成"
+                    else "游戏语境信息已更新"
                 )
                 svc.bus.publish("context_updated", {"project_id": project_id, "context": ctx.to_dict()})
             finally:
@@ -1344,6 +1357,7 @@ def create_app(
         store = svc.project_store(project_id)
         store.save_context(ctx)
         synced = sync_context_terms_to_glossary(ctx, store)
+        svc.invalidate_translation_cache(project_id)
         return {"context": ctx.to_dict(), "synced_terms": synced}
 
     @app.post("/api/projects/{project_id}/context/sync-glossary")
@@ -1352,6 +1366,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="项目不存在")
         store = svc.project_store(project_id)
         added = sync_context_terms_to_glossary(store.load_context(), store)
+        svc.invalidate_translation_cache(project_id)
         return {"ok": True, "added": added}
 
     def _parse_glossary_import_lines(content: str) -> list[tuple[str, str, str]]:
@@ -1399,6 +1414,7 @@ def create_app(
         item = svc.project_store(project_id).upsert_glossary(
             req.term, req.translation, req.category, req.note
         )
+        svc.invalidate_translation_cache(project_id)
         return {"item": item.to_dict()}
 
     @app.put("/api/projects/{project_id}/glossary/{item_id}")
@@ -1412,6 +1428,7 @@ def create_app(
         )
         if not item:
             raise HTTPException(status_code=404, detail="术语不存在")
+        svc.invalidate_translation_cache(project_id)
         return {"item": item.to_dict()}
 
     @app.post("/api/projects/{project_id}/glossary/import")
@@ -1422,6 +1439,7 @@ def create_app(
         pairs = _parse_glossary_import_lines(req.content)
         for t, tr, cat in pairs:
             store.upsert_glossary(t, tr, cat)
+        svc.invalidate_translation_cache(project_id)
         return {"ok": True, "imported": len(pairs)}
 
     @app.delete("/api/projects/{project_id}/glossary")
@@ -1429,6 +1447,7 @@ def create_app(
         if not svc.global_store.get_project(project_id):
             raise HTTPException(status_code=404, detail="项目不存在")
         removed = svc.project_store(project_id).clear_glossary()
+        svc.invalidate_translation_cache(project_id)
         return {"ok": True, "removed": removed}
 
     @app.delete("/api/projects/{project_id}/glossary/{item_id}")
@@ -1436,6 +1455,7 @@ def create_app(
         if not svc.global_store.get_project(project_id):
             raise HTTPException(status_code=404, detail="项目不存在")
         svc.project_store(project_id).delete_glossary(item_id)
+        svc.invalidate_translation_cache(project_id)
         return {"ok": True}
 
     @app.get("/api/glossary")
@@ -1451,6 +1471,7 @@ def create_app(
         if not req.term.strip() or not req.translation.strip():
             raise HTTPException(status_code=400, detail="原文术语和译名均不能为空")
         item = svc.global_store.upsert_glossary(req.term, req.translation, req.category, req.note)
+        svc.invalidate_translation_cache(None)
         return {"item": item.to_dict()}
 
     @app.put("/api/glossary/{item_id}")
@@ -1460,6 +1481,7 @@ def create_app(
         item = svc.global_store.update_glossary(item_id, req.term, req.translation, req.category, req.note)
         if not item:
             raise HTTPException(status_code=404, detail="术语不存在")
+        svc.invalidate_translation_cache(None)
         return {"item": item.to_dict()}
 
     @app.post("/api/glossary/import")
@@ -1467,16 +1489,19 @@ def create_app(
         pairs = _parse_glossary_import_lines(req.content)
         for t, tr, cat in pairs:
             svc.global_store.upsert_glossary(t, tr, cat)
+        svc.invalidate_translation_cache(None)
         return {"ok": True, "imported": len(pairs)}
 
     @app.delete("/api/glossary")
     async def clear_global_glossary():
         removed = svc.global_store.clear_glossary()
+        svc.invalidate_translation_cache(None)
         return {"ok": True, "removed": removed}
 
     @app.delete("/api/glossary/{item_id}")
     async def delete_global_glossary(item_id: int):
         svc.global_store.delete_glossary(item_id)
+        svc.invalidate_translation_cache(None)
         return {"ok": True}
 
     @app.get("/api/memory")

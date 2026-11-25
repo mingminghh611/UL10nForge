@@ -1,6 +1,7 @@
 """Application service container tying together stores, runtime manager, priority gate, and task runner."""
 from __future__ import annotations
 
+from collections import deque
 import threading
 from pathlib import Path
 from typing import Any
@@ -17,13 +18,22 @@ from ul10n.core.hook_deployer import (
 from ul10n.core.models import (
     AppSettings,
     Entry,
+    GameContext,
     GameProject,
+    GlossaryItem,
+    STATUS_EDITED,
     STATUS_PENDING,
     STATUS_SKIPPED,
     STATUS_TRANSLATED,
 )
 from ul10n.core.text_scanner import scan_unity_static_texts_detailed
-from ul10n.core.xuat_codec import ExportStats, export_xuat_file, parse_xuat_file, render_xuat_dict_text
+from ul10n.core.xuat_codec import (
+    ExportStats,
+    export_xuat_file,
+    parse_xuat_file,
+    prune_xuat_auto_file,
+    render_xuat_dict_text,
+)
 from ul10n.engine.runtime_manager import LlamaRuntimeManager
 from ul10n.engine.tasks import EventBus, TaskManager
 from ul10n.engine.translator import TranslationPipeline
@@ -58,6 +68,10 @@ class AppServices:
         self._inflight_live: dict[tuple[str, str], threading.Event] = {}
         self._sync_lock = threading.Lock()
         self._sync_timers: dict[str, threading.Timer] = {}
+        self._export_locks: dict[str, threading.Lock] = {}
+        self._live_cache_lock = threading.Lock()
+        self._live_ctx_cache: dict[str, tuple[GameContext, list[GlossaryItem]]] = {}
+        self._live_recent_lines: dict[str, deque[str]] = {}
 
         # Restore most recently opened project if available
         projects = self.global_store.list_projects()
@@ -99,6 +113,48 @@ class AppServices:
             if self._inflight_live.get(key) is evt:
                 self._inflight_live.pop(key, None)
         evt.set()
+
+    def get_live_context_and_glossary(self, project_id: str) -> tuple[GameContext, list[GlossaryItem]]:
+        """Return cached `(GameContext, project+global glossary)` with 0ms lookup for live translation."""
+        with self._live_cache_lock:
+            cached = self._live_ctx_cache.get(project_id)
+            if cached is not None:
+                return cached
+        store = self.project_store(project_id)
+        ctx = store.load_context()
+        terms = store.list_glossary() + self.global_store.list_glossary()
+        pair = (ctx, terms)
+        with self._live_cache_lock:
+            self._live_ctx_cache[project_id] = pair
+        return pair
+
+    def invalidate_translation_cache(self, project_id: str | None = None) -> None:
+        """Invalidate cached context/glossary (pass None when global glossary changes)."""
+        with self._live_cache_lock:
+            if project_id is None:
+                self._live_ctx_cache.clear()
+            else:
+                self._live_ctx_cache.pop(project_id, None)
+
+    def record_live_line(self, project_id: str, original: str) -> None:
+        text = (original or "").strip()
+        if not text:
+            return
+        with self._live_cache_lock:
+            buf = self._live_recent_lines.get(project_id)
+            if buf is None:
+                buf = deque(maxlen=4)
+                self._live_recent_lines[project_id] = buf
+            if not buf or buf[-1] != text:
+                buf.append(text)
+
+    def recent_live_lines(self, project_id: str, *, exclude: str = "") -> list[str]:
+        ex = (exclude or "").strip()
+        with self._live_cache_lock:
+            buf = self._live_recent_lines.get(project_id)
+            if not buf:
+                return []
+            return [line for line in buf if line != ex][-3:]
 
     # ── Settings & Stores ─────────────────────────────────────────────────
 
@@ -154,6 +210,9 @@ class AppServices:
         cleared = store.clear_entries()
         if clear_context:
             store.set_kv("game_context", {})
+        self.invalidate_translation_cache(project_id)
+        with self._live_cache_lock:
+            self._live_recent_lines.pop(project_id, None)
         # Mark prescan version done so reopening won't unexpectedly re-run unless user scans
         store.set_kv("prescan_version", 2)
 
@@ -262,10 +321,22 @@ class AppServices:
         paths = get_xuat_paths(project.game_dir, project.loader)
         if not Path(project.game_dir).is_dir():
             return None
-        paths["translation_dir"].mkdir(parents=True, exist_ok=True)
-        if not paths["auto_file"].exists():
-            paths["auto_file"].write_text("", encoding="utf-8")
-        return export_xuat_file(store.all_entries(), paths["curated_file"])
+        with self._sync_lock:
+            lock = self._export_locks.setdefault(project_id, threading.Lock())
+        with lock:
+            paths["translation_dir"].mkdir(parents=True, exist_ok=True)
+            if not paths["auto_file"].exists():
+                paths["auto_file"].write_text("", encoding="utf-8")
+            entries = store.all_entries()
+            # Prune managed/edited/skipped keys out of _AutoGeneratedTranslations.txt so XUAT
+            # hot-reload ALWAYS reflects manual edits & skips with zero alphabetical shadowing!
+            managed_keys = {
+                e.original
+                for e in entries
+                if e.status in (STATUS_TRANSLATED, STATUS_EDITED, STATUS_SKIPPED)
+            }
+            prune_xuat_auto_file(paths["auto_file"], managed_keys)
+            return export_xuat_file(entries, paths["curated_file"])
 
     def _sync_xuat_if_enabled(self, project: GameProject) -> None:
         cfg = self.settings()
