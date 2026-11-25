@@ -14,7 +14,14 @@ from ul10n.core.hook_deployer import (
     refresh_hook_config,
     uninstall_hook,
 )
-from ul10n.core.models import AppSettings, Entry, GameProject, STATUS_SKIPPED
+from ul10n.core.models import (
+    AppSettings,
+    Entry,
+    GameProject,
+    STATUS_PENDING,
+    STATUS_SKIPPED,
+    STATUS_TRANSLATED,
+)
 from ul10n.core.text_scanner import scan_unity_static_texts_detailed
 from ul10n.core.xuat_codec import ExportStats, export_xuat_file, parse_xuat_file, render_xuat_dict_text
 from ul10n.engine.runtime_manager import LlamaRuntimeManager
@@ -352,15 +359,42 @@ class AppServices:
         return entry
 
     def skip_entry(self, project_id: str, entry_id: int) -> Entry | None:
-        """Mark a noisy/unwanted entry as skipped so it won't enter game dictionary or stats."""
+        """Mark an entry as not-translated: clear translation (saving to prev_translation) & sync."""
         project = self.global_store.get_project(project_id)
         if not project:
             return None
         store = self.project_store(project_id)
         entry = store.update_entry_by_id(
             entry_id,
+            translation="",
             status=STATUS_SKIPPED,
             locked=True,
+            quality_note="",
+            review_level="",
+            review_reason="",
+        )
+        if not entry:
+            return None
+        self._sync_xuat_if_enabled(project)
+        self._publish_entry_update(project_id, entry, from_cache=True)
+        return entry
+
+    def unskip_entry(self, project_id: str, entry_id: int) -> Entry | None:
+        """Restore a skipped entry back to translated (from prev_translation) or pending."""
+        project = self.global_store.get_project(project_id)
+        if not project:
+            return None
+        store = self.project_store(project_id)
+        cur = store.get_by_id(entry_id)
+        if not cur:
+            return None
+        restored_tr = (cur.prev_translation or "").strip()
+        next_status = STATUS_TRANSLATED if restored_tr else STATUS_PENDING
+        entry = store.update_entry_by_id(
+            entry_id,
+            translation=restored_tr,
+            status=next_status,
+            locked=False,
             quality_note="",
             review_reason="",
         )
@@ -411,6 +445,13 @@ class AppServices:
         project = self.global_store.get_project(project_id)
         if not project:
             raise FileNotFoundError("未找到该项目")
+        target_loader = (loader or project.loader or "bepinex").lower()
+        # Cleanly uninstall previous loader first if user switches BepInEx <-> MelonLoader
+        if project.hook_deployed and project.loader and target_loader != project.loader.lower():
+            try:
+                self.uninstall_project_hook(project_id)
+            except Exception:
+                pass
         info = detect_game(project.game_dir)
         cfg = self.settings()
         result = deploy_hook(
@@ -418,7 +459,7 @@ class AppServices:
             app_root=self.app_root,
             project_id=project_id,
             server_port=cfg.server_port,
-            loader=loader or project.loader,
+            loader=target_loader,
             target_lang=cfg.target_lang,
         )
         store = self.project_store(project_id)

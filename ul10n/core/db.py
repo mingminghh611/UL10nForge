@@ -271,10 +271,37 @@ class GlobalStore:
                 ).fetchall()
         return [dict(r) for r in rows]
 
+    def count_memory(self) -> int:
+        with self._lock:
+            row = self.conn.execute("SELECT COUNT(*) AS c FROM global_memory").fetchone()
+        return int(row["c"]) if row else 0
+
+    def update_memory(self, src_hash: str, translation: str) -> dict[str, Any] | None:
+        tr = translation.strip()
+        if not tr:
+            return None
+        with self._lock:
+            self.conn.execute(
+                "UPDATE global_memory SET translation=?, source='manual', updated_at=? WHERE src_hash=?",
+                (tr, _now(), src_hash),
+            )
+            self.conn.commit()
+            row = self.conn.execute(
+                "SELECT src_hash, original, translation, source, updated_at FROM global_memory WHERE src_hash=?",
+                (src_hash,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def delete_memory(self, src_hash: str) -> None:
         with self._lock:
             self.conn.execute("DELETE FROM global_memory WHERE src_hash=?", (src_hash,))
             self.conn.commit()
+
+    def clear_memory(self) -> int:
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM global_memory")
+            self.conn.commit()
+            return int(cur.rowcount or 0)
 
     # ── Global Glossary ───────────────────────────────────────────────────
 
@@ -304,10 +331,44 @@ class GlobalStore:
             ).fetchone()
         return GlossaryItem(row["id"], row["term"], row["translation"], row["category"], row["note"])
 
+    def update_glossary(
+        self, item_id: int, term: str, translation: str, category: str = "术语", note: str = ""
+    ) -> GlossaryItem | None:
+        t, tr = term.strip(), translation.strip()
+        if not t or not tr:
+            return None
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT id FROM global_glossary WHERE id=?", (item_id,)
+            ).fetchone()
+            if not existing:
+                return None
+            # If renaming to an already-existing term, merge cleanly by removing the old duplicate
+            dup = self.conn.execute(
+                "SELECT id FROM global_glossary WHERE term=? AND id!=?", (t, item_id)
+            ).fetchone()
+            if dup:
+                self.conn.execute("DELETE FROM global_glossary WHERE id=?", (dup["id"],))
+            self.conn.execute(
+                "UPDATE global_glossary SET term=?, translation=?, category=?, note=? WHERE id=?",
+                (t, tr, category.strip() or "术语", note.strip(), item_id),
+            )
+            self.conn.commit()
+            row = self.conn.execute(
+                "SELECT id, term, translation, category, note FROM global_glossary WHERE id=?", (item_id,)
+            ).fetchone()
+        return GlossaryItem(row["id"], row["term"], row["translation"], row["category"], row["note"]) if row else None
+
     def delete_glossary(self, item_id: int) -> None:
         with self._lock:
             self.conn.execute("DELETE FROM global_glossary WHERE id=?", (item_id,))
             self.conn.commit()
+
+    def clear_glossary(self) -> int:
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM global_glossary")
+            self.conn.commit()
+            return int(cur.rowcount or 0)
 
 
 class ProjectStore:
@@ -517,7 +578,7 @@ class ProjectStore:
             new_rr = row["review_reason"] if review_reason is None else review_reason
             new_qn = row["quality_note"] if quality_note is None else quality_note
             old_tr = str(row["translation"] or "")
-            prev_tr = old_tr if (translation is not None and old_tr and new_tr and old_tr != new_tr) else str(row["prev_translation"] or "")
+            prev_tr = old_tr if (translation is not None and old_tr and old_tr != new_tr) else str(row["prev_translation"] or "")
             self.conn.execute(
                 """
                 UPDATE entries SET
@@ -635,7 +696,11 @@ class ProjectStore:
             params.append(src)
 
         # Status filter (independent of source)
-        if st and st not in ("all", "live", "static"):
+        if st == "reviewed":
+            where.append("review_level IN ('PASS', 'FIXED') AND status != 'skipped'")
+        elif st == "attention":
+            where.append("status IN ('flagged', 'failed')")
+        elif st and st not in ("all", "live", "static"):
             where.append("status = ?")
             params.append(st)
 
@@ -686,6 +751,11 @@ class ProjectStore:
                     "SELECT COUNT(*) AS c FROM entries WHERE source = 'xuat_live'"
                 ).fetchone()["c"]
             )
+            reviewed_count = int(
+                self.conn.execute(
+                    "SELECT COUNT(*) AS c FROM entries WHERE review_level IN ('PASS', 'FIXED') AND status != 'skipped'"
+                ).fetchone()["c"]
+            )
         for r in rows:
             st = r["status"]
             c = int(r["c"])
@@ -694,6 +764,8 @@ class ProjectStore:
                 counts[st] = c
         counts["live"] = live_count
         counts["static"] = max(0, counts["total"] - live_count)
+        counts["reviewed"] = reviewed_count
+        counts["attention"] = counts[STATUS_FLAGGED] + counts[STATUS_FAILED]
         counts["done"] = counts[STATUS_TRANSLATED] + counts[STATUS_EDITED]
         actionable = max(0, counts["total"] - counts[STATUS_SKIPPED])
         counts["percent"] = round(counts["done"] * 100 / actionable) if actionable else 0
@@ -727,10 +799,41 @@ class ProjectStore:
             ).fetchone()
         return GlossaryItem(row["id"], row["term"], row["translation"], row["category"], row["note"])
 
+    def update_glossary(
+        self, item_id: int, term: str, translation: str, category: str = "术语", note: str = ""
+    ) -> GlossaryItem | None:
+        t, tr = term.strip(), translation.strip()
+        if not t or not tr:
+            return None
+        with self._lock:
+            existing = self.conn.execute("SELECT id FROM glossary WHERE id=?", (item_id,)).fetchone()
+            if not existing:
+                return None
+            dup = self.conn.execute(
+                "SELECT id FROM glossary WHERE term=? AND id!=?", (t, item_id)
+            ).fetchone()
+            if dup:
+                self.conn.execute("DELETE FROM glossary WHERE id=?", (dup["id"],))
+            self.conn.execute(
+                "UPDATE glossary SET term=?, translation=?, category=?, note=? WHERE id=?",
+                (t, tr, category.strip() or "术语", note.strip(), item_id),
+            )
+            self.conn.commit()
+            row = self.conn.execute(
+                "SELECT id, term, translation, category, note FROM glossary WHERE id=?", (item_id,)
+            ).fetchone()
+        return GlossaryItem(row["id"], row["term"], row["translation"], row["category"], row["note"]) if row else None
+
     def delete_glossary(self, item_id: int) -> None:
         with self._lock:
             self.conn.execute("DELETE FROM glossary WHERE id=?", (item_id,))
             self.conn.commit()
+
+    def clear_glossary(self) -> int:
+        with self._lock:
+            cur = self.conn.execute("DELETE FROM glossary")
+            self.conn.commit()
+            return int(cur.rowcount or 0)
 
     # ── KV (GameContext / Hook Manifest) ──────────────────────────────────
 

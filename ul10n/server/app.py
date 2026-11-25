@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from ul10n import VERSION
 from ul10n.core.exporter import export_entries_as_format
+from ul10n.core.game_detector import detect_protection_markers
 from ul10n.core.hook_deployer import get_xuat_paths
 from ul10n.core.models import (
     AppSettings,
@@ -27,6 +28,7 @@ from ul10n.core.models import (
     STATUS_FAILED,
     STATUS_FLAGGED,
     STATUS_PENDING,
+    STATUS_SKIPPED,
     STATUS_TRANSLATED,
     VALID_STATUSES,
 )
@@ -242,6 +244,8 @@ def create_app(
 
         # Fast-path cache check before acquiring live/LLM slot
         existing = store.get_by_original(text)
+        if existing and existing.status == STATUS_SKIPPED:
+            return text
         if existing and existing.translation and (
             existing.locked or existing.status in (STATUS_EDITED, STATUS_TRANSLATED)
         ):
@@ -264,11 +268,14 @@ def create_app(
         if not is_leader:
             sf_evt.wait(timeout=30.0)
             cached = store.get_by_original(text)
+            if cached and cached.status == STATUS_SKIPPED:
+                return text
             if cached and cached.translation:
                 return cached.translation
 
         svc.begin_live_request()
         client: LLMClient | None = None
+        outcome = None
         try:
             pipeline = TranslationPipeline(
                 svc.global_store,
@@ -279,6 +286,21 @@ def create_app(
             )
             client = svc.runtime.create_client_for_role("translate", cfg)
             outcome = pipeline.translate_one(text, client, source="xuat_live")
+        except Exception as exc:
+            # Never return HTTP 500 or empty string to XUAT (prevents 3x retry + SPAM SHUTDOWN)
+            err_entry = store.upsert_entry(
+                text, "", status=STATUS_FAILED, source="xuat_live", quality_note=str(exc)[:120]
+            )
+            svc.bus.publish(
+                "live_entry",
+                {
+                    "project_id": pid,
+                    "entry": err_entry.to_dict(),
+                    "stats": store.stats(),
+                    "from_cache": False,
+                },
+            )
+            return text
         finally:
             if client:
                 client.close()
@@ -297,7 +319,7 @@ def create_app(
                 "from_cache": outcome.from_cache,
             },
         )
-        return outcome.translation
+        return (outcome.translation or "").strip() or text
 
     @app.get("/xuat/translate")
     @app.get("/xuat/translate/{project_id}")
@@ -373,8 +395,14 @@ def create_app(
             raise HTTPException(status_code=404, detail="项目不存在")
         svc.active_project_id = project_id
         store = svc.project_store(project_id)
+        p_dict = project.to_dict()
+        p_dict["protection_warning"] = (
+            detect_protection_markers(Path(project.game_dir))
+            if Path(project.game_dir).is_dir()
+            else ""
+        )
         return {
-            "project": project.to_dict(),
+            "project": p_dict,
             "stats": store.stats(),
             "context": store.load_context().to_dict(),
         }
@@ -647,6 +675,13 @@ def create_app(
     @app.post("/api/projects/{project_id}/entries/{entry_id}/skip")
     async def skip_entry_route(project_id: str, entry_id: int):
         entry = await asyncio.to_thread(svc.skip_entry, project_id, entry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail="条目不存在")
+        return {"entry": entry.to_dict(), "stats": svc.project_store(project_id).stats()}
+
+    @app.post("/api/projects/{project_id}/entries/{entry_id}/unskip")
+    async def unskip_entry_route(project_id: str, entry_id: int):
+        entry = await asyncio.to_thread(svc.unskip_entry, project_id, entry_id)
         if not entry:
             raise HTTPException(status_code=404, detail="条目不存在")
         return {"entry": entry.to_dict(), "stats": svc.project_store(project_id).stats()}
@@ -1262,11 +1297,41 @@ def create_app(
         added = sync_context_terms_to_glossary(store.load_context(), store)
         return {"ok": True, "added": added}
 
+    def _parse_glossary_import_lines(content: str) -> list[tuple[str, str, str]]:
+        out: list[tuple[str, str, str]] = []
+        for raw in (content or "").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or line.startswith("//"):
+                continue
+            for sep in ("=", "：", "\t"):
+                if sep in line:
+                    left, right = line.split(sep, 1)
+                    t, tr = left.strip(), right.strip()
+                    if t and tr:
+                        out.append((t, tr, "术语"))
+                    break
+        return out
+
+    @app.get("/api/glossary/summary")
+    async def glossary_summary(project_id: str = ""):
+        proj_cnt = 0
+        if project_id and svc.global_store.get_project(project_id):
+            proj_cnt = len(svc.project_store(project_id).list_glossary())
+        return {
+            "project_glossary": proj_cnt,
+            "global_glossary": len(svc.global_store.list_glossary()),
+            "global_memory": svc.global_store.count_memory(),
+        }
+
     @app.get("/api/projects/{project_id}/glossary")
-    async def list_project_glossary(project_id: str):
+    async def list_project_glossary(project_id: str, search: str = ""):
         if not svc.global_store.get_project(project_id):
             raise HTTPException(status_code=404, detail="项目不存在")
-        return {"items": [i.to_dict() for i in svc.project_store(project_id).list_glossary()]}
+        items = svc.project_store(project_id).list_glossary()
+        q = search.strip().casefold()
+        if q:
+            items = [i for i in items if q in i.term.casefold() or q in i.translation.casefold() or q in i.category.casefold()]
+        return {"items": [i.to_dict() for i in items]}
 
     @app.post("/api/projects/{project_id}/glossary")
     async def upsert_project_glossary(project_id: str, req: GlossaryReq):
@@ -1279,6 +1344,36 @@ def create_app(
         )
         return {"item": item.to_dict()}
 
+    @app.put("/api/projects/{project_id}/glossary/{item_id}")
+    async def update_project_glossary(project_id: str, item_id: int, req: GlossaryReq):
+        if not svc.global_store.get_project(project_id):
+            raise HTTPException(status_code=404, detail="项目不存在")
+        if not req.term.strip() or not req.translation.strip():
+            raise HTTPException(status_code=400, detail="原文术语和译名均不能为空")
+        item = svc.project_store(project_id).update_glossary(
+            item_id, req.term, req.translation, req.category, req.note
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="术语不存在")
+        return {"item": item.to_dict()}
+
+    @app.post("/api/projects/{project_id}/glossary/import")
+    async def import_project_glossary(project_id: str, req: ImportTextReq):
+        if not svc.global_store.get_project(project_id):
+            raise HTTPException(status_code=404, detail="项目不存在")
+        store = svc.project_store(project_id)
+        pairs = _parse_glossary_import_lines(req.content)
+        for t, tr, cat in pairs:
+            store.upsert_glossary(t, tr, cat)
+        return {"ok": True, "imported": len(pairs)}
+
+    @app.delete("/api/projects/{project_id}/glossary")
+    async def clear_project_glossary(project_id: str):
+        if not svc.global_store.get_project(project_id):
+            raise HTTPException(status_code=404, detail="项目不存在")
+        removed = svc.project_store(project_id).clear_glossary()
+        return {"ok": True, "removed": removed}
+
     @app.delete("/api/projects/{project_id}/glossary/{item_id}")
     async def delete_project_glossary(project_id: str, item_id: int):
         if not svc.global_store.get_project(project_id):
@@ -1287,8 +1382,12 @@ def create_app(
         return {"ok": True}
 
     @app.get("/api/glossary")
-    async def list_global_glossary():
-        return {"items": [i.to_dict() for i in svc.global_store.list_glossary()]}
+    async def list_global_glossary(search: str = ""):
+        items = svc.global_store.list_glossary()
+        q = search.strip().casefold()
+        if q:
+            items = [i for i in items if q in i.term.casefold() or q in i.translation.casefold() or q in i.category.casefold()]
+        return {"items": [i.to_dict() for i in items]}
 
     @app.post("/api/glossary")
     async def upsert_global_glossary(req: GlossaryReq):
@@ -1297,6 +1396,27 @@ def create_app(
         item = svc.global_store.upsert_glossary(req.term, req.translation, req.category, req.note)
         return {"item": item.to_dict()}
 
+    @app.put("/api/glossary/{item_id}")
+    async def update_global_glossary(item_id: int, req: GlossaryReq):
+        if not req.term.strip() or not req.translation.strip():
+            raise HTTPException(status_code=400, detail="原文术语和译名均不能为空")
+        item = svc.global_store.update_glossary(item_id, req.term, req.translation, req.category, req.note)
+        if not item:
+            raise HTTPException(status_code=404, detail="术语不存在")
+        return {"item": item.to_dict()}
+
+    @app.post("/api/glossary/import")
+    async def import_global_glossary(req: ImportTextReq):
+        pairs = _parse_glossary_import_lines(req.content)
+        for t, tr, cat in pairs:
+            svc.global_store.upsert_glossary(t, tr, cat)
+        return {"ok": True, "imported": len(pairs)}
+
+    @app.delete("/api/glossary")
+    async def clear_global_glossary():
+        removed = svc.global_store.clear_glossary()
+        return {"ok": True, "removed": removed}
+
     @app.delete("/api/glossary/{item_id}")
     async def delete_global_glossary(item_id: int):
         svc.global_store.delete_glossary(item_id)
@@ -1304,7 +1424,25 @@ def create_app(
 
     @app.get("/api/memory")
     async def list_memory(search: str = "", limit: int = 80):
-        return {"items": svc.global_store.list_memory(search, min(200, max(1, limit)))}
+        return {
+            "items": svc.global_store.list_memory(search, min(200, max(1, limit))),
+            "total": svc.global_store.count_memory(),
+        }
+
+    @app.patch("/api/memory/{src_hash}")
+    async def update_memory_item(src_hash: str, payload: dict[str, Any]):
+        tr = str((payload or {}).get("translation") or "").strip()
+        if not tr:
+            raise HTTPException(status_code=400, detail="译文不能为空")
+        updated = svc.global_store.update_memory(src_hash, tr)
+        if not updated:
+            raise HTTPException(status_code=404, detail="记忆条目不存在")
+        return {"item": updated}
+
+    @app.delete("/api/memory")
+    async def clear_all_memory():
+        removed = svc.global_store.clear_memory()
+        return {"ok": True, "removed": removed}
 
     @app.delete("/api/memory/{src_hash}")
     async def delete_memory(src_hash: str):

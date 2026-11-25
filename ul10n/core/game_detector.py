@@ -134,6 +134,35 @@ def _resolve_player_root(root: Path, max_depth: int = 3) -> Path:
     return root
 
 
+_PROTECTION_PATTERNS = (
+    ("easyanticheat", "EasyAntiCheat"),
+    ("battleye", "BattlEye"),
+    ("beclient", "BattlEye"),
+    ("gameguard", "nProtect GameGuard"),
+    ("nprotect", "nProtect"),
+    ("ace-base", "ACE 反作弊"),
+    ("mhyprot", "反作弊保护"),
+    ("vgk", "Vanguard"),
+    ("denuvo", "Denuvo"),
+)
+
+
+def detect_protection_markers(root: Path) -> str:
+    """Detect known anti-cheat or anti-tamper modules in a game folder (pure read-only warning)."""
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return ""
+    for p in entries:
+        low = p.name.casefold()
+        for pat, label in _PROTECTION_PATTERNS:
+            if pat in low:
+                return f"检测到保护/反作弊模块 {p.name}（{label}），游戏可能禁止加载第三方汉化插件"
+        if p.is_file() and low.endswith("protect.dll"):
+            return f"检测到保护模块 {p.name}，游戏可能禁止加载第三方汉化插件"
+    return ""
+
+
 def detect_game(game_dir: str | Path) -> GameInfo:
     """Inspect a game folder (auto-descending nested wrappers) and return Unity metadata."""
     selected = Path(game_dir).resolve()
@@ -160,6 +189,7 @@ def detect_game(game_dir: str | Path) -> GameInfo:
     arch = detect_pe_arch(exe) if exe and exe.is_file() else "x64"
     unity_version = _probe_unity_version(root, data_dir) if is_unity else ""
     name = exe.stem if exe else root.name
+    protection_warning = detect_protection_markers(root) if is_unity else ""
 
     return GameInfo(
         game_dir=str(root),
@@ -171,6 +201,7 @@ def detect_game(game_dir: str | Path) -> GameInfo:
         unity_version=unity_version,
         is_unity=is_unity,
         recommended_loader="bepinex",
+        protection_warning=protection_warning,
     )
 
 

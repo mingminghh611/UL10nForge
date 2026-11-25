@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Unity-Mono%20%7C%20IL2CPP-000000?style=flat-square&logo=unity&logoColor=white" alt="Unity Mono & IL2CPP" />
   <img src="https://img.shields.io/badge/Backend-FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Windows" />
-  <img src="https://img.shields.io/badge/Tests-19%20Passing-2ea87e?style=flat-square" alt="Tests Passing" />
+  <img src="https://img.shields.io/badge/Tests-20%20Passing-2ea87e?style=flat-square" alt="Tests Passing" />
 </p>
 
 <p>

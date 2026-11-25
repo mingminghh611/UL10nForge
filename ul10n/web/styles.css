@@ -833,10 +833,48 @@ html, body {
 }
 .page-btns { display: flex; gap: 6px; }
 
+.protection-banner {
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  color: var(--warn);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.entry-textarea.is-skipped {
+  opacity: 0.55;
+  cursor: not-allowed;
+  font-style: italic;
+}
+
 /* ── Glossary & Memory ─────────────────────────────────────────────── */
+
+.glossary-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.glossary-top-actions { display: flex; align-items: center; gap: 6px; }
+.glossary-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
 
 .subtab-bar { display: flex; gap: 6px; margin-bottom: 14px; }
 .subtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 7px 14px;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -855,13 +893,34 @@ html, body {
 .simple-row {
   display: grid;
   grid-template-columns: 1fr 1fr auto auto;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
-  padding: 10px 14px;
+  padding: 8px 12px;
   border-radius: 9px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
 }
+.inline-edit-input, .inline-edit-select {
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.14s, background 0.14s;
+}
+.inline-edit-input:hover, .inline-edit-select:hover {
+  border-color: var(--border);
+  background: var(--bg-input);
+}
+.inline-edit-input:focus, .inline-edit-select:focus {
+  border-color: var(--accent);
+  background: var(--bg-input);
+}
+.inline-edit-select { width: auto; min-width: 72px; color: var(--text-secondary); cursor: pointer; }
 
 /* ── Settings ──────────────────────────────────────────────────────── */
 

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>UL10nForge · Unity 汉化工作台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2.2" />
+  <link rel="stylesheet" href="/static/styles.css?v=2.4" />
 </head>
 <body>
   <div class="app-shell">
@@ -141,6 +141,8 @@
                 <span class="status-pill" id="wb-hook-pill">未接入</span>
               </div>
 
+              <div class="protection-banner" id="wb-protection-warn" hidden></div>
+
               <!-- Progress Ring + Clean Stats -->
               <div class="progress-panel">
                 <div class="ring-wrap">
@@ -274,12 +276,12 @@
             </div>
 
             <div class="filter-pills" id="editor-filters">
-              <button class="pill active" data-status="all">全部状态</button>
+              <button class="pill active" data-status="all">全部</button>
               <button class="pill" data-status="pending">待翻译 <span class="pill-count tabular" data-count="pending">0</span></button>
               <button class="pill" data-status="translated">已翻译 <span class="pill-count tabular" data-count="translated">0</span></button>
-              <button class="pill" data-status="edited">已精修 <span class="pill-count tabular" data-count="edited">0</span></button>
-              <button class="pill" data-status="flagged">需复核 <span class="pill-count tabular" data-count="flagged">0</span></button>
-              <button class="pill" data-status="failed">失败 <span class="pill-count tabular" data-count="failed">0</span></button>
+              <button class="pill" data-status="reviewed">已审校 <span class="pill-count tabular" data-count="reviewed">0</span></button>
+              <button class="pill" data-status="edited">已修改 <span class="pill-count tabular" data-count="edited">0</span></button>
+              <button class="pill" data-status="attention">需处理 <span class="pill-count tabular" data-count="attention">0</span></button>
               <button class="pill" data-status="skipped">不翻译 <span class="pill-count tabular" data-count="skipped">0</span></button>
             </div>
           </div>
@@ -303,31 +305,48 @@
 
         <!-- TAB 3: GLOSSARY & MEMORY -->
         <section id="tab-glossary" class="tab-view" hidden>
-          <div class="subtab-bar">
-            <button class="subtab active" data-subtab="project-glossary">本游戏术语</button>
-            <button class="subtab" data-subtab="global-glossary">全局术语库</button>
-            <button class="subtab" data-subtab="global-memory">跨游戏翻译记忆</button>
+          <div class="glossary-topbar">
+            <div class="subtab-bar" style="margin-bottom:0">
+              <button class="subtab active" data-subtab="project-glossary">本游戏术语 <span class="pill-count tabular" id="cnt-proj-glossary">0</span></button>
+              <button class="subtab" data-subtab="global-glossary">全局术语库 <span class="pill-count tabular" id="cnt-glob-glossary">0</span></button>
+              <button class="subtab" data-subtab="global-memory">跨游戏翻译记忆 <span class="pill-count tabular" id="cnt-global-memory">0</span></button>
+            </div>
+            <div class="glossary-top-actions">
+              <button class="btn btn-subtle btn-sm" id="btn-glossary-import">批量导入</button>
+              <button class="btn btn-ghost btn-sm danger-hover" id="btn-glossary-clear">清空全部</button>
+            </div>
           </div>
 
           <div class="card" id="panel-glossary">
-            <form class="inline-form" id="form-add-term">
-              <input class="input" id="term-src" placeholder="原文专名（如 Excalibur）" required />
-              <input class="input" id="term-dst" placeholder="固定译名（如 誓约胜利之剑）" required />
-              <select class="input input-sm" id="term-cat">
-                <option value="术语">术语</option>
-                <option value="角色">角色</option>
-                <option value="地名">地名</option>
-                <option value="物品">物品</option>
-                <option value="UI">UI</option>
-              </select>
-              <button class="btn btn-primary" type="submit">添加术语</button>
-            </form>
+            <div class="glossary-tools">
+              <div class="search-box" style="max-width:300px">
+                <svg viewBox="0 0 20 20" fill="none"><circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M13.5 13.5L17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                <input id="glossary-search" type="text" placeholder="搜索术语原文或译名…" />
+              </div>
+              <form class="inline-form" id="form-add-term" style="margin-bottom:0;flex:1">
+                <input class="input" id="term-src" placeholder="原文专名（如 Excalibur）" required />
+                <input class="input" id="term-dst" placeholder="固定译名（如 誓约胜利之剑）" required />
+                <select class="input input-sm" id="term-cat">
+                  <option value="术语">术语</option>
+                  <option value="角色">角色</option>
+                  <option value="地名">地名</option>
+                  <option value="物品">物品</option>
+                  <option value="UI">UI</option>
+                </select>
+                <button class="btn btn-primary" type="submit">添加</button>
+              </form>
+            </div>
+            <p class="muted-hint" style="margin:0 0 10px;font-size:12px">点击任意术语的原文、译名或分类即可直接修改，回车或失焦自动保存。</p>
             <div id="glossary-list" class="simple-list"></div>
           </div>
 
           <div class="card" id="panel-memory" hidden>
-            <div class="inline-form">
-              <input class="input" id="memory-search" placeholder="搜索已沉淀的跨游戏记忆…" />
+            <div class="glossary-tools">
+              <div class="search-box" style="max-width:360px">
+                <svg viewBox="0 0 20 20" fill="none"><circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M13.5 13.5L17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+                <input id="memory-search" type="text" placeholder="搜索已沉淀的跨游戏记忆…" />
+              </div>
+              <span class="muted-hint" style="font-size:12px">直接修改译文并回车/失焦即可更新，所有游戏共用。</span>
             </div>
             <div id="memory-list" class="simple-list"></div>
           </div>
@@ -539,10 +558,10 @@
       <div class="export-section" style="margin-top:0">
         <div class="export-section-title">文本导出范围</div>
         <select id="export-scope" class="input">
-          <option value="done">已翻译与人工精修词条（推荐）</option>
+          <option value="done">已翻译与已修改词条（推荐）</option>
           <option value="all">全部词条（含待翻）</option>
           <option value="live">仅游戏内实时翻译词条</option>
-          <option value="edited">仅人工精修词条</option>
+          <option value="edited">仅玩家已修改词条</option>
         </select>
       </div>
 
@@ -598,7 +617,7 @@
         <input class="input" id="replace-with" placeholder="替换为（如 镜头）" />
         <label class="inline-check">
           <input type="checkbox" id="replace-only-unlocked" />
-          <span>跳过已人工精修的词条</span>
+          <span>跳过玩家已手动修改的词条</span>
         </label>
       </div>
       <div class="modal-foot">
@@ -634,6 +653,22 @@
     </div>
   </div>
 
+  <!-- Modal: Batch Import Glossary -->
+  <div class="modal-backdrop" id="modal-glossary-import" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <h3>批量导入术语</h3>
+        <button class="btn-icon-sm" data-close-modal="modal-glossary-import">✕</button>
+      </div>
+      <p class="muted-hint">每行一条，格式 <code>原文=固定译名</code>（支持 <code>=</code>、<code>：</code> 或 Tab 分隔）。</p>
+      <textarea id="glossary-import-text" class="textarea" rows="8" placeholder="Lighthouse=灯塔&#10;Excalibur=誓约胜利之剑&#10;Sanity=理智值"></textarea>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" data-close-modal="modal-glossary-import">取消</button>
+        <button class="btn btn-primary" id="btn-confirm-glossary-import">导入术语</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Command Palette (Ctrl+K) -->
   <div class="modal-backdrop" id="modal-cmd" hidden>
     <div class="cmd-palette">
@@ -645,6 +680,6 @@
   <!-- Toast Container -->
   <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 
-  <script type="module" src="/static/app.js?v=2.3"></script>
+  <script type="module" src="/static/app.js?v=2.4"></script>
 </body>
 </html>

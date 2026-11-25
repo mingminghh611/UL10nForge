@@ -787,3 +787,123 @@ def test_cloud_api_pipeline_token_batching_and_rereview(tmp_path: Path):
                 time.sleep(0.05)
 
 
+def test_v2_4_compatibility_skip_reviewed_glossary_and_memory_crud(tmp_path: Path):
+    from ul10n.core.game_detector import GameInfo, detect_protection_markers
+    from ul10n.core.hook_deployer import deploy_hook, refresh_hook_config
+
+    # 1. Anti-tamper/protection warning detection + safe IL2CPP XUAT & BepInEx config refresh
+    prot_dir = tmp_path / "ProtectedGame"
+    (prot_dir / "ProtectedGame_Data").mkdir(parents=True)
+    (prot_dir / "GameAssembly.dll").write_bytes(b"MZ")
+    (prot_dir / "CARLProtect.dll").write_bytes(b"MZ")
+    warn = detect_protection_markers(prot_dir)
+    assert "CARLProtect.dll" in warn
+
+    il2_info = GameInfo(
+        game_dir=str(prot_dir),
+        name="ProtectedGame",
+        executable=str(prot_dir / "ProtectedGame.exe"),
+        data_dir=str(prot_dir / "ProtectedGame_Data"),
+        runtime_type="il2cpp",
+        arch="x86",
+        unity_version="2021.1.15f1",
+    )
+    dep = deploy_hook(il2_info, app_root=APP_ROOT, project_id="p_safe", server_port=18765)
+    xuat_cfg = Path(dep.config_path).read_text(encoding="utf-8")
+    assert "DisableTextMeshProScrollInEffects=True" in xuat_cfg
+    assert "EnableTranslationScoping=False" in xuat_cfg
+    assert "EnableTextureTranslation=False" in xuat_cfg
+    assert "CacheMetadataForAllFiles=False" in xuat_cfg
+
+    # Simulate legacy BepInEx.cfg with UnityLogListening=true & Console Enabled=true -> refresh heals both
+    bep_cfg_path = prot_dir / "BepInEx" / "config" / "BepInEx.cfg"
+    bep_cfg_path.write_text(
+        "[Logging]\nUnityLogListening = true\n\n[Logging.Console]\nEnabled = true\n",
+        encoding="utf-8",
+    )
+    refresh_hook_config(il2_info, app_root=APP_ROOT, project_id="p_safe", server_port=18765)
+    healed_bep = bep_cfg_path.read_text(encoding="utf-8")
+    assert "UnityLogListening = false" in healed_bep
+    assert "Enabled = false" in healed_bep
+
+    # 2. API tests: XUAT failsafe (never 500/empty), skip/unskip, reviewed/attention filters, glossary/memory CRUD
+    game_dir = tmp_path / "UxGame"
+    (game_dir / "UxGame_Data" / "Managed").mkdir(parents=True)
+    app = create_app(app_root=APP_ROOT, data_dir=tmp_path / "data")
+    svc = app.state.services
+
+    with TestClient(app) as client:
+        pid = client.post("/api/projects/open", json={"game_dir": str(game_dir)}).json()["project"]["id"]
+        store = svc.project_store(pid)
+        e1 = store.upsert_entry("0 ALIVE", "0 存活", status=STATUS_TRANSLATED, review_level="PASS")
+        e2 = store.upsert_entry("Broken line", "", status="failed")
+        e3 = store.upsert_entry("Logo Title", "标志标题", status=STATUS_TRANSLATED)
+
+        # Skip clears translation (preserves prev_translation); XUAT returns original with HTTP 200
+        r_skip = client.post(f"/api/projects/{pid}/entries/{e3.id}/skip")
+        assert r_skip.status_code == 200
+        assert r_skip.json()["entry"]["status"] == "skipped"
+        assert r_skip.json()["entry"]["translation"] == ""
+        assert r_skip.json()["entry"]["prev_translation"] == "标志标题"
+
+        r_xuat_skip = client.get(f"/xuat/translate/{pid}", params={"text": "Logo Title"})
+        assert r_xuat_skip.status_code == 200
+        assert r_xuat_skip.text == "Logo Title"
+
+        # Unskip restores previous translation cleanly
+        r_unskip = client.post(f"/api/projects/{pid}/entries/{e3.id}/unskip")
+        assert r_unskip.status_code == 200
+        assert r_unskip.json()["entry"]["status"] == "translated"
+        assert r_unskip.json()["entry"]["translation"] == "标志标题"
+
+        # XUAT failsafe: even when LLM raises an exception, endpoint returns HTTP 200 with original text
+        with patch.object(svc.runtime, "create_client_for_role", side_effect=RuntimeError("model offline")):
+            r_err = client.get(f"/xuat/translate/{pid}", params={"text": "Transient HUD text"})
+            assert r_err.status_code == 200
+            assert r_err.text == "Transient HUD text"
+
+        # Reviewed & attention filters + stats
+        r_rev = client.get(f"/api/projects/{pid}/entries", params={"status": "reviewed"}).json()
+        assert r_rev["total"] == 1
+        assert r_rev["stats"]["reviewed"] == 1
+        r_att = client.get(f"/api/projects/{pid}/entries", params={"status": "attention"}).json()
+        assert r_att["total"] >= 1
+        assert r_att["stats"]["attention"] == r_att["total"]
+
+        # Glossary edit, batch import, search & one-click clear
+        g_item = client.post(
+            f"/api/projects/{pid}/glossary",
+            json={"term": "Keeper", "translation": "看守者", "category": "角色"},
+        ).json()["item"]
+        g_upd = client.put(
+            f"/api/projects/{pid}/glossary/{g_item['id']}",
+            json={"term": "The Keeper", "translation": "守灯人", "category": "角色"},
+        )
+        assert g_upd.status_code == 200
+        assert g_upd.json()["item"]["term"] == "The Keeper"
+        assert g_upd.json()["item"]["translation"] == "守灯人"
+
+        r_imp = client.post(
+            f"/api/projects/{pid}/glossary/import",
+            json={"content": "Sanity=理智值\nLantern：提灯\n"},
+        )
+        assert r_imp.status_code == 200 and r_imp.json()["imported"] == 2
+        assert len(client.get(f"/api/projects/{pid}/glossary", params={"search": "提灯"}).json()["items"]) == 1
+
+        r_clr_g = client.delete(f"/api/projects/{pid}/glossary")
+        assert r_clr_g.status_code == 200 and r_clr_g.json()["removed"] == 3
+        assert client.get(f"/api/projects/{pid}/glossary").json()["items"] == []
+
+        # Global memory edit & one-click clear
+        svc.global_store.put_memory("Hello world", "你好世界", "zh-CN", source="ai")
+        mems = client.get("/api/memory").json()["items"]
+        assert len(mems) == 1
+        r_m_upd = client.patch(f"/api/memory/{mems[0]['src_hash']}", json={"translation": "世界你好"})
+        assert r_m_upd.status_code == 200
+        assert r_m_upd.json()["item"]["translation"] == "世界你好"
+        r_m_clr = client.delete("/api/memory")
+        assert r_m_clr.status_code == 200 and r_m_clr.json()["removed"] == 1
+        assert client.get("/api/memory").json()["total"] == 0
+
+
+

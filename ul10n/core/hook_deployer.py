@@ -5,6 +5,7 @@ in a manifest so uninstall restores the game directory to 100% original state.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import zipfile
 from dataclasses import dataclass
@@ -161,7 +162,18 @@ def _build_xuat_config(
         "EnableTextAssetRedirector=False\n"
         "EnableSafeMode=True\n"
         "EnableSilentMode=True\n"
+        "EnableTranslationScoping=False\n"
+        "DisableTextMeshProScrollInEffects=True\n"
         "ReloadTranslationsOnFileChange=True\n"
+        "\n"
+        "[Texture]\n"
+        "EnableTextureTranslation=False\n"
+        "EnableSpriteRendererHooking=False\n"
+        "EnableSpriteHooking=False\n"
+        "\n"
+        "[ResourceRedirector]\n"
+        "EnableTextAssetRedirector=False\n"
+        "CacheMetadataForAllFiles=False\n"
         f"{custom_block}"
     )
 
@@ -276,6 +288,27 @@ def deploy_hook(
         if not existed:
             created_files.append(rel_ttf)
 
+    # Optional offline Cpp2IL pre-placement for MelonLoader (avoids GitHub download failure)
+    if chosen_loader == "melonloader":
+        kits_dir = app_root / "resources" / "hook_kits"
+        cpp2il_cands = sorted(kits_dir.glob("Cpp2IL*.exe")) if kits_dir.is_dir() else []
+        if cpp2il_cands:
+            cpp2il_dst = (
+                game_dir
+                / "MelonLoader"
+                / "Dependencies"
+                / "Il2CppAssemblyGenerator"
+                / "Cpp2IL"
+                / "Cpp2IL.exe"
+            )
+            cpp2il_dst.parent.mkdir(parents=True, exist_ok=True)
+            existed = cpp2il_dst.exists()
+            shutil.copy2(cpp2il_cands[0], cpp2il_dst)
+            rel_cpp = cpp2il_dst.relative_to(game_dir).as_posix()
+            written_files.append(rel_cpp)
+            if not existed:
+                created_files.append(rel_cpp)
+
     # Write safe BepInEx.cfg on fresh BepInEx deploy (disables UnityLogListening to prevent IL2CPP hook conflicts)
     if chosen_loader == "bepinex" and not preexisting_loader:
         bep_cfg = game_dir / "BepInEx" / "config" / "BepInEx.cfg"
@@ -372,6 +405,14 @@ def refresh_hook_config(
             try:
                 raw_bep = bep_cfg.read_text(encoding="utf-8", errors="ignore")
                 patched = raw_bep.replace("UnityLogListening = true", "UnityLogListening = false")
+                # Also silence BepInEx popup console window to prevent console clutter/encoding issues
+                patched = re.sub(
+                    r"(\[Logging\.Console\][\s\S]*?\nEnabled\s*=\s*)true\b",
+                    r"\1false",
+                    patched,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
                 if patched != raw_bep:
                     bep_cfg.write_text(patched, encoding="utf-8", newline="\n")
             except OSError:

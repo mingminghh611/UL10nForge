@@ -223,9 +223,11 @@ class TranslationPipeline:
             )
             return TranslationOutcome(entry, original, from_cache=True, ok=True)
 
-        # 2. Existing project entry cache (locked/edited always wins unless force)
+        # 2. Existing project entry cache (skipped / locked / edited / translated always wins unless force)
         existing = self.project_store.get_by_original(original)
         if existing and not force_retranslate:
+            if existing.status == STATUS_SKIPPED:
+                return TranslationOutcome(existing, original, from_cache=True, ok=True)
             if existing.locked or existing.status in (STATUS_EDITED, STATUS_TRANSLATED):
                 if existing.translation:
                     if source == "xuat_live" and existing.id:
@@ -348,6 +350,12 @@ class TranslationPipeline:
                 continue
             if not force_retranslate:
                 existing = self.project_store.get_by_original(orig)
+                if existing and existing.status == STATUS_SKIPPED:
+                    oc = TranslationOutcome(existing, orig, from_cache=True, ok=True)
+                    outcomes.append(oc)
+                    if on_item:
+                        on_item(oc)
+                    continue
                 if existing and (existing.locked or existing.status in (STATUS_EDITED, STATUS_TRANSLATED)) and existing.translation:
                     oc = TranslationOutcome(existing, existing.translation, from_cache=True, ok=True)
                     outcomes.append(oc)

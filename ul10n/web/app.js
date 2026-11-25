@@ -28,8 +28,8 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const STATUS_LABELS = {
   pending: "待翻译",
   translated: "已翻译",
-  edited: "已精修",
-  flagged: "需复核",
+  edited: "已修改",
+  flagged: "需处理",
   failed: "失败",
   skipped: "不翻译",
 };
@@ -174,6 +174,8 @@ function renderWorkbench() {
     failed: 0,
     translated: 0,
     edited: 0,
+    reviewed: 0,
+    attention: 0,
     skipped: 0,
     static: 0,
     live: 0,
@@ -191,6 +193,16 @@ function renderWorkbench() {
   const hookPill = $("#wb-hook-pill");
   hookPill.textContent = p.hook_deployed ? "已接入 · 可直接游玩" : "待启动时自动接入";
   hookPill.classList.toggle("deployed", Boolean(p.hook_deployed));
+
+  const protWarn = $("#wb-protection-warn");
+  if (protWarn) {
+    if (p.protection_warning) {
+      protWarn.textContent = `⚠ ${p.protection_warning}`;
+      protWarn.hidden = false;
+    } else {
+      protWarn.hidden = true;
+    }
+  }
 
   $("#btn-uninstall-hook").hidden = !p.hook_deployed;
 
@@ -498,10 +510,16 @@ function buildEntryBadgesHtml(e) {
     e.source === "xuat_live"
       ? `<span class="badge live">实时</span>`
       : `<span class="badge static">静态</span>`;
+  const revBadge =
+    e.status !== "skipped" && e.review_level === "FIXED"
+      ? `<span class="badge translated">已审校·已修正</span>`
+      : e.status !== "skipped" && e.review_level === "PASS"
+      ? `<span class="badge">已审校</span>`
+      : "";
   return (
     srcBadge +
     `<span class="badge ${escapeHtml(e.status)}">${STATUS_LABELS[e.status] || e.status}</span>` +
-    (e.review_level === "FIXED" ? `<span class="badge translated">已修正</span>` : "")
+    revBadge
   );
 }
 
@@ -540,24 +558,26 @@ function renderEditorList() {
           : e.quality_note
           ? `<div class="entry-note fail">提示：${escapeHtml(e.quality_note)}</div>`
           : "";
-        const hasPrev = Boolean((e.prev_translation || "").trim() && e.prev_translation !== e.translation);
-        const skipToggleHtml =
-          e.status === "skipped"
-            ? `<button class="row-btn btn-unskip-row" title="恢复翻译此条">恢复</button>`
-            : `<button class="row-btn btn-skip-row" title="标记为不翻译，保留游戏原文">不翻</button>`;
+        const isSkipped = e.status === "skipped";
+        const hasPrev = Boolean(!isSkipped && (e.prev_translation || "").trim() && e.prev_translation !== e.translation);
+        const skipToggleHtml = isSkipped
+          ? `<button class="row-btn btn-unskip-row" title="恢复翻译此条">恢复</button>`
+          : `<button class="row-btn btn-skip-row" title="标记为不翻译，游戏中保留原文">不翻</button>`;
+        const taVal = isSkipped ? "" : e.translation;
+        const taPlaceholder = isSkipped ? "已设为不翻译，游戏中将保留原文" : "输入译文…";
         return `
-          <div class="entry-row" data-id="${e.id}" data-source="${escapeHtml(e.source || "")}" data-has-tr="${e.translation ? "1" : "0"}">
+          <div class="entry-row" data-id="${e.id}" data-source="${escapeHtml(e.source || "")}">
             <div>
               <div class="entry-orig">${escapeHtml(e.original)}</div>
               ${noteHtml}
             </div>
             <div class="entry-tr-wrap">
-              <textarea class="entry-textarea" rows="1" data-orig-val="${escapeHtml(e.translation)}" placeholder="输入译文…">${escapeHtml(e.translation)}</textarea>
+              <textarea class="entry-textarea ${isSkipped ? "is-skipped" : ""}" rows="1" ${isSkipped ? "disabled" : ""} data-orig-val="${escapeHtml(taVal)}" placeholder="${taPlaceholder}">${escapeHtml(taVal)}</textarea>
               <div class="entry-badges">${buildEntryBadgesHtml(e)}</div>
             </div>
             <div class="entry-actions">
               <button class="row-btn btn-save-row" hidden>保存</button>
-              <button class="row-btn btn-retrans-row" title="重新翻译">重译</button>
+              ${isSkipped ? "" : `<button class="row-btn btn-retrans-row" title="重新翻译">重译</button>`}
               ${hasPrev ? `<button class="row-btn btn-undo-row" title="还原为：${escapeHtml(e.prev_translation)}">还原</button>` : ""}
               ${skipToggleHtml}
             </div>
@@ -628,29 +648,31 @@ function renderEditorList() {
 
     saveBtn.addEventListener("click", saveIfDirty);
 
-    retransBtn.addEventListener("click", async () => {
-      retransBtn.disabled = true;
-      retransBtn.textContent = "翻译中…";
-      try {
-        const res = await api(`/api/projects/${state.project.id}/entries/${id}/retranslate`, {
-          method: "POST",
-          body: {},
-        });
-        ta.value = res.entry.translation;
-        ta.dataset.origVal = res.entry.translation;
-        autoResize();
-        state.stats = res.stats;
-        const badges = row.querySelector(".entry-badges");
-        badges.innerHTML = buildEntryBadgesHtml(res.entry);
-        renderWorkbench();
-        toast(res.ok ? "重译完成" : `重译提醒：${res.note}`, res.ok ? "ok" : "err");
-      } catch (err) {
-        toast(err.message, "err");
-      } finally {
-        retransBtn.disabled = false;
-        retransBtn.textContent = "重译";
-      }
-    });
+    if (retransBtn) {
+      retransBtn.addEventListener("click", async () => {
+        retransBtn.disabled = true;
+        retransBtn.textContent = "翻译中…";
+        try {
+          const res = await api(`/api/projects/${state.project.id}/entries/${id}/retranslate`, {
+            method: "POST",
+            body: {},
+          });
+          ta.value = res.entry.translation;
+          ta.dataset.origVal = res.entry.translation;
+          autoResize();
+          state.stats = res.stats;
+          const badges = row.querySelector(".entry-badges");
+          badges.innerHTML = buildEntryBadgesHtml(res.entry);
+          renderWorkbench();
+          toast(res.ok ? "重译完成" : `重译提醒：${res.note}`, res.ok ? "ok" : "err");
+        } catch (err) {
+          toast(err.message, "err");
+        } finally {
+          retransBtn.disabled = false;
+          retransBtn.textContent = "重译";
+        }
+      });
+    }
 
     if (undoBtn) {
       undoBtn.addEventListener("click", async () => {
@@ -671,7 +693,7 @@ function renderEditorList() {
           const res = await api(`/api/projects/${state.project.id}/entries/${id}/skip`, { method: "POST" });
           state.stats = res.stats;
           loadEntries();
-          toast("已标记为不翻译，游戏中将保留原文");
+          toast("已设为不翻译，游戏中将保留原文");
         } catch (err) {
           toast(err.message, "err");
         }
@@ -681,11 +703,7 @@ function renderEditorList() {
     if (unskipBtn) {
       unskipBtn.addEventListener("click", async () => {
         try {
-          const nextStatus = row.dataset.hasTr === "1" ? "translated" : "pending";
-          const res = await api(`/api/projects/${state.project.id}/entries/${id}`, {
-            method: "PATCH",
-            body: { status: nextStatus, locked: false },
-          });
+          const res = await api(`/api/projects/${state.project.id}/entries/${id}/unskip`, { method: "POST" });
           state.stats = res.stats;
           loadEntries();
           toast("已恢复该词条");
@@ -707,11 +725,27 @@ function renderEditorList() {
 
 /* ── Glossary & Memory ─────────────────────────────────────────────── */
 
+const GLOSSARY_CATS = ["术语", "角色", "地名", "物品", "UI"];
+
+async function refreshGlossaryCounts() {
+  try {
+    const pid = state.project ? encodeURIComponent(state.project.id) : "";
+    const sum = await api(`/api/glossary/summary?project_id=${pid}`);
+    $("#cnt-proj-glossary").textContent = sum.project_glossary ?? 0;
+    $("#cnt-glob-glossary").textContent = sum.global_glossary ?? 0;
+    $("#cnt-global-memory").textContent = sum.global_memory ?? 0;
+  } catch {
+    // ignore
+  }
+}
+
 async function loadGlossaryView() {
   const sub = state.glossarySubtab;
   const isMem = sub === "global-memory";
   $("#panel-glossary").hidden = isMem;
   $("#panel-memory").hidden = !isMem;
+  $("#btn-glossary-import").hidden = isMem;
+  refreshGlossaryCounts();
 
   if (isMem) {
     const q = encodeURIComponent($("#memory-search").value.trim());
@@ -724,15 +758,42 @@ async function loadGlossaryView() {
     list.innerHTML = data.items
       .map(
         (m) => `
-        <div class="simple-row">
-          <span class="feed-orig">${escapeHtml(m.original)}</span>
-          <span class="feed-tr">${escapeHtml(m.translation)}</span>
-          <span class="badge">${m.source === "manual" ? "人工精修" : "AI"}</span>
+        <div class="simple-row" data-mem-hash="${escapeHtml(m.src_hash)}">
+          <span class="feed-orig" title="${escapeHtml(m.original)}">${escapeHtml(m.original)}</span>
+          <input class="inline-edit-input mem-tr-input" value="${escapeHtml(m.translation)}" data-orig="${escapeHtml(m.translation)}" />
+          <span class="badge">${m.source === "manual" ? "已修改" : "AI"}</span>
           <button class="btn-icon-sm danger-hover" data-del-mem="${escapeHtml(m.src_hash)}">删除</button>
         </div>
       `
       )
       .join("");
+    $$(".mem-tr-input").forEach((inp) => {
+      const saveMem = async () => {
+        const val = inp.value.trim();
+        if (!val || val === inp.dataset.orig) {
+          inp.value = inp.dataset.orig;
+          return;
+        }
+        const hash = inp.closest(".simple-row").dataset.memHash;
+        try {
+          await api(`/api/memory/${hash}`, { method: "PATCH", body: { translation: val } });
+          inp.dataset.orig = val;
+          const badge = inp.closest(".simple-row").querySelector(".badge");
+          if (badge) badge.textContent = "已修改";
+          toast("翻译记忆已更新");
+        } catch (err) {
+          toast(err.message, "err");
+          inp.value = inp.dataset.orig;
+        }
+      };
+      inp.addEventListener("blur", saveMem);
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          inp.blur();
+        }
+      });
+    });
     $$("[data-del-mem]").forEach((b) =>
       b.addEventListener("click", async () => {
         await api(`/api/memory/${b.dataset.delMem}`, { method: "DELETE" });
@@ -746,28 +807,75 @@ async function loadGlossaryView() {
     $("#glossary-list").innerHTML = `<div class="feed-empty">请先打开一个游戏项目。</div>`;
     return;
   }
-  const url = sub === "project-glossary" ? `/api/projects/${state.project.id}/glossary` : "/api/glossary";
-  const data = await api(url);
+  const baseUrl = sub === "project-glossary" ? `/api/projects/${state.project.id}/glossary` : "/api/glossary";
+  const q = encodeURIComponent($("#glossary-search").value.trim());
+  const data = await api(`${baseUrl}?search=${q}`);
   const list = $("#glossary-list");
   if (!data.items.length) {
-    list.innerHTML = `<div class="feed-empty">暂无术语。添加角色名或专有名词后，翻译会自动保持前后一致。</div>`;
+    list.innerHTML = `<div class="feed-empty">${q ? "未找到匹配的术语。" : "暂无术语。添加角色名或专有名词后，翻译与审校会自动保持一致。"}</div>`;
     return;
   }
   list.innerHTML = data.items
-    .map(
-      (g) => `
-      <div class="simple-row">
-        <span class="feed-orig">${escapeHtml(g.term)}</span>
-        <span class="feed-tr">${escapeHtml(g.translation)}</span>
-        <span class="badge">${escapeHtml(g.category)}</span>
-        <button class="btn-icon-sm danger-hover" data-del-term="${g.id}">删除</button>
-      </div>
-    `
-    )
+    .map((g) => {
+      const catOpts = GLOSSARY_CATS.map(
+        (c) => `<option value="${c}" ${g.category === c ? "selected" : ""}>${c}</option>`
+      ).join("");
+      return `
+        <div class="simple-row" data-term-id="${g.id}">
+          <input class="inline-edit-input term-src-edit" value="${escapeHtml(g.term)}" data-orig="${escapeHtml(g.term)}" />
+          <input class="inline-edit-input term-dst-edit" value="${escapeHtml(g.translation)}" data-orig="${escapeHtml(g.translation)}" />
+          <select class="inline-edit-select term-cat-edit" data-orig="${escapeHtml(g.category)}">${catOpts}</select>
+          <button class="btn-icon-sm danger-hover" data-del-term="${g.id}">删除</button>
+        </div>
+      `;
+    })
     .join("");
+
+  $$("#glossary-list .simple-row").forEach((row) => {
+    const id = row.dataset.termId;
+    const srcInp = row.querySelector(".term-src-edit");
+    const dstInp = row.querySelector(".term-dst-edit");
+    const catSel = row.querySelector(".term-cat-edit");
+    const saveTerm = async () => {
+      const term = srcInp.value.trim();
+      const translation = dstInp.value.trim();
+      const category = catSel.value;
+      if (term === srcInp.dataset.orig && translation === dstInp.dataset.orig && category === catSel.dataset.orig) {
+        return;
+      }
+      if (!term || !translation) {
+        srcInp.value = srcInp.dataset.orig;
+        dstInp.value = dstInp.dataset.orig;
+        return toast("原文和译名均不能为空", "err");
+      }
+      try {
+        await api(`${baseUrl}/${id}`, { method: "PUT", body: { term, translation, category } });
+        srcInp.dataset.orig = term;
+        dstInp.dataset.orig = translation;
+        catSel.dataset.orig = category;
+        toast("术语已更新");
+      } catch (err) {
+        toast(err.message, "err");
+        srcInp.value = srcInp.dataset.orig;
+        dstInp.value = dstInp.dataset.orig;
+        catSel.value = catSel.dataset.orig;
+      }
+    };
+    [srcInp, dstInp].forEach((inp) => {
+      inp.addEventListener("blur", saveTerm);
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          inp.blur();
+        }
+      });
+    });
+    catSel.addEventListener("change", saveTerm);
+  });
+
   $$("[data-del-term]").forEach((b) =>
     b.addEventListener("click", async () => {
-      await api(`${url}/${b.dataset.delTerm}`, { method: "DELETE" });
+      await api(`${baseUrl}/${b.dataset.delTerm}`, { method: "DELETE" });
       loadGlossaryView();
     })
   );
@@ -1436,6 +1544,62 @@ function bindEvents() {
       $("#term-dst").value = "";
       loadGlossaryView();
       toast("术语已添加");
+    } catch (err) {
+      toast(err.message, "err");
+    }
+  });
+
+  let glosTimer = null;
+  $("#glossary-search").addEventListener("input", () => {
+    clearTimeout(glosTimer);
+    glosTimer = setTimeout(loadGlossaryView, 180);
+  });
+
+  $("#btn-glossary-import").addEventListener("click", () => {
+    if (state.glossarySubtab === "project-glossary" && !state.project) {
+      return toast("请先打开一个游戏项目", "err");
+    }
+    $("#glossary-import-text").value = "";
+    openModal("modal-glossary-import");
+    $("#glossary-import-text").focus();
+  });
+
+  $("#btn-confirm-glossary-import").addEventListener("click", async () => {
+    const content = $("#glossary-import-text").value;
+    if (!content.trim()) return toast("请输入要导入的术语内容", "err");
+    const isProj = state.glossarySubtab === "project-glossary";
+    const url = isProj ? `/api/projects/${state.project.id}/glossary/import` : "/api/glossary/import";
+    try {
+      const res = await api(url, { method: "POST", body: { content } });
+      closeModal("modal-glossary-import");
+      loadGlossaryView();
+      toast(res.imported > 0 ? `已批量导入 ${res.imported} 条术语` : "未识别到「原文=译名」格式的行");
+    } catch (err) {
+      toast(err.message, "err");
+    }
+  });
+
+  $("#btn-glossary-clear").addEventListener("click", async () => {
+    const sub = state.glossarySubtab;
+    if (sub === "project-glossary" && !state.project) {
+      return toast("请先打开一个游戏项目", "err");
+    }
+    const labels = {
+      "project-glossary": `本游戏（${state.project?.name || ""}）的全部术语`,
+      "global-glossary": "全局术语库的全部术语",
+      "global-memory": "跨游戏翻译记忆的全部记录",
+    };
+    if (!confirm(`确定一键清空${labels[sub]}？此操作不可撤销。`)) return;
+    const url =
+      sub === "project-glossary"
+        ? `/api/projects/${state.project.id}/glossary`
+        : sub === "global-glossary"
+        ? "/api/glossary"
+        : "/api/memory";
+    try {
+      const res = await api(url, { method: "DELETE" });
+      loadGlossaryView();
+      toast(`已清空 ${res.removed ?? 0} 条记录`);
     } catch (err) {
       toast(err.message, "err");
     }

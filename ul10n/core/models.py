@@ -33,6 +33,7 @@ class GameInfo:
     unity_version: str = ""
     is_unity: bool = False
     recommended_loader: str = "bepinex"  # bepinex | melonloader
+    protection_warning: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
