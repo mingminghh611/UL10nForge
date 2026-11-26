@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from ul10n import VERSION
 from ul10n.core.exporter import export_entries_as_format
+from ul10n.core.font_compat import sanitize_for_legacy_static_atlas
 from ul10n.core.fonts import get_font_option, list_fonts
 from ul10n.core.game_detector import detect_protection_markers
 from ul10n.core.hook_deployer import get_xuat_paths
@@ -589,6 +590,14 @@ def create_app(
 
         return [resolved[i] if resolved[i] is not None else items[i] for i in range(len(items))]
 
+    def _deliver_xuat_text(project_id: str | None, text: str) -> str:
+        if not text:
+            return text
+        pid = _resolve_live_project_id(project_id)
+        if pid and svc.is_legacy_static_tmp_project(pid):
+            return sanitize_for_legacy_static_atlas(text)
+        return text
+
     @app.get("/xuat/translate")
     @app.get("/xuat/translate/{project_id}")
     async def xuat_translate_get(
@@ -599,7 +608,7 @@ def create_app(
     ):
         _ = (from_lang, to_lang)
         translated = await asyncio.to_thread(_handle_xuat_text, project_id, text)
-        return PlainTextResponse(translated)
+        return PlainTextResponse(_deliver_xuat_text(project_id, translated))
 
     @app.post("/xuat/translate")
     @app.post("/xuat/translate/{project_id}")
@@ -613,17 +622,17 @@ def create_app(
                 if len(items) >= 3:
                     batched = await asyncio.to_thread(_handle_xuat_batch_cloud, project_id, items)
                     if batched is not None:
-                        return {"translations": batched}
+                        return {"translations": [_deliver_xuat_text(project_id, s) for s in batched]}
                 # Run remaining / local items concurrently so inventory/skill screens appear fast
                 tasks = [asyncio.to_thread(_handle_xuat_text, project_id, t) for t in items]
                 results = await asyncio.gather(*tasks)
-                return {"translations": list(results)}
+                return {"translations": [_deliver_xuat_text(project_id, s) for s in results]}
             text = str((body or {}).get("text") or "")
             translated = await asyncio.to_thread(_handle_xuat_text, project_id, text)
-            return {"translation": translated}
+            return {"translation": _deliver_xuat_text(project_id, translated)}
         raw = (await request.body()).decode("utf-8", errors="replace")
         translated = await asyncio.to_thread(_handle_xuat_text, project_id, raw)
-        return PlainTextResponse(translated)
+        return PlainTextResponse(_deliver_xuat_text(project_id, translated))
 
     # ── Projects & Hook Management ────────────────────────────────────────
 

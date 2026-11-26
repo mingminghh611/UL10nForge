@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ul10n.core.db import GlobalStore, ProjectStore, project_id_for_dir
+from ul10n.core.font_compat import inspect_game_font_profile
 from ul10n.core.game_detector import detect_game
 from ul10n.core.hook_deployer import (
     build_standalone_patch_zip,
@@ -82,6 +83,7 @@ class AppServices:
         self._live_ctx_cache: dict[str, tuple[GameContext, list[GlossaryItem], GlossaryMatcher]] = {}
         self._live_entry_cache: dict[str, dict[str, Entry]] = {}
         self._live_recent_lines: dict[str, deque[tuple[float, str]]] = {}
+        self._legacy_tmp_cache: dict[str, bool] = {}
 
         # Restore most recently opened project if available
         projects = self.global_store.list_projects()
@@ -392,6 +394,26 @@ class AppServices:
             self.invalidate_entry_cache(project_id)
         return totals
 
+    def is_legacy_static_tmp_project(self, project_id: str) -> bool:
+        """Return True ONLY for legacy TMP 1.0–1.3 games that lack dynamic FontEngine."""
+        with self._live_cache_lock:
+            cached = self._legacy_tmp_cache.get(project_id)
+            if cached is not None:
+                return cached
+        project = self.global_store.get_project(project_id)
+        is_legacy = False
+        if project and project.game_dir:
+            try:
+                prof = inspect_game_font_profile(
+                    project.game_dir, project.runtime_type, project.unity_version
+                )
+                is_legacy = bool(prof.tmp_schema == "legacy_1x" and not prof.supports_dynamic_tmp)
+            except Exception:
+                is_legacy = False
+        with self._live_cache_lock:
+            self._legacy_tmp_cache[project_id] = is_legacy
+        return is_legacy
+
     def export_xuat_to_game(self, project_id: str) -> ExportStats | None:
         project = self.global_store.get_project(project_id)
         if not project:
@@ -400,6 +422,7 @@ class AppServices:
         paths = get_xuat_paths(project.game_dir, project.loader)
         if not Path(project.game_dir).is_dir():
             return None
+        legacy_sanitize = self.is_legacy_static_tmp_project(project_id)
         with self._sync_lock:
             lock = self._export_locks.setdefault(project_id, threading.Lock())
         with lock:
@@ -415,7 +438,11 @@ class AppServices:
                 if e.status in (STATUS_TRANSLATED, STATUS_EDITED, STATUS_SKIPPED)
             }
             prune_xuat_auto_file(paths["auto_file"], managed_keys)
-            return export_xuat_file(entries, paths["curated_file"])
+            return export_xuat_file(
+                entries,
+                paths["curated_file"],
+                sanitize_legacy_symbols=legacy_sanitize,
+            )
 
     def _sync_xuat_if_enabled(self, project: GameProject) -> None:
         cfg = self.settings()
@@ -796,7 +823,10 @@ class AppServices:
         info = detect_game(project.game_dir)
         cfg = self.settings()
         store = self.project_store(project_id)
-        dict_text, _exported, _skipped, _regex = render_xuat_dict_text(store.all_entries())
+        dict_text, _exported, _skipped, _regex = render_xuat_dict_text(
+            store.all_entries(),
+            sanitize_legacy_symbols=self.is_legacy_static_tmp_project(project_id),
+        )
         eff_src_lang = self.resolve_effective_source_lang(project)
         zip_bytes = build_standalone_patch_zip(
             info,

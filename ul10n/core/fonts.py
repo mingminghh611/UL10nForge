@@ -170,3 +170,15 @@ def resolve_bundle_file(app_root: Path, unity_version: str, font_id: str | None 
         if fallback_name and (bundles_dir / fallback_name).is_file():
             return bundles_dir / fallback_name, opt
     return None, opt
+
+
+def resolve_sdf_source_bundle(app_root: Path, font_id: str | None = None) -> tuple[Path | None, FontOption]:
+    """Locate any on-disk SDF bundle for `font_id` (preferring u2019) to extract raw atlas/glyph data."""
+    opt = get_font_option(app_root, font_id)
+    bundles_dir = app_root / "fonts" / "TMP_Font_AssetBundles"
+    for prefix in (opt.bundle_prefix, f"{DEFAULT_FONT_ID}_sdf"):
+        for ver in ("u2019", "u2021", "u2022", "u6000"):
+            cand = bundles_dir / f"{prefix}_{ver}"
+            if cand.is_file():
+                return cand, opt
+    return None, opt

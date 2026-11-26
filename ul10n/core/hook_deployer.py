@@ -12,7 +12,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ul10n.core.fonts import DEFAULT_FONT_ID, resolve_bundle_file
+from ul10n.core.font_compat import (
+    GameFontProfile,
+    ensure_dual_schema_bundle,
+    export_legacy_sdf_pack,
+    font_stamp_signature,
+    inspect_game_font_profile,
+    resolve_available_ugui_font,
+)
+from ul10n.core.fonts import DEFAULT_FONT_ID, resolve_bundle_file, resolve_sdf_source_bundle
 from ul10n.core.models import GameInfo
 
 
@@ -211,6 +219,197 @@ def _safe_bepinex_cfg_text() -> str:
     )
 
 
+def _resolve_fontguard_dll(app_root: Path, loader: str, runtime_type: str) -> tuple[Path | None, str]:
+    """Return `(src_dll_path, dest_relative_posix_path)` for the matching UL10nForge.FontGuard DLL."""
+    fg_dir = app_root / "ul10n" / "resources" / "font_guard"
+    if loader == "melonloader":
+        src = fg_dir / "UL10nForge.FontGuard.Melon.dll"
+        return (src if src.is_file() else None), "Mods/UL10nForge.FontGuard.Melon.dll"
+    if runtime_type == "il2cpp":
+        src = fg_dir / "UL10nForge.FontGuard.IL2CPP.dll"
+        return (
+            (src if src.is_file() else None),
+            "BepInEx/plugins/UL10nForge.FontGuard/UL10nForge.FontGuard.IL2CPP.dll",
+        )
+    src = fg_dir / "UL10nForge.FontGuard.Mono.dll"
+    return (
+        (src if src.is_file() else None),
+        "BepInEx/plugins/UL10nForge.FontGuard/UL10nForge.FontGuard.Mono.dll",
+    )
+
+
+def _fontguard_ini_rel(loader: str) -> str:
+    if loader == "melonloader":
+        return "AutoTranslator/ul10n_fontguard.ini"
+    return "BepInEx/config/ul10n_fontguard.ini"
+
+
+def _build_fontguard_ini(
+    *,
+    font_ttf_rel: str,
+    os_font_name: str,
+    legacy_sdf_rel: str,
+    is_il2cpp: bool = False,
+) -> str:
+    return (
+        "[FontGuard]\n"
+        f"FontTtf={font_ttf_rel}\n"
+        f"OsFont={os_font_name}\n"
+        f"LegacySdf={legacy_sdf_rel}\n"
+        "EnableDynamicTmp=True\n"
+        "EnableLegacySdf=True\n"
+        f"EnableUiToolkit={'False' if is_il2cpp else 'True'}\n"
+        "EnableLegacyTextFix=True\n"
+    )
+
+
+def _should_prefer_unity6_os_fallback(profile: GameFontProfile) -> bool:
+    """Unity 6000.0–6000.2 lacks a 6000.0 bundle (u6000 is 6000.3); prefer native TMP 3.2+ OS/TTF dynamic fallback."""
+    ver = profile.unity_tuple
+    if ver is None:
+        return False
+    return (6000, 0, 0) <= ver < (6000, 3, 0) and profile.supports_os_create_font
+
+
+def _sync_fonts_and_guard(
+    game_dir: Path,
+    game_info: GameInfo,
+    *,
+    app_root: Path,
+    chosen_loader: str,
+    runtime_type: str,
+    font_id: str,
+    paths: dict[str, Path],
+) -> tuple[str, str, str, list[str], list[str]]:
+    """Deploy/upgrade fonts, legacy SDF pack, and UL10nForge.FontGuard into `game_dir`.
+
+    Returns `(fallback_tmp_rel, override_ugui_font, bundle_name, written_files, created_files)`.
+    """
+    written: list[str] = []
+    created: list[str] = []
+
+    profile = inspect_game_font_profile(game_dir, runtime_type, game_info.unity_version)
+    bundle_src, font_opt = resolve_bundle_file(app_root, game_info.unity_version, font_id)
+    override_ugui_font = resolve_available_ugui_font(font_opt.ugui_font)
+
+    paths["font_dir"].mkdir(parents=True, exist_ok=True)
+    stamp_path = paths["font_dir"] / ".ul10n_font_stamp"
+    prev_stamp = ""
+    if stamp_path.is_file():
+        try:
+            prev_stamp = stamp_path.read_text(encoding="utf-8", errors="ignore").strip()
+        except OSError:
+            prev_stamp = ""
+
+    bundle_name = ""
+    fallback_tmp_rel = ""
+    use_u6_os = _should_prefer_unity6_os_fallback(profile)
+    src_mtime = bundle_src.stat().st_mtime if (bundle_src is not None and bundle_src.is_file()) else 0.0
+    cur_stamp = font_stamp_signature(
+        font_id=font_opt.id,
+        bundle_name=bundle_src.name if (bundle_src is not None and not use_u6_os) else "",
+        tmp_schema=profile.tmp_schema,
+        tmp_assembly=profile.tmp_assembly,
+        src_mtime=src_mtime,
+    )
+
+    if use_u6_os:
+        # Native TMP 4.0 / Unity 6 dynamic OS fallback for XUAT; FontGuard prepends chosen .ttf at index 0
+        fallback_tmp_rel = override_ugui_font
+    elif bundle_src is not None and bundle_src.is_file():
+        bundle_name = bundle_src.name
+        bundle_dst = paths["font_dir"] / bundle_name
+        existed = bundle_dst.exists()
+        if (not existed) or (prev_stamp != cur_stamp):
+            ensure_dual_schema_bundle(bundle_src, bundle_dst, target_assembly=profile.tmp_assembly)
+        rel = bundle_dst.relative_to(game_dir).as_posix()
+        written.append(rel)
+        if not existed:
+            created.append(rel)
+        fallback_tmp_rel = rel.replace("/", "\\")
+
+    # Always ensure user's chosen .ttf is present in game's Fonts dir (used by FontGuard dynamic TMP!)
+    ttf_rel = ""
+    ttf_src = font_opt.preview_ttf_path
+    if ttf_src is not None and ttf_src.is_file():
+        ttf_dst = paths["font_dir"] / ttf_src.name
+        existed = ttf_dst.exists()
+        if (not existed) or (ttf_dst.stat().st_size != ttf_src.stat().st_size):
+            shutil.copy2(ttf_src, ttf_dst)
+        rel_ttf = ttf_dst.relative_to(game_dir).as_posix()
+        written.append(rel_ttf)
+        if not existed:
+            created.append(rel_ttf)
+        ttf_rel = rel_ttf.replace("/", "\\")
+
+    # Export engine-version-agnostic legacy SDF pack for Unity < 2019.1 or TMP 1.0–1.3 games
+    legacy_sdf_rel = ""
+    need_legacy_pack = (
+        profile.tmp_schema == "legacy_1x"
+        or (profile.unity_tuple is not None and profile.unity_tuple < (2019, 1, 0))
+        or (not fallback_tmp_rel)
+    )
+    if need_legacy_pack:
+        sdf_src, _ = resolve_sdf_source_bundle(app_root, font_opt.id)
+        if sdf_src is not None and sdf_src.is_file():
+            legacy_dst = paths["font_dir"] / "ul10n_legacy_sdf.dat"
+            existed = legacy_dst.exists()
+            if (not existed) or (prev_stamp != cur_stamp):
+                if export_legacy_sdf_pack(sdf_src, legacy_dst):
+                    rel_sdf = legacy_dst.relative_to(game_dir).as_posix()
+                    written.append(rel_sdf)
+                    if not existed:
+                        created.append(rel_sdf)
+                    legacy_sdf_rel = rel_sdf.replace("/", "\\")
+            elif legacy_dst.is_file():
+                rel_sdf = legacy_dst.relative_to(game_dir).as_posix()
+                written.append(rel_sdf)
+                legacy_sdf_rel = rel_sdf.replace("/", "\\")
+
+    # Write stamp file so repeated refresh_hook_config calls stay <2ms
+    stamp_existed = stamp_path.exists()
+    try:
+        stamp_path.write_text(cur_stamp, encoding="utf-8", newline="\n")
+        rel_stamp = stamp_path.relative_to(game_dir).as_posix()
+        written.append(rel_stamp)
+        if not stamp_existed:
+            created.append(rel_stamp)
+    except OSError:
+        pass
+
+    # Deploy UL10nForge.FontGuard runtime plugin + config
+    fg_src, fg_rel = _resolve_fontguard_dll(app_root, chosen_loader, runtime_type)
+    if fg_src is not None and fg_src.is_file():
+        fg_dst = game_dir / fg_rel
+        fg_existed = fg_dst.exists()
+        fg_dst.parent.mkdir(parents=True, exist_ok=True)
+        if (not fg_existed) or (fg_dst.stat().st_size != fg_src.stat().st_size) or (fg_dst.read_bytes() != fg_src.read_bytes()):
+            shutil.copy2(fg_src, fg_dst)
+        written.append(fg_rel)
+        if not fg_existed:
+            created.append(fg_rel)
+
+        fg_ini_rel = _fontguard_ini_rel(chosen_loader)
+        fg_ini_dst = game_dir / fg_ini_rel
+        fg_ini_existed = fg_ini_dst.exists()
+        fg_ini_dst.parent.mkdir(parents=True, exist_ok=True)
+        fg_ini_dst.write_text(
+            _build_fontguard_ini(
+                font_ttf_rel=ttf_rel,
+                os_font_name=override_ugui_font,
+                legacy_sdf_rel=legacy_sdf_rel,
+                is_il2cpp=(runtime_type == "il2cpp"),
+            ),
+            encoding="utf-8",
+            newline="\n",
+        )
+        written.append(fg_ini_rel)
+        if not fg_ini_existed:
+            created.append(fg_ini_rel)
+
+    return fallback_tmp_rel, override_ugui_font, bundle_name, written, created
+
+
 def get_xuat_paths(game_dir: str | Path, loader: str = "bepinex") -> dict[str, Path]:
     """Return canonical XUAT config, translation dir, auto-generated file, and curated export file."""
     root = Path(game_dir).resolve()
@@ -257,19 +456,19 @@ def deploy_hook(
     kits_dir = app_root / "resources" / "hook_kits"
     loader_zip, xuat_zip = _select_kit_zips(kits_dir, runtime_type, arch, chosen_loader)
 
-    # Detect if player already had third-party mods installed (ignore our own XUnity files on redeploy)
+    # Detect if player already had third-party mods installed (ignore our own XUnity/UL10nForge files on redeploy)
     if chosen_loader == "bepinex":
         plugins_dir = game_dir / "BepInEx" / "plugins"
         other_plugins = [
             p for p in (plugins_dir.iterdir() if plugins_dir.is_dir() else [])
-            if not p.name.lower().startswith(("xunity.", "readme (autotranslator)"))
+            if not p.name.lower().startswith(("xunity.", "ul10nforge.", "readme (autotranslator)"))
         ]
         preexisting_loader = (game_dir / "BepInEx" / "core").is_dir() and bool(other_plugins)
     else:
         mods_dir = game_dir / "Mods"
         other_mods = [
             p for p in (mods_dir.iterdir() if mods_dir.is_dir() else [])
-            if not p.name.lower().startswith("xunity.")
+            if not p.name.lower().startswith(("xunity.", "ul10nforge."))
         ]
         preexisting_loader = (game_dir / "MelonLoader").is_dir() and bool(other_mods)
 
@@ -287,35 +486,23 @@ def deploy_hook(
     paths["font_dir"].mkdir(parents=True, exist_ok=True)
     paths["config"].parent.mkdir(parents=True, exist_ok=True)
 
-    # Deploy matching TMP SDF AssetBundle for selected font (skipped for Unity < 2019)
-    bundle_src, font_opt = resolve_bundle_file(app_root, game_info.unity_version, font_id)
-    bundle_name = bundle_src.name if bundle_src is not None else ""
-    fallback_tmp_rel = ""
-    if bundle_src is not None and bundle_src.is_file():
-        bundle_dst = paths["font_dir"] / bundle_name
-        existed = bundle_dst.exists()
-        shutil.copy2(bundle_src, bundle_dst)
-        rel = bundle_dst.relative_to(game_dir).as_posix()
-        written_files.append(rel)
-        if not existed:
-            created_files.append(rel)
-        fallback_tmp_rel = rel.replace("/", "\\")
+    fallback_tmp_rel, override_ugui_font, bundle_name, w_fonts, c_fonts = _sync_fonts_and_guard(
+        game_dir,
+        game_info,
+        app_root=app_root,
+        chosen_loader=chosen_loader,
+        runtime_type=runtime_type,
+        font_id=font_id,
+        paths=paths,
+    )
+    written_files.extend(w_fonts)
+    created_files.extend(c_fonts)
 
     if not paths["auto_file"].exists():
         paths["auto_file"].write_text("", encoding="utf-8", newline="\n")
         rel_auto = paths["auto_file"].relative_to(game_dir).as_posix()
         written_files.append(rel_auto)
         created_files.append(rel_auto)
-
-    ttf_src = font_opt.preview_ttf_path
-    if ttf_src is not None and ttf_src.is_file():
-        ttf_dst = paths["font_dir"] / ttf_src.name
-        existed = ttf_dst.exists()
-        shutil.copy2(ttf_src, ttf_dst)
-        rel_ttf = ttf_dst.relative_to(game_dir).as_posix()
-        written_files.append(rel_ttf)
-        if not existed:
-            created_files.append(rel_ttf)
 
     # Optional offline Cpp2IL pre-placement for MelonLoader (avoids GitHub download failure)
     if chosen_loader == "melonloader":
@@ -351,7 +538,7 @@ def deploy_hook(
     cfg_text = _build_xuat_config(
         endpoint_url=endpoint_url,
         fallback_tmp_font_rel=fallback_tmp_rel,
-        override_font_name=font_opt.ugui_font,
+        override_font_name=override_ugui_font,
         target_lang=target_lang,
         source_lang=source_lang,
         is_il2cpp=(runtime_type == "il2cpp"),
@@ -419,15 +606,16 @@ def refresh_hook_config(
     if not paths["auto_file"].exists():
         paths["auto_file"].write_text("", encoding="utf-8", newline="\n")
 
-    bundle_src, font_opt = resolve_bundle_file(app_root, game_info.unity_version, font_id)
-    fallback_tmp_rel = ""
-    if bundle_src is not None and bundle_src.is_file():
-        bundle_dst = paths["font_dir"] / bundle_src.name
-        if not bundle_dst.is_file():
-            paths["font_dir"].mkdir(parents=True, exist_ok=True)
-            shutil.copy2(bundle_src, bundle_dst)
-        if bundle_dst.is_file():
-            fallback_tmp_rel = bundle_dst.relative_to(game_dir).as_posix().replace("/", "\\")
+    runtime_type = game_info.runtime_type if game_info.runtime_type in ("mono", "il2cpp") else "mono"
+    fallback_tmp_rel, override_ugui_font, _bundle_name, _w_f, _c_f = _sync_fonts_and_guard(
+        game_dir,
+        game_info,
+        app_root=app_root,
+        chosen_loader=chosen_loader,
+        runtime_type=runtime_type,
+        font_id=font_id,
+        paths=paths,
+    )
 
     if chosen_loader == "bepinex" and (not preexisting_loader or game_info.runtime_type == "il2cpp"):
         bep_cfg = game_dir / "BepInEx" / "config" / "BepInEx.cfg"
@@ -454,10 +642,10 @@ def refresh_hook_config(
     cfg_text = _build_xuat_config(
         endpoint_url=endpoint_url,
         fallback_tmp_font_rel=fallback_tmp_rel,
-        override_font_name=font_opt.ugui_font,
+        override_font_name=override_ugui_font,
         target_lang=target_lang,
         source_lang=source_lang,
-        is_il2cpp=(game_info.runtime_type == "il2cpp"),
+        is_il2cpp=(runtime_type == "il2cpp"),
     )
     paths["config"].write_text(cfg_text, encoding="utf-8", newline="\n")
 
@@ -511,12 +699,33 @@ def uninstall_hook(game_dir: str | Path, manifest: dict[str, Any] | None) -> int
         except OSError:
             pass
 
+    # Always remove UL10nForge.FontGuard artifacts even if added later via refresh_hook_config
+    for fg_cleanup in (
+        root / "BepInEx" / "plugins" / "UL10nForge.FontGuard",
+        root / "BepInEx" / "config" / "ul10n_fontguard.ini",
+        root / "Mods" / "UL10nForge.FontGuard.Melon.dll",
+        root / "AutoTranslator" / "ul10n_fontguard.ini",
+        paths["font_dir"] / "ul10n_legacy_sdf.dat",
+        paths["font_dir"] / ".ul10n_font_stamp",
+    ):
+        if fg_cleanup.is_file():
+            try:
+                fg_cleanup.unlink()
+                removed += 1
+                touched_dirs.add(fg_cleanup.parent)
+            except OSError:
+                pass
+        elif fg_cleanup.is_dir():
+            shutil.rmtree(fg_cleanup, ignore_errors=True)
+            touched_dirs.add(fg_cleanup.parent)
+
     if not (manifest or {}).get("preexisting_loader"):
         bep_plugins = root / "BepInEx" / "plugins"
         other_plugins = []
         if bep_plugins.is_dir():
             for p in bep_plugins.rglob("*.dll"):
-                if "xunity" not in str(p).casefold() and "extinject" not in str(p).casefold():
+                low_p = str(p).casefold()
+                if "xunity" not in low_p and "extinject" not in low_p and "ul10nforge" not in low_p:
                     other_plugins.append(p)
         if not other_plugins:
             for cache_sub in (
@@ -565,7 +774,9 @@ def build_standalone_patch_zip(
 
     kits_dir = app_root / "resources" / "hook_kits"
     loader_zip, xuat_zip = _select_kit_zips(kits_dir, runtime_type, arch, chosen_loader)
+    profile = inspect_game_font_profile(game_info.game_dir, runtime_type, game_info.unity_version)
     bundle_src, font_opt = resolve_bundle_file(app_root, game_info.unity_version, font_id)
+    override_ugui_font = resolve_available_ugui_font(font_opt.ugui_font)
     bundle_name = bundle_src.name if bundle_src is not None else ""
     ttf_src = font_opt.preview_ttf_path
 
@@ -574,9 +785,14 @@ def build_standalone_patch_zip(
     tr_prefix = f"{base_prefix}/Translation/zh/Text"
     font_prefix = f"{base_prefix}/Translation/zh/Fonts"
 
+    import tempfile
+
     buf = io.BytesIO()
     added: set[str] = set()
-    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as out_zf:
+    with tempfile.TemporaryDirectory(prefix="ul10n_patch_") as stage_dir, zipfile.ZipFile(
+        buf, "w", compression=zipfile.ZIP_DEFLATED
+    ) as out_zf:
+        stage = Path(stage_dir)
         for src_zip in (loader_zip, xuat_zip):
             with zipfile.ZipFile(src_zip, "r") as in_zf:
                 for info in in_zf.infolist():
@@ -589,15 +805,55 @@ def build_standalone_patch_zip(
                     added.add(rel)
 
         fallback_tmp_rel = ""
-        if bundle_name and bundle_src is not None and bundle_src.is_file():
+        use_u6_os = _should_prefer_unity6_os_fallback(profile)
+        if use_u6_os:
+            fallback_tmp_rel = override_ugui_font
+        elif bundle_name and bundle_src is not None and bundle_src.is_file():
+            staged_bundle = stage / bundle_name
+            ensure_dual_schema_bundle(bundle_src, staged_bundle, target_assembly=profile.tmp_assembly)
             rel = f"{font_prefix}/{bundle_name}"
-            out_zf.write(bundle_src, arcname=rel)
+            out_zf.write(staged_bundle, arcname=rel)
             added.add(rel)
             fallback_tmp_rel = rel.replace("/", "\\")
+
+        ttf_rel = ""
         if ttf_src is not None and ttf_src.is_file():
             rel = f"{font_prefix}/{ttf_src.name}"
             out_zf.write(ttf_src, arcname=rel)
             added.add(rel)
+            ttf_rel = rel.replace("/", "\\")
+
+        legacy_sdf_rel = ""
+        need_legacy_pack = (
+            profile.tmp_schema == "legacy_1x"
+            or (profile.unity_tuple is not None and profile.unity_tuple < (2019, 1, 0))
+            or (not fallback_tmp_rel)
+        )
+        if need_legacy_pack:
+            sdf_src, _ = resolve_sdf_source_bundle(app_root, font_opt.id)
+            if sdf_src is not None and sdf_src.is_file():
+                staged_sdf = stage / "ul10n_legacy_sdf.dat"
+                if export_legacy_sdf_pack(sdf_src, staged_sdf):
+                    rel_sdf = f"{font_prefix}/ul10n_legacy_sdf.dat"
+                    out_zf.write(staged_sdf, arcname=rel_sdf)
+                    added.add(rel_sdf)
+                    legacy_sdf_rel = rel_sdf.replace("/", "\\")
+
+        fg_src, fg_rel = _resolve_fontguard_dll(app_root, chosen_loader, runtime_type)
+        if fg_src is not None and fg_src.is_file():
+            out_zf.write(fg_src, arcname=fg_rel)
+            added.add(fg_rel)
+            fg_ini_rel = _fontguard_ini_rel(chosen_loader)
+            out_zf.writestr(
+                fg_ini_rel,
+                _build_fontguard_ini(
+                    font_ttf_rel=ttf_rel,
+                    os_font_name=override_ugui_font,
+                    legacy_sdf_rel=legacy_sdf_rel,
+                    is_il2cpp=(runtime_type == "il2cpp"),
+                ).encode("utf-8"),
+            )
+            added.add(fg_ini_rel)
 
         if chosen_loader == "bepinex":
             out_zf.writestr("BepInEx/config/BepInEx.cfg", _safe_bepinex_cfg_text().encode("utf-8"))
@@ -612,7 +868,7 @@ def build_standalone_patch_zip(
         cfg_text = _build_xuat_config(
             endpoint_url="",
             fallback_tmp_font_rel=fallback_tmp_rel,
-            override_font_name=font_opt.ugui_font,
+            override_font_name=override_ugui_font,
             target_lang=target_lang,
             source_lang=source_lang,
             offline_only=True,

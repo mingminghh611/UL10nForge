@@ -14,7 +14,7 @@
       "cjk": 7877,
       "integrity": {
         "notoserif_sdf_u2019": {
-          "sha256": "1d8b51cf53ad3a6eecd8d62ab1b50e510e1fbfa15b735cb4f4db051df5997f35",
+          "sha256": "5170bfeaf410b6212dbaa9a8adabbb84ec25e90ec69a5bebe7dcd45f3886c494",
           "unity": "2019 ~ 2021.2"
         },
         "notoserif_sdf_u2021": {
@@ -42,7 +42,7 @@
       "cjk": 7877,
       "integrity": {
         "lxgwwenkai_sdf_u2019": {
-          "sha256": "016054f0e825f1d972ed25cff43435966c874f8872c8ab86058b4ad61b5b7e0a",
+          "sha256": "4f00a569393d413c800524e6005b0d297c81b1ea86dd9c0cce9eb673eabec70b",
           "unity": "2019 ~ 2021.2"
         },
         "lxgwwenkai_sdf_u2021": {
@@ -70,7 +70,7 @@
       "cjk": 6270,
       "integrity": {
         "fusionpixel_sdf_u2019": {
-          "sha256": "710777f8a8e3a5cc5d044fa5ccd0cc614c9cb9d5356d051d779681cbc2226df8",
+          "sha256": "ac73a35e896d2400804325885c191791a720ba00861a0ac5bea4add56e3c1ef8",
           "unity": "2019 ~ 2021.2"
         },
         "fusionpixel_sdf_u2021": {
