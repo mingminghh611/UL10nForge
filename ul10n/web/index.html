@@ -4,9 +4,13 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>UL10nForge · Unity 汉化工作台</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2.8" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 28 28' fill='none'%3E%3Crect x='2' y='2' width='24' height='24' rx='7' fill='%230d1218' stroke='%2334c794' stroke-width='2'/%3E%3Cpath d='M9 9v6.5a5 5 0 0 0 10 0V9' stroke='%23f1f4f9' stroke-width='2.2' stroke-linecap='round'/%3E%3Ccircle cx='14' cy='10' r='2' fill='%2334c794'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/static/styles.css?v=3.0" />
 </head>
 <body>
+  <div class="ambient-glow" aria-hidden="true"></div>
+  <div class="ambient-grid" aria-hidden="true"></div>
+
   <div class="app-shell">
     <!-- Left Navigation Rail -->
     <aside class="sidebar">
@@ -15,12 +19,12 @@
           <svg viewBox="0 0 28 28" fill="none">
             <rect x="2" y="2" width="24" height="24" rx="7" stroke="currentColor" stroke-width="1.8"/>
             <path d="M9 9v6.5a5 5 0 0 0 10 0V9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            <circle cx="14" cy="10" r="1.8" fill="currentColor"/>
+            <circle cx="14" cy="10" r="1.9" fill="currentColor"/>
           </svg>
         </div>
         <div class="brand-text">
           <span class="brand-name">UL10nForge</span>
-          <span class="brand-sub">Unity 汉化工作台</span>
+          <span class="brand-sub">Unity 无损汉化工作台</span>
         </div>
       </div>
 
@@ -32,7 +36,7 @@
         <button class="nav-item" data-tab="editor">
           <svg viewBox="0 0 20 20" fill="none"><path d="M4 5.5h12M4 10h8M4 14.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M13.5 11.5l3 3-3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span id="nav-editor-label">译文审校</span>
-          <span class="nav-badge" id="nav-entry-badge" hidden>0</span>
+          <span class="nav-badge tabular" id="nav-entry-badge" hidden>0</span>
         </button>
         <button class="nav-item" data-tab="glossary">
           <svg viewBox="0 0 20 20" fill="none"><path d="M5 4h8.5a2 2 0 0 1 2 2v10H5a1.5 1.5 0 0 1-1.5-1.5v-9A1.5 1.5 0 0 1 5 4z" stroke="currentColor" stroke-width="1.6"/><path d="M7 8h5M7 11.5h3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
@@ -70,7 +74,7 @@
           </button>
         </div>
 
-        <!-- Global Live Progress Bar (shown while a task runs or briefly on completion) -->
+        <!-- Global Live Progress Bar -->
         <div class="global-progress" id="global-progress" hidden>
           <div class="gp-body">
             <div class="gp-info">
@@ -105,6 +109,7 @@
         <!-- Empty Onboarding View -->
         <section id="view-empty" class="empty-stage" hidden>
           <div class="empty-card">
+            <div class="empty-halo" aria-hidden="true"></div>
             <div class="empty-icon">
               <svg viewBox="0 0 36 36" fill="none">
                 <rect x="4" y="4" width="28" height="28" rx="9" stroke="currentColor" stroke-width="1.8"/>
@@ -112,9 +117,9 @@
                 <circle cx="18" cy="13" r="2.2" fill="currentColor"/>
               </svg>
             </div>
-            <h1>打开一款 Unity 游戏开始汉化</h1>
+            <h1>打开一款 Unity 游戏开始无损汉化</h1>
             <p class="empty-desc">
-              不改动游戏原文件。自动扫描静态文本并支持游戏内实时补全，随时查看、修改、还原并导出中文补丁。
+              绝不修改游戏原文件。只读白名单扫描界面与官方本地化表，进游戏实时拦截动态剧情，随时改译、存术语并打包离线补丁。
             </p>
             <div class="empty-actions">
               <button class="btn btn-primary btn-lg" id="btn-empty-pick">选择游戏文件夹</button>
@@ -124,9 +129,9 @@
               <button class="btn btn-subtle" id="btn-empty-open-path">打开</button>
             </div>
             <div class="empty-steps">
-              <div class="step-chip"><span>1</span> 扫描静态文本</div>
-              <div class="step-chip" id="empty-step-2"><span>2</span> 翻译与审校修正</div>
-              <div class="step-chip"><span>3</span> 进游戏按 Alt+L 随时改译</div>
+              <div class="step-chip"><span>1</span> 100% 安全只读扫描</div>
+              <div class="step-chip" id="empty-step-2"><span>2</span> 语境术语翻译与审校</div>
+              <div class="step-chip"><span>3</span> 游戏中按 <b class="hud-hk-text">Alt+L</b> 当场改译</div>
             </div>
           </div>
         </section>
@@ -137,10 +142,25 @@
             <!-- Game Status & Progress Card -->
             <div class="card hero-card">
               <div class="card-head">
-                <div>
+                <div class="game-head-main">
                   <div class="eyebrow">当前游戏</div>
                   <h2 class="game-title" id="wb-game-name">—</h2>
-                  <p class="game-sub" id="wb-game-meta">—</p>
+                  <div class="game-meta-row">
+                    <p class="game-sub" id="wb-game-meta">—</p>
+                    <label class="lang-inline-chip" title="游戏原文语言（日/韩/俄游戏建议选对应语言或自动，确保游戏内实时捕获）">
+                      <span>源语</span>
+                      <select id="wb-source-lang" aria-label="游戏源语言">
+                        <option value="auto">自动</option>
+                        <option value="en">英文</option>
+                        <option value="ja">日文</option>
+                        <option value="ko">韩文</option>
+                        <option value="ru">俄文</option>
+                        <option value="fr">法文</option>
+                        <option value="de">德文</option>
+                        <option value="es">西文</option>
+                      </select>
+                    </label>
+                  </div>
                 </div>
                 <div class="pill-group">
                   <button type="button" class="status-pill direct-pill" id="wb-direct-pill" title="已关闭推理与审校，点此前往设置调整" hidden>直翻模式</button>
@@ -149,13 +169,21 @@
               </div>
 
               <div class="protection-banner" id="wb-protection-warn" hidden></div>
+              <div class="info-banner" id="wb-dynamic-hint" hidden></div>
 
               <!-- Progress Ring + Clean Stats -->
-              <div class="progress-panel">
+              <div class="progress-panel" id="wb-progress-panel">
                 <div class="ring-wrap">
                   <svg class="progress-ring" viewBox="0 0 100 100">
+                    <defs>
+                      <linearGradient id="ul10nRingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stop-color="#52e2b0" />
+                        <stop offset="55%" stop-color="#34c794" />
+                        <stop offset="100%" stop-color="#38bdf8" />
+                      </linearGradient>
+                    </defs>
                     <circle class="ring-bg" cx="50" cy="50" r="42" />
-                    <circle class="ring-fg" id="wb-ring-fg" cx="50" cy="50" r="42" stroke-dasharray="263.89" stroke-dashoffset="263.89" />
+                    <circle class="ring-fg" id="wb-ring-fg" cx="50" cy="50" r="42" stroke="url(#ul10nRingGrad)" stroke-dasharray="263.89" stroke-dashoffset="263.89" />
                   </svg>
                   <div class="ring-center">
                     <span class="ring-pct tabular" id="wb-pct">0%</span>
@@ -183,29 +211,29 @@
                 </div>
               </div>
 
-              <!-- Primary Action Row (3 core actions only) -->
+              <!-- Primary Action Row -->
               <div class="action-primary-row">
-                <button class="btn btn-primary" id="btn-auto-localize" title="自动完成：扫描界面文本 → 识别游戏背景 → 批量翻译 → 审校 → 接入游戏">一键自动汉化</button>
+                <button class="btn btn-primary" id="btn-auto-localize" title="自动完成：安全扫描文本 → 识别游戏背景 → 批量翻译 → 审校 → 接入游戏">一键自动汉化</button>
                 <button class="btn btn-accent-soft" id="btn-launch-game" title="自动检查插件并同步最新词典后启动游戏">启动游戏</button>
-                <button class="btn btn-subtle" id="btn-open-export">导出…</button>
+                <button class="btn btn-subtle" id="btn-open-export">导出与分享…</button>
               </div>
 
-              <!-- Secondary Fine-Control Row (quiet & minimal) -->
+              <!-- Secondary Fine-Control Row -->
               <div class="action-secondary-row">
-                <button class="btn btn-subtle btn-sm" id="btn-scan-texts" title="只读扫描游戏内的静态界面文本，动态剧情交由游戏内钩子实时抓取">扫描界面文本</button>
+                <button class="btn btn-subtle btn-sm" id="btn-scan-texts" title="100% 只读白名单扫描静态 UI 与官方本地化表，绝不碰脚本代码">扫描安全文本</button>
                 <button class="btn btn-subtle btn-sm" id="btn-start-translate">批量翻译</button>
                 <button class="btn btn-subtle btn-sm" id="btn-start-review" title="挑出长句、否定句和术语异常的译文进行复查修正">审校译文</button>
                 <div class="more-menu-wrap">
                   <button class="btn btn-ghost btn-sm" id="btn-wb-more">更多 ▾</button>
                   <div class="more-menu" id="wb-more-menu" hidden>
                     <button class="more-item" id="btn-review-full">全部重新审校</button>
-                    <label class="more-item" title="无边框窗口模式启动，确保游戏中按 Alt+L 悬浮窗始终置顶">
+                    <label class="more-item" title="无边框窗口模式启动，确保游戏中呼出悬浮窗始终置顶">
                       <span>无边框启动游戏</span>
                       <input type="checkbox" id="chk-launch-borderless" />
                     </label>
                     <div class="more-item" id="wb-loader-wrap" hidden>
                       <span>加载器</span>
-                      <select id="wb-loader-select" style="padding:2px 6px;border-radius:6px;background:var(--bg-input);color:var(--text-primary);border:1px solid var(--border);font:inherit;font-size:12px">
+                      <select id="wb-loader-select" class="mini-select">
                         <option value="bepinex">BepInEx 6</option>
                         <option value="melonloader">MelonLoader</option>
                       </select>
@@ -246,7 +274,7 @@
                 <h3 class="card-title">最近更新</h3>
               </div>
               <div class="card-head-actions">
-                <button class="btn btn-ghost btn-sm" id="btn-toggle-overlay" title="游戏中也可直接按 Alt+L 呼出或收起悬浮编辑窗">悬浮窗 (Alt+L)</button>
+                <button class="btn btn-ghost btn-sm" id="btn-toggle-overlay" title="游戏中也可直接按快捷键呼出或收起悬浮编辑窗">悬浮窗 (<span class="hud-hk-text">Alt+L</span>)</button>
                 <button class="btn btn-ghost btn-sm" id="btn-quick-add">+ 添加词条</button>
                 <button class="btn btn-subtle btn-sm" id="btn-goto-editor">全部词条 →</button>
               </div>
@@ -259,7 +287,7 @@
           </div>
         </section>
 
-        <!-- TAB 2: EDITOR (原文 / 译文逐条查看与修改) -->
+        <!-- TAB 2: EDITOR -->
         <section id="tab-editor" class="tab-view" hidden>
           <div class="editor-source-row">
             <div class="source-seg" id="editor-sources" role="tablist" aria-label="文本来源">
@@ -270,7 +298,7 @@
             <div class="editor-toolbar-right">
               <button class="btn btn-ghost btn-sm" id="btn-open-replace">查找替换</button>
               <button class="btn btn-ghost btn-sm" id="btn-editor-export">导出</button>
-              <button class="btn btn-ghost btn-sm" id="btn-editor-overlay" title="游戏中按 Alt+L 呼出悬浮编辑窗">悬浮窗 (Alt+L)</button>
+              <button class="btn btn-ghost btn-sm" id="btn-editor-overlay" title="游戏中按快捷键呼出悬浮编辑窗">悬浮窗 (<span class="hud-hk-text">Alt+L</span>)</button>
               <button class="btn btn-subtle btn-sm" id="btn-editor-add">+ 添加</button>
               <button class="btn btn-primary btn-sm" id="btn-editor-translate">翻译待翻</button>
             </div>
@@ -291,21 +319,54 @@
               <button class="pill" data-status="attention">需处理 <span class="pill-count tabular" data-count="attention">0</span></button>
               <button class="pill" data-status="skipped">不翻译 <span class="pill-count tabular" data-count="skipped">0</span></button>
             </div>
+
+            <div class="extra-filter-pills" id="editor-extra-filters">
+              <button class="pill pill-xs active" data-extra="">不限特征</button>
+              <button class="pill pill-xs" data-extra="tags" title="仅看包含富文本标签或占位符的词条">含标签/占位</button>
+              <button class="pill pill-xs" data-extra="long" title="仅看长句或多行对白">长句对白</button>
+            </div>
           </div>
 
           <div class="editor-list-card">
             <div class="editor-head-row">
+              <label class="row-check-wrap" title="全选当前页">
+                <input type="checkbox" id="chk-select-page" />
+              </label>
               <span>原文</span>
-              <span>译文（直接输入修改，失焦或 Ctrl+Enter 自动保存并实时同步到游戏）</span>
+              <span>译文（直接输入修改，失焦或 Ctrl+Enter 自动保存并热同步到游戏）</span>
               <span class="col-actions">操作</span>
             </div>
             <div id="editor-list" class="editor-list"></div>
             <div class="editor-pagination" id="editor-pagination">
-              <span class="muted-hint tabular" id="editor-page-info">共 0 条</span>
+              <div class="page-meta-left">
+                <span class="muted-hint tabular" id="editor-page-info">共 0 条</span>
+                <select id="editor-page-size" class="mini-select" aria-label="每页显示条数">
+                  <option value="40" selected>40 条/页</option>
+                  <option value="80">80 条/页</option>
+                  <option value="120">120 条/页</option>
+                </select>
+              </div>
               <div class="page-btns">
                 <button class="btn btn-ghost btn-sm" id="btn-prev-page">上一页</button>
+                <span class="page-jump-wrap">
+                  <input id="editor-page-jump" class="page-jump-input tabular" type="number" min="1" value="1" aria-label="跳转页码" />
+                  <span class="muted-hint tabular" id="editor-page-total">/ 1</span>
+                </span>
                 <button class="btn btn-ghost btn-sm" id="btn-next-page">下一页</button>
               </div>
+            </div>
+          </div>
+
+          <!-- Floating Bulk Action Dock (rises when entries are checked) -->
+          <div class="bulk-dock" id="editor-bulk-dock" hidden>
+            <span class="bulk-count tabular" id="bulk-selected-count">已选 0 条</span>
+            <div class="bulk-actions">
+              <button class="btn btn-primary btn-sm" data-bulk-act="retranslate">批量重译</button>
+              <button class="btn btn-subtle btn-sm" data-bulk-act="lock">锁定保护</button>
+              <button class="btn btn-subtle btn-sm" data-bulk-act="unlock">解除锁定</button>
+              <button class="btn btn-subtle btn-sm" data-bulk-act="skip">批量不翻</button>
+              <button class="btn btn-subtle btn-sm" data-bulk-act="unskip">恢复翻译</button>
+              <button class="btn btn-ghost btn-sm" id="btn-bulk-clear">取消选择</button>
             </div>
           </div>
         </section>
@@ -324,6 +385,15 @@
             </div>
           </div>
 
+          <!-- Glossary Impact Propagation Banner -->
+          <div class="impact-banner" id="glossary-impact-banner" hidden>
+            <div class="impact-text" id="glossary-impact-text"></div>
+            <div class="impact-actions">
+              <button class="btn btn-primary btn-sm" id="btn-apply-glossary-impact">一键按新术语重译</button>
+              <button class="btn btn-ghost btn-sm" id="btn-dismiss-glossary-impact">暂不处理</button>
+            </div>
+          </div>
+
           <div class="card" id="panel-glossary">
             <div class="glossary-tools">
               <div class="search-box" style="max-width:300px">
@@ -331,8 +401,8 @@
                 <input id="glossary-search" type="text" placeholder="搜索术语原文或译名…" />
               </div>
               <form class="inline-form" id="form-add-term" style="margin-bottom:0;flex:1">
-                <input class="input" id="term-src" placeholder="原文专名（如 Excalibur）" required />
-                <input class="input" id="term-dst" placeholder="固定译名（如 誓约胜利之剑）" required />
+                <input class="input" id="term-src" placeholder="原文专名（如 Lantern）" required />
+                <input class="input" id="term-dst" placeholder="固定译名（如 提灯）" required />
                 <select class="input input-sm" id="term-cat">
                   <option value="术语">术语</option>
                   <option value="角色">角色</option>
@@ -343,7 +413,9 @@
                 <button class="btn btn-primary" type="submit">添加</button>
               </form>
             </div>
-            <p class="muted-hint" style="margin:0 0 10px;font-size:12px">点击任意术语的原文、译名或分类即可直接修改，回车或失焦自动保存。</p>
+            <p class="muted-hint" style="margin:0 0 10px;font-size:12px">
+              已启用词边界精准匹配与预编译索引（实时翻译零开销、绝不误伤普通单词子串）；本游戏术语优先级高于全局术语与跨游戏记忆。
+            </p>
             <div id="glossary-list" class="simple-list"></div>
           </div>
 
@@ -353,7 +425,7 @@
                 <svg viewBox="0 0 20 20" fill="none"><circle cx="9" cy="9" r="5.5" stroke="currentColor" stroke-width="1.6"/><path d="M13.5 13.5L17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
                 <input id="memory-search" type="text" placeholder="搜索跨游戏翻译记忆…" />
               </div>
-              <span class="muted-hint" style="font-size:12px">直接修改译文并回车/失焦即可更新，所有游戏共用。</span>
+              <span class="muted-hint" style="font-size:12px">已启用防串味保护：自动跳过短歧义单词，且永不覆盖当前游戏术语表命中的句子。</span>
             </div>
             <div id="memory-list" class="simple-list"></div>
           </div>
@@ -434,14 +506,24 @@
               </div>
 
               <div id="settings-api-panel" hidden>
+                <div class="preset-bar">
+                  <label class="preset-label" for="api-preset-select">快速选择服务商预设</label>
+                  <select id="api-preset-select" class="input">
+                    <option value="">自定义 OpenAI 兼容接口…</option>
+                  </select>
+                  <div class="muted-hint preset-hint" id="api-preset-hint">选好预设自动填入接口地址与推荐模型，只需粘贴 API Key 即可。</div>
+                </div>
+
                 <div class="api-block">
                   <div class="setting-name">翻译接口（OpenAI 兼容）</div>
                   <div class="form-grid">
                     <input class="input" id="api-tr-url" placeholder="接口地址，如 https://api.deepseek.com/v1" />
-                    <input class="input" id="api-tr-model" placeholder="模型名称，如 deepseek-chat" />
+                    <input class="input" id="api-tr-model" list="api-tr-model-list" placeholder="模型名称，如 deepseek-chat" />
+                    <datalist id="api-tr-model-list"></datalist>
                     <input class="input" id="api-tr-key" type="password" placeholder="API Key" />
                   </div>
                   <div class="api-actions">
+                    <button class="btn btn-ghost btn-sm" id="btn-fetch-tr-models">拉取模型列表</button>
                     <button class="btn btn-subtle btn-sm" id="btn-test-tr-api">测试连接</button>
                   </div>
                 </div>
@@ -450,10 +532,12 @@
                   <div class="setting-name">审校与语境接口（留空则自动复用翻译接口）</div>
                   <div class="form-grid">
                     <input class="input" id="api-rs-url" placeholder="接口地址（可选，留空复用上方地址）" />
-                    <input class="input" id="api-rs-model" placeholder="模型名称（可选，留空复用上方模型）" />
+                    <input class="input" id="api-rs-model" list="api-rs-model-list" placeholder="模型名称（可选，留空复用上方模型）" />
+                    <datalist id="api-rs-model-list"></datalist>
                     <input class="input" id="api-rs-key" type="password" placeholder="API Key（可选，留空复用上方 Key）" />
                   </div>
                   <div class="api-actions">
+                    <button class="btn btn-ghost btn-sm" id="btn-fetch-rs-models">拉取模型列表</button>
                     <button class="btn btn-subtle btn-sm" id="btn-test-rs-api">测试审校接口</button>
                   </div>
                 </div>
@@ -464,7 +548,7 @@
               <div class="card-head">
                 <div>
                   <div class="eyebrow">通用偏好</div>
-                  <h3 class="card-title">同步与外观</h3>
+                  <h3 class="card-title">同步、排版与交互</h3>
                 </div>
               </div>
 
@@ -481,23 +565,54 @@
 
               <div class="setting-row">
                 <div>
-                  <div class="setting-name">界面提示音</div>
-                  <div class="setting-desc">保存译文、任务完成和启动游戏时播放轻柔提示音，右上角可随时静音</div>
+                  <div class="setting-name">对话引号排版风格</div>
+                  <div class="setting-desc">自动统一模型输出的对白引号样式，不影响富文本标签属性</div>
                 </div>
-                <label class="switch">
-                  <input type="checkbox" id="chk-sound-effects" checked />
-                  <span class="slider"></span>
-                </label>
+                <div class="segmented" id="seg-quote-style">
+                  <button type="button" data-val="auto" class="active">跟随原译</button>
+                  <button type="button" data-val="corner">「直角」</button>
+                  <button type="button" data-val="curly">“弯引号”</button>
+                </div>
+              </div>
+
+              <div class="setting-row">
+                <div>
+                  <div class="setting-name">游戏内悬浮窗全局热键</div>
+                  <div class="setting-desc">遇到与游戏按键冲突时可随时更换，保存后立即生效</div>
+                </div>
+                <select id="sel-overlay-hotkey" class="input input-sm">
+                  <option value="Alt+L">Alt+L</option>
+                  <option value="Alt+Shift+L">Alt+Shift+L</option>
+                  <option value="Ctrl+Shift+L">Ctrl+Shift+L</option>
+                  <option value="Ctrl+Alt+L">Ctrl+Alt+L</option>
+                  <option value="Alt+K">Alt+K</option>
+                  <option value="F8">F8</option>
+                  <option value="F9">F9</option>
+                </select>
+              </div>
+
+              <div class="setting-row">
+                <div>
+                  <div class="setting-name">界面轻柔音效</div>
+                  <div class="setting-desc">柔和声学微音效反馈，右上角可随时一键静音</div>
+                </div>
+                <div class="sound-setting-controls">
+                  <button type="button" class="btn btn-ghost btn-sm" id="btn-preview-sfx">试听</button>
+                  <label class="switch">
+                    <input type="checkbox" id="chk-sound-effects" checked />
+                    <span class="slider"></span>
+                  </label>
+                </div>
               </div>
 
               <div class="setting-row">
                 <div>
                   <div class="setting-name">界面外观</div>
-                  <div class="setting-desc">可随时在右上角一键切换深色或浅色模式</div>
+                  <div class="setting-desc">黑曜翡翠暗夜 / 宣纸雅白浅色，右上角可随时切换</div>
                 </div>
                 <div class="segmented" id="seg-theme">
-                  <button type="button" data-val="dark" class="active">深色暗夜</button>
-                  <button type="button" data-val="light">浅色极简</button>
+                  <button type="button" data-val="dark" class="active">黑曜暗夜</button>
+                  <button type="button" data-val="light">宣纸雅白</button>
                 </div>
               </div>
 
@@ -523,7 +638,7 @@
               <div class="font-preview-stage" id="font-preview-stage">
                 <div class="fp-topbar">
                   <span class="fp-loc">章节 III · 迷雾灯塔</span>
-                  <span class="fp-stat">HP 180 / 200 · Lv.24</span>
+                  <span class="fp-stat tabular">HP 180 / 200 · Lv.24</span>
                 </div>
                 <div class="fp-menu-row">
                   <span class="fp-menu-chip active">继续游戏</span>
@@ -571,7 +686,8 @@
         <input class="input" id="ctx-setting" placeholder="题材背景（如 中世纪奇幻 / 赛博朋克）" />
         <input class="input" id="ctx-style" placeholder="语言风格（如 UI 简洁干练，对话口语自然）" />
         <textarea class="textarea" id="ctx-summary" rows="2" placeholder="一句话游戏简介"></textarea>
-        <input class="input" id="ctx-characters" placeholder="主要角色（用中文逗号或英文逗号分隔）" />
+        <input class="input" id="ctx-characters" placeholder="主要角色（原文=译名，用逗号分隔）" />
+        <input class="input" id="ctx-terms" placeholder="专有名词（原文=译名，用逗号分隔）" />
         <input class="input" id="ctx-notes" placeholder="翻译注意点（用逗号分隔）" />
       </div>
       <div class="modal-foot">
@@ -581,7 +697,7 @@
     </div>
   </div>
 
-  <!-- Modal: Deploy Choice (when IL2CPP offers MelonLoader fallback) -->
+  <!-- Modal: Open Unity Game Dir -->
   <div class="modal-backdrop" id="modal-open-path" hidden>
     <div class="modal">
       <div class="modal-head">
@@ -600,11 +716,11 @@
     </div>
   </div>
 
-  <!-- Modal: Export Translations & Standalone Patch -->
+  <!-- Modal: Export Translations, Portable Bundle & Standalone Patch -->
   <div class="modal-backdrop" id="modal-export" hidden>
-    <div class="modal">
+    <div class="modal modal-wide">
       <div class="modal-head">
-        <h3>导出汉化文本与离线补丁</h3>
+        <h3>导出汉化文本、工程包与离线补丁</h3>
         <button class="btn-icon-sm" data-close-modal="modal-export">✕</button>
       </div>
 
@@ -619,7 +735,7 @@
       </div>
 
       <div class="export-section">
-        <div class="export-section-title">选择文本格式（包含原文与对应译文）</div>
+        <div class="export-section-title">导出对照文本</div>
         <div class="export-grid">
           <button class="export-tile" data-export-fmt="json">
             <span class="export-tile-name">JSON (.json)</span>
@@ -645,11 +761,26 @@
       </div>
 
       <div class="export-section">
-        <div class="export-section-title">分享给其他玩家</div>
+        <div class="export-section-title">玩家间轻量化共享（几十 KB，含语境 + 术语 + 精修词典）</div>
+        <div class="export-patch-box">
+          <div>
+            <div class="export-tile-name">便携汉化工程包 (.ul10n.json)</div>
+            <div class="export-tile-desc">支持一人通关精修后分享给同好，导入时不覆盖已有手动修改</div>
+          </div>
+          <div class="bundle-btns">
+            <input type="file" id="input-import-bundle" accept=".json" hidden />
+            <button class="btn btn-subtle btn-sm" id="btn-import-bundle">导入工程包</button>
+            <button class="btn btn-accent-soft btn-sm" id="btn-export-bundle">导出工程包</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="export-section">
+        <div class="export-section-title">独立离线补丁（无需安装本工具）</div>
         <div class="export-patch-box">
           <div>
             <div class="export-tile-name">独立离线汉化补丁 (.zip)</div>
-            <div class="export-tile-desc">含插件、中文字体与全部词典，解压即玩，无需本工具与联网</div>
+            <div class="export-tile-desc">含加载器、中文字体与全部词典，解压到游戏目录即玩</div>
           </div>
           <button class="btn btn-primary btn-sm" id="btn-export-patch">打包下载</button>
         </div>
@@ -733,6 +864,6 @@
   <!-- Toast Container -->
   <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 
-  <script type="module" src="/static/app.js?v=2.8"></script>
+  <script type="module" src="/static/app.js?v=3.0"></script>
 </body>
 </html>

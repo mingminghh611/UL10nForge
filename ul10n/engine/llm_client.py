@@ -16,6 +16,117 @@ _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _VERSIONED_API_SUFFIX_RE = re.compile(r"/(?:v\d+(?:beta|alpha)?(?:/openai)?|openai)$", re.IGNORECASE)
 
+CLOUD_PROVIDER_PRESETS: tuple[dict[str, str], ...] = (
+    {
+        "id": "deepseek",
+        "name": "DeepSeek 官方",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "reason_model": "deepseek-chat",
+        "hint": "高性价比首选，自动命中前缀缓存",
+    },
+    {
+        "id": "siliconflow",
+        "name": "硅基流动 SiliconFlow",
+        "base_url": "https://api.siliconflow.cn/v1",
+        "model": "deepseek-ai/DeepSeek-V3",
+        "reason_model": "Qwen/Qwen2.5-72B-Instruct",
+        "hint": "国内直连速度快，支持多款开源模型",
+    },
+    {
+        "id": "dashscope",
+        "name": "阿里云百炼 / 通义千问",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-plus",
+        "reason_model": "qwen-max",
+        "hint": "中文润色自然，国内稳定低延迟",
+    },
+    {
+        "id": "zhipu",
+        "name": "智谱 GLM",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "model": "glm-4-flash",
+        "reason_model": "glm-4-plus",
+        "hint": "Flash 档免费/低价极速，适合大批量翻译",
+    },
+    {
+        "id": "volcengine",
+        "name": "火山方舟（豆包）",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "model": "",
+        "reason_model": "",
+        "hint": "请填入方舟控制台创建的推理接入点 ID（ep-...）",
+    },
+    {
+        "id": "gemini",
+        "name": "Google Gemini (OpenAI 兼容)",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "model": "gemini-2.5-flash",
+        "reason_model": "gemini-2.5-pro",
+        "hint": "日韩英多语种语义理解极强",
+    },
+    {
+        "id": "openai",
+        "name": "OpenAI 官方",
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini",
+        "reason_model": "gpt-4o",
+        "hint": "经典稳定，支持海外或中转地址",
+    },
+    {
+        "id": "openrouter",
+        "name": "OpenRouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": "deepseek/deepseek-chat",
+        "reason_model": "google/gemini-2.5-flash",
+        "hint": "一站式聚合全球主流模型",
+    },
+    {
+        "id": "ollama",
+        "name": "本机 Ollama 服务",
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model": "qwen2.5:7b",
+        "reason_model": "qwen2.5:7b",
+        "hint": "对接本机已安装的 Ollama 模型",
+    },
+)
+
+
+def normalize_models_url(base_url: str) -> str:
+    """Resolve OpenAI-compatible `/models` endpoint URL from user-supplied Base URL."""
+    chat_url = normalize_chat_url(base_url)
+    if not chat_url:
+        return ""
+    if chat_url.endswith("/chat/completions"):
+        return chat_url[: -len("/chat/completions")] + "/models"
+    return chat_url.rstrip("/") + "/models"
+
+
+def fetch_available_models(base_url: str, api_key: str = "", *, timeout: float = 12.0) -> list[str]:
+    """Fetch available model IDs from an OpenAI-compatible `/models` endpoint."""
+    url = normalize_models_url(base_url)
+    if not url:
+        raise ValueError("请先填写接口地址（Base URL）")
+    loopback = _is_loopback(url)
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    with httpx.Client(timeout=timeout, trust_env=not loopback, verify=not loopback) as cli:
+        resp = cli.get(url, headers=headers)
+        if resp.status_code >= 400:
+            raise ValueError(_friendly_http_error(resp.status_code, resp.text[:200]))
+        data = resp.json()
+    raw_list = data.get("data") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw_list or []:
+        mid = str(item.get("id") or item.get("name") or "").strip() if isinstance(item, dict) else str(item).strip()
+        if mid and mid not in seen:
+            seen.add(mid)
+            ids.append(mid)
+    ids.sort(key=str.casefold)
+    return ids
+
 
 def normalize_chat_url(base_url: str) -> str:
     """Normalize OpenAI-compatible base URLs across OpenAI, DeepSeek, Gemini, Volcengine, Zhipu, etc."""

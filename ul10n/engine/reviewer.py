@@ -25,6 +25,7 @@ from ul10n.core.quality import (
     is_translatable,
     lookup_builtin_ui,
     restore_missing_tags,
+    term_in_text,
 )
 from ul10n.engine.context_builder import parse_context_term_pairs
 from ul10n.engine.llm_client import LLMClient, extract_json_array, extract_json_object
@@ -289,10 +290,9 @@ def _find_glossary_violations(
     entry: Entry,
     glossary: list[GlossaryItem],
 ) -> list[tuple[str, str]]:
-    """Return `(term, expected_translation)` pairs present in original but missing from translation."""
+    """Return `(term, expected_translation)` pairs present in original (word-boundary safe) but missing from translation."""
     if not glossary or not entry.original or not entry.translation:
         return []
-    src_low = entry.original.casefold()
     tr = entry.translation
     violations: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -301,7 +301,7 @@ def _find_glossary_violations(
         dst = g.translation.strip()
         if not t or not dst or len(t) < 2 or t.casefold() in seen:
             continue
-        if t.casefold() in src_low and dst not in tr:
+        if term_in_text(t, entry.original) and dst not in tr:
             violations.append((t, dst))
             seen.add(t.casefold())
             if len(violations) >= 3:
@@ -487,15 +487,15 @@ def review_batch_and_refine(
             break
         chunk = pending_llm[start : start + eff_batch_size]
         lines = []
-        chunk_low_parts: list[str] = []
+        chunk_raw_parts: list[str] = []
         for idx, e in enumerate(chunk, start=1):
             o_flat = e.original.replace("\n", "\\n")[:240]
             t_flat = (e.translation or "").replace("\n", "\\n")[:240]
             lines.append(f"[{idx}] {o_flat} || {t_flat}")
-            chunk_low_parts.append(o_flat.casefold())
-        chunk_low = "\n".join(chunk_low_parts)
+            chunk_raw_parts.append(o_flat)
+        chunk_text = "\n".join(chunk_raw_parts)
         matched_terms = [
-            (s, d) for s, d in all_term_pairs if s and s.casefold() in chunk_low
+            (s, d) for s, d in all_term_pairs if s and term_in_text(s, chunk_text)
         ][:12]
         hdr_lines = list(base_ctx_lines)
         if matched_terms:

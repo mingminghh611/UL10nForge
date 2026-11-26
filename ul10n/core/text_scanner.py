@@ -1,17 +1,20 @@
-"""Strict, read-only pure-static UI text scanner for Unity games.
+"""Strict, read-only, 100%-safe static text scanner for Unity games.
 
-Design principle — zero pollution:
-- ONLY scans 100% player-facing static UI display components (`TextMeshProUGUI`,
-  `TextMeshPro`, `TMP_Text`, `Text`, `TextMesh`) directly from Unity scene/asset files.
-- Does NOT blindly scrape custom MonoBehaviours, ScriptableObjects, arbitrary TextAssets,
-  Assembly-CSharp.dll, or IL2CPP global-metadata.dat. All dynamic, dialogue, scripted,
-  and runtime-assembled strings are left to XUnity.AutoTranslator's mature runtime Hook.
-- Never modifies any original file in `game_dir`.
+Design principle — zero pollution & zero risk:
+- ONLY scans strictly whitelisted player-facing Unity display components (`TextMeshProUGUI`,
+  `TextMeshPro`, `TMP_Text`, `Text`, `TextMesh`) and official structured localization tables
+  (`StringTable` from Unity Localization, `LanguageSourceAsset`/`LanguageSource` from I2 Localization).
+- Also safely inspects bounded Addressables UI/Localization `.bundle` files under
+  `*_Data/StreamingAssets/aa/` using the exact same strict whitelist.
+- NEVER scrapes custom MonoBehaviours, arbitrary ScriptableObjects, TextAssets, JSON files,
+  Assembly-CSharp.dll, or IL2CPP global-metadata.dat.
+- 100% read-only: never modifies any original file in `game_dir`.
 """
 from __future__ import annotations
 
 import re
 import struct
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,6 +28,16 @@ _DISPLAY_SCRIPTS = frozenset({
     "Text",
     "TextMesh",
 })
+# Strictly official structured localization table MonoBehaviour classes (zero code pollution)
+_LOCALIZATION_SCRIPTS = frozenset({
+    "StringTable",
+    "LanguageSourceAsset",
+    "LanguageSource",
+})
+
+_MAX_SINGLE_BUNDLE_BYTES = 48 * 1024 * 1024
+_MAX_TOTAL_BUNDLE_BYTES = 192 * 1024 * 1024
+_BUNDLE_SCAN_TIME_BUDGET_SEC = 5.0
 
 _ASSET_PATTERNS = (
     "globalgamemanagers",
@@ -96,10 +109,11 @@ _VOWELS = frozenset("aeiouyAEIOUY")
 
 @dataclass
 class StaticScanReport:
-    """Breakdown of read-only pure-static UI scan results."""
+    """Breakdown of read-only pure-static UI & official localization table scan results."""
 
     texts: list[str] = field(default_factory=list)
     by_source: dict[str, int] = field(default_factory=dict)
+    truncated: bool = False
 
     @property
     def total(self) -> int:
@@ -228,28 +242,170 @@ def _resolve_script_class(
     return cls_name
 
 
+def _extract_localization_table_texts(cls_name: str, tree: dict) -> list[str]:
+    """Extract strictly verified player-facing strings from Unity Localization or I2 Localization."""
+    out: list[str] = []
+    if cls_name == "StringTable":
+        rows = tree.get("m_TableData")
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    val = row.get("m_Localized")
+                    if isinstance(val, str) and val.strip():
+                        out.append(val)
+    elif cls_name in ("LanguageSourceAsset", "LanguageSource"):
+        msrc = tree.get("mSource")
+        if isinstance(msrc, dict):
+            terms = msrc.get("mTerms")
+            if isinstance(terms, list):
+                for item in terms:
+                    if not isinstance(item, dict):
+                        continue
+                    langs = item.get("Languages")
+                    if isinstance(langs, list):
+                        # Pick first non-empty translatable source-language entry per term
+                        for txt in langs:
+                            if isinstance(txt, str) and txt.strip() and is_translatable(txt):
+                                out.append(txt)
+                                break
+    return out
+
+
+def _scan_unitypy_env(
+    env,
+    *,
+    add_fn,
+    max_entries: int,
+    report: StaticScanReport,
+) -> None:
+    """Scan one loaded UnityPy environment with strict component/table class whitelisting."""
+    env_by_name = {Path(k).name.casefold(): af for k, af in env.files.items()}
+    script_cache: dict[tuple[str, int, int], str] = {}
+
+    for obj in env.objects:
+        if len(report.texts) >= max_entries:
+            report.truncated = True
+            break
+        otype = obj.type.name
+
+        # Native Unity TextMesh component (non-MonoBehaviour)
+        if otype == "TextMesh":
+            try:
+                tree = obj.read_typetree()
+                val = tree.get("m_Text") or ""
+                if isinstance(val, str):
+                    add_fn(val, "ui")
+            except Exception:
+                pass
+            continue
+
+        if otype != "MonoBehaviour":
+            continue
+
+        # ALWAYS resolve MonoScript class name first so custom/internal game scripts are NEVER scraped
+        cls_name = _resolve_script_class(obj, env_by_name, script_cache)
+        st = getattr(obj, "serialized_type", None)
+        node = getattr(st, "node", None) if st else None
+        root_type = str(getattr(node, "m_Type", "") or "") if node is not None else ""
+
+        # Strict Whitelist A: Official Unity Localization / I2 Localization structured tables
+        if cls_name in _LOCALIZATION_SCRIPTS and node is not None:
+            try:
+                tree = obj.read_typetree()
+                if isinstance(tree, dict):
+                    for s in _extract_localization_table_texts(cls_name, tree):
+                        if not add_fn(s, "localization"):
+                            break
+            except Exception:
+                pass
+            continue
+
+        # Strict Whitelist B: Unity native UI display text components ONLY
+        is_display_cls = cls_name in _DISPLAY_SCRIPTS or (not cls_name and root_type in _DISPLAY_SCRIPTS)
+        if not is_display_cls:
+            continue
+
+        if node is not None:
+            child_names = {c.m_Name for c in getattr(node, "m_Children", []) or []}
+            if "m_text" in child_names or "m_Text" in child_names:
+                try:
+                    tree = obj.read_typetree()
+                    val = tree.get("m_text") or tree.get("m_Text") or ""
+                    if isinstance(val, str):
+                        add_fn(val, "ui")
+                except Exception:
+                    pass
+                continue
+
+        # Stripped IL2CPP build fallback — ONLY for confirmed `_DISPLAY_SCRIPTS` components
+        raw = obj.get_raw_data()
+        if not raw:
+            continue
+        for s in _scan_length_prefixed_utf8(raw):
+            if not add_fn(s, "ui"):
+                break
+
+
+def _collect_safe_addressable_bundles(data_dir: Path) -> list[Path]:
+    """Collect bounded `.bundle` files under `StreamingAssets/aa` (strictly skipping huge media packs)."""
+    aa_dir = data_dir / "StreamingAssets" / "aa"
+    if not aa_dir.is_dir():
+        return []
+    cands: list[tuple[int, int, Path]] = []
+    try:
+        for p in aa_dir.rglob("*.bundle"):
+            if not p.is_file():
+                continue
+            try:
+                sz = p.stat().st_size
+            except OSError:
+                continue
+            if sz <= 0 or sz > _MAX_SINGLE_BUNDLE_BYTES:
+                continue
+            low = p.name.casefold()
+            # Prioritize localization / UI / scene / prefab bundles ahead of generic asset packs
+            prio = 0 if any(k in low for k in ("localiz", "string", "table", "ui", "menu", "scene", "hud")) else 1
+            cands.append((prio, sz, p))
+    except OSError:
+        return []
+
+    cands.sort(key=lambda x: (x[0], x[1]))
+    chosen: list[Path] = []
+    total_bytes = 0
+    for _prio, sz, p in cands:
+        if total_bytes + sz > _MAX_TOTAL_BUNDLE_BYTES:
+            continue
+        chosen.append(p)
+        total_bytes += sz
+        if len(chosen) >= 80:
+            break
+    return chosen
+
+
 def scan_unity_static_texts_detailed(
     game_dir: str | Path,
     *,
-    max_entries: int = 2000,
+    max_entries: int = 3000,
 ) -> StaticScanReport:
-    """Strictly read-only scan of 100%-safe pure static Unity UI text components.
+    """Strictly read-only, 100%-safe scan of static Unity UI components & official localization tables.
 
     Only extracts display strings from `TextMeshProUGUI`, `TextMeshPro`, `TMP_Text`,
-    `Text`, and `TextMesh`. Everything dynamic/scripted is delegated to XUAT's Hook.
+    `Text`, `TextMesh`, Unity `StringTable`, and I2 `LanguageSourceAsset`/`LanguageSource`.
+    Everything dynamic/scripted is delegated to XUAT's Hook.
     """
     report = StaticScanReport(by_source={"ui": 0})
     seen: set[str] = set()
 
-    def _add(text: str) -> bool:
+    def _add(text: str, bucket: str = "ui") -> bool:
         if len(report.texts) >= max_entries:
+            report.truncated = True
             return False
         s = text.strip()
         if not s or s in seen or _looks_like_noise_display(s):
             return True
         seen.add(s)
         report.texts.append(s)
-        report.by_source["ui"] += 1
+        report.by_source[bucket] = report.by_source.get(bucket, 0) + 1
         return True
 
     root = Path(game_dir).resolve()
@@ -272,61 +428,26 @@ def scan_unity_static_texts_detailed(
             p for p in data_dir.glob(pat)
             if p.is_file() and not p.name.endswith((".resS", ".resource"))
         )
-    if not files:
-        return report
 
-    try:
-        env = UnityPy.load(*[str(f) for f in sorted(set(files))])
-    except Exception:
-        return report
+    if files:
+        try:
+            env = UnityPy.load(*[str(f) for f in sorted(set(files))])
+            _scan_unitypy_env(env, add_fn=_add, max_entries=max_entries, report=report)
+        except Exception:
+            pass
 
-    env_by_name = {Path(k).name.casefold(): af for k, af in env.files.items()}
-    script_cache: dict[tuple[str, int, int], str] = {}
-
-    for obj in env.objects:
-        if len(report.texts) >= max_entries:
-            break
-        otype = obj.type.name
-
-        # Native Unity TextMesh component (non-MonoBehaviour)
-        if otype == "TextMesh":
-            try:
-                tree = obj.read_typetree()
-                val = tree.get("m_Text") or ""
-                if isinstance(val, str):
-                    _add(val)
-            except Exception:
-                pass
-            continue
-
-        if otype != "MonoBehaviour":
-            continue
-
-        # Path 1: Embedded typetree with explicit UI m_text / m_Text field
-        st = getattr(obj, "serialized_type", None)
-        node = getattr(st, "node", None) if st else None
-        if node is not None:
-            child_names = {c.m_Name for c in getattr(node, "m_Children", []) or []}
-            if "m_text" in child_names or "m_Text" in child_names:
-                try:
-                    tree = obj.read_typetree()
-                    val = tree.get("m_text") or tree.get("m_Text") or ""
-                    if isinstance(val, str):
-                        _add(val)
-                except Exception:
-                    pass
-                continue
-
-        # Path 2: Stripped build — ONLY known Unity UI display components
-        cls_name = _resolve_script_class(obj, env_by_name, script_cache)
-        if cls_name not in _DISPLAY_SCRIPTS:
-            continue
-        raw = obj.get_raw_data()
-        if not raw:
-            continue
-        for s in _scan_length_prefixed_utf8(raw):
-            if not _add(s):
+    # Safe, strictly bounded read-only pass over Addressables `.bundle` archives (UI & Localization tables only)
+    if len(report.texts) < max_entries:
+        bundles = _collect_safe_addressable_bundles(data_dir)
+        deadline = time.monotonic() + _BUNDLE_SCAN_TIME_BUDGET_SEC
+        for bpath in bundles:
+            if len(report.texts) >= max_entries or time.monotonic() >= deadline:
                 break
+            try:
+                b_env = UnityPy.load(str(bpath))
+                _scan_unitypy_env(b_env, add_fn=_add, max_entries=max_entries, report=report)
+            except Exception:
+                continue
 
     return report
 

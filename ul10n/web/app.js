@@ -1,4 +1,4 @@
-/* UL10nForge v2 — Zero-build modern ES Module frontend */
+/* UL10nForge v3 — Zero-build modern ES Module frontend with studio motion & acoustic micro-SFX */
 
 const state = {
   tab: "workbench",
@@ -8,23 +8,30 @@ const state = {
   context: null,
   settings: null,
   fonts: [],
+  presets: [],
   runtime: null,
   task: null,
   liveFeed: [],
+  freshEntryIds: new Set(),
+  glossaryImpact: null, // { term, translation, count }
   editor: {
     source: "all",
     status: "all",
+    extraFilter: "",
     search: "",
     offset: 0,
     limit: 40,
     total: 0,
     entries: [],
+    selected: new Set(),
   },
   glossarySubtab: "project-glossary",
 };
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+const SESSION_TOKEN = document.querySelector('meta[name="ul10n-token"]')?.getAttribute("content") || "";
 
 const STATUS_LABELS = {
   pending: "待翻译",
@@ -42,19 +49,36 @@ const TASK_STAGE_LABELS = {
   context: "语境识别",
 };
 
+const SOURCE_LANG_LABELS = {
+  auto: "自动检测",
+  en: "英文",
+  ja: "日文",
+  ko: "韩文",
+  ru: "俄文",
+  fr: "法文",
+  de: "德文",
+  es: "西文",
+};
+
 /* ── HTTP & Toast Helpers ──────────────────────────────────────────── */
 
 async function api(path, options = {}) {
-  const init = {
-    headers: { "Content-Type": "application/json" },
-    ...options,
+  const headers = {
+    "Content-Type": "application/json",
+    ...(SESSION_TOKEN ? { "X-UL10n-Token": SESSION_TOKEN } : {}),
+    ...(options.headers || {}),
   };
+  const init = { ...options, headers };
   if (init.body && typeof init.body !== "string") {
     init.body = JSON.stringify(init.body);
   }
   const resp = await fetch(path, init);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
+    if (resp.status === 403 && String(data.detail || "").includes("会话令牌")) {
+      toast("后台服务已重启，正在自动刷新同步页面…");
+      setTimeout(() => window.location.reload(), 700);
+    }
     throw new Error(data.detail || `请求失败 (${resp.status})`);
   }
   return data;
@@ -67,13 +91,20 @@ function toast(message, type = "ok") {
   el.className = `toast ${type}`;
   el.textContent = message;
   stack.appendChild(el);
-  setTimeout(() => el.remove(), 3400);
+  setTimeout(() => {
+    el.style.opacity = "0";
+    el.style.transform = "translateX(14px)";
+    el.style.transition = "opacity 0.2s ease, transform 0.2s ease";
+    setTimeout(() => el.remove(), 220);
+  }, 3400);
 }
 
-/* ── Minimalist Synthesized UI Sound Effects (Web Audio API) ───────── */
+/* ── Acoustic Studio Micro-SFX Engine (Warm Filtered Web Audio) ────── */
 
 const sfx = (() => {
   let ctx = null;
+  let lastLiveAt = 0;
+
   function getCtx() {
     if (typeof window === "undefined") return null;
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -82,73 +113,142 @@ const sfx = (() => {
     if (ctx.state === "suspended") ctx.resume().catch(() => {});
     return ctx;
   }
+
   function isEnabled(force = false) {
     if (force) return true;
     return state.settings ? state.settings.sound_effects !== false : true;
   }
-  function tone(freq, { delay = 0, duration = 0.14, gain = 0.042, type = "sine", endFreq = null } = {}) {
+
+  function voice(
+    freq,
+    { delay = 0, duration = 0.16, gain = 0.036, type = "sine", endFreq = null, cutoff = 2600, q = 0.7 } = {}
+  ) {
     try {
       const c = getCtx();
       if (!c) return;
       const t0 = c.currentTime + delay;
       const osc = c.createOscillator();
+      const filter = c.createBiquadFilter();
       const g = c.createGain();
+
       osc.type = type;
       osc.frequency.setValueAtTime(freq, t0);
       if (endFreq && endFreq !== freq) {
         osc.frequency.exponentialRampToValueAtTime(endFreq, t0 + duration);
       }
+
+      filter.type = "lowpass";
+      filter.frequency.setValueAtTime(cutoff, t0);
+      filter.Q.setValueAtTime(q, t0);
+
       g.gain.setValueAtTime(0.0001, t0);
-      g.gain.linearRampToValueAtTime(gain, t0 + 0.008);
+      g.gain.linearRampToValueAtTime(gain, t0 + 0.007);
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + duration);
-      osc.connect(g);
+
+      osc.connect(filter);
+      filter.connect(g);
       g.connect(c.destination);
       osc.start(t0);
-      osc.stop(t0 + duration + 0.02);
+      osc.stop(t0 + duration + 0.03);
     } catch {
       // Ignore audio errors in unsupported or restricted environments
     }
   }
+
   return {
     tap() {
       if (!isEnabled()) return;
-      tone(680, { duration: 0.048, gain: 0.026, endFreq: 480 });
+      voice(620, { duration: 0.042, gain: 0.022, type: "triangle", endFreq: 460, cutoff: 1800 });
+      voice(1240, { duration: 0.026, gain: 0.009, type: "sine", cutoff: 2400 });
     },
     toggle(on, { force = false } = {}) {
       if (!isEnabled(force)) return;
       if (on) {
-        tone(523.25, { duration: 0.085, gain: 0.036 });
-        tone(659.25, { delay: 0.045, duration: 0.11, gain: 0.038 });
+        voice(587.33, { duration: 0.09, gain: 0.028, type: "triangle", cutoff: 2200 });
+        voice(880.0, { delay: 0.042, duration: 0.14, gain: 0.026, type: "sine", cutoff: 2800 });
       } else {
-        tone(587.33, { duration: 0.075, gain: 0.032 });
-        tone(440.0, { delay: 0.045, duration: 0.1, gain: 0.03 });
+        voice(659.25, { duration: 0.08, gain: 0.024, type: "triangle", cutoff: 1900 });
+        voice(440.0, { delay: 0.04, duration: 0.12, gain: 0.022, type: "sine", cutoff: 1600 });
       }
     },
     save() {
       if (!isEnabled()) return;
-      tone(659.25, { duration: 0.12, gain: 0.038 });
-      tone(987.77, { delay: 0.055, duration: 0.2, gain: 0.036 });
+      // Soft crystalline major-9th pluck
+      voice(659.25, { duration: 0.15, gain: 0.028, type: "triangle", cutoff: 2600 });
+      voice(987.77, { delay: 0.05, duration: 0.22, gain: 0.026, type: "sine", cutoff: 3200 });
+      voice(1479.98, { delay: 0.09, duration: 0.26, gain: 0.014, type: "sine", cutoff: 3600 });
     },
-    done() {
-      if (!isEnabled()) return;
-      tone(523.25, { duration: 0.18, gain: 0.038 });
-      tone(659.25, { delay: 0.06, duration: 0.2, gain: 0.04 });
-      tone(783.99, { delay: 0.12, duration: 0.24, gain: 0.042 });
-      tone(1046.5, { delay: 0.19, duration: 0.36, gain: 0.034 });
+    done({ force = false } = {}) {
+      if (!isEnabled(force)) return;
+      // Warm ascending pentatonic harp bloom
+      const notes = [523.25, 659.25, 783.99, 987.77, 1174.66];
+      notes.forEach((f, idx) => {
+        voice(f, {
+          delay: idx * 0.055,
+          duration: 0.28 + idx * 0.04,
+          gain: idx === notes.length - 1 ? 0.022 : 0.026,
+          type: idx === 0 ? "triangle" : "sine",
+          cutoff: 3000,
+        });
+      });
     },
     launch() {
       if (!isEnabled()) return;
-      tone(587.33, { duration: 0.14, gain: 0.038, type: "triangle" });
-      tone(880.0, { delay: 0.065, duration: 0.18, gain: 0.038 });
-      tone(1174.66, { delay: 0.13, duration: 0.28, gain: 0.032 });
+      voice(440.0, { duration: 0.16, gain: 0.028, type: "triangle", cutoff: 2000 });
+      voice(659.25, { delay: 0.055, duration: 0.2, gain: 0.028, type: "sine", cutoff: 2600 });
+      voice(1174.66, { delay: 0.11, duration: 0.3, gain: 0.022, type: "sine", cutoff: 3200 });
+    },
+    live() {
+      if (!isEnabled()) return;
+      const now = Date.now();
+      if (now - lastLiveAt < 2200) return;
+      lastLiveAt = now;
+      voice(880.0, { duration: 0.08, gain: 0.012, type: "sine", endFreq: 1046.5, cutoff: 2200 });
     },
     error() {
       if (!isEnabled()) return;
-      tone(235, { duration: 0.11, gain: 0.044, type: "triangle", endFreq: 210 });
-      tone(175, { delay: 0.095, duration: 0.16, gain: 0.04, type: "triangle", endFreq: 158 });
+      voice(210, { duration: 0.11, gain: 0.036, type: "triangle", endFreq: 180, cutoff: 900 });
+      voice(155, { delay: 0.095, duration: 0.16, gain: 0.032, type: "triangle", endFreq: 138, cutoff: 760 });
     },
   };
 })();
+
+/* ── Smooth Animated Stat Counter ──────────────────────────────────── */
+
+const _numAnimTargets = new WeakMap();
+
+function animateNum(el, nextVal) {
+  if (!el) return;
+  const target = Number(nextVal) || 0;
+  const prev = Number(el.dataset.numVal ?? el.textContent) || 0;
+  el.dataset.numVal = String(target);
+  if (prev === target) {
+    el.textContent = String(target);
+    return;
+  }
+  const prevRaf = _numAnimTargets.get(el);
+  if (prevRaf) cancelAnimationFrame(prevRaf);
+  const t0 = performance.now();
+  const dur = 260;
+  const step = (now) => {
+    const p = Math.min(1, (now - t0) / dur);
+    const eased = 1 - Math.pow(1 - p, 3);
+    el.textContent = String(Math.round(prev + (target - prev) * eased));
+    if (p < 1) {
+      _numAnimTargets.set(el, requestAnimationFrame(step));
+    } else {
+      el.textContent = String(target);
+    }
+  };
+  _numAnimTargets.set(el, requestAnimationFrame(step));
+}
+
+function applyHotkeyLabels(hotkey) {
+  const hk = hotkey || "Alt+L";
+  $$(".hud-hk-text").forEach((el) => {
+    el.textContent = hk;
+  });
+}
 
 function applySoundUI(enabled) {
   const on = enabled !== false;
@@ -205,13 +305,13 @@ function applyReasoningMode(disabled) {
   if (engEyebrow) engEyebrow.textContent = off ? "翻译引擎" : "推理与翻译引擎";
 
   const step2 = $("#empty-step-2");
-  if (step2) step2.innerHTML = off ? "<span>2</span> 快速批量翻译" : "<span>2</span> 翻译与审校修正";
+  if (step2) step2.innerHTML = off ? "<span>2</span> 快速批量翻译" : "<span>2</span> 语境术语翻译与审校";
 
   const autoBtn = $("#btn-auto-localize");
   if (autoBtn) {
     autoBtn.title = off
-      ? "自动完成：扫描界面文本 → 批量翻译 → 接入游戏（已跳过背景识别与审校）"
-      : "自动完成：扫描界面文本 → 识别游戏背景 → 批量翻译 → 审校 → 接入游戏";
+      ? "自动完成：安全扫描文本 → 批量翻译 → 接入游戏（已跳过背景识别与审校）"
+      : "自动完成：安全扫描文本 → 识别游戏背景 → 批量翻译 → 审校 → 接入游戏";
   }
 
   const chk = $("#chk-disable-reasoning");
@@ -249,7 +349,11 @@ function switchTab(tab) {
   $("#tab-glossary").hidden = tab !== "glossary";
   $("#tab-settings").hidden = tab !== "settings";
 
-  if (tab === "editor" && hasProject) loadEntries();
+  if (tab !== "editor") {
+    $("#editor-bulk-dock").hidden = true;
+  } else if (hasProject) {
+    loadEntries();
+  }
   if (tab === "glossary") loadGlossaryView();
   if (tab === "settings") renderSettings();
 }
@@ -257,20 +361,24 @@ function switchTab(tab) {
 /* ── Data Loading & Rendering ──────────────────────────────────────── */
 
 async function bootstrap() {
-  const [projRes, setRes, taskRes, fontRes] = await Promise.all([
+  const [projRes, setRes, taskRes, fontRes, presetRes] = await Promise.all([
     api("/api/projects"),
     api("/api/settings"),
     api("/api/tasks/current"),
     api("/api/fonts").catch(() => ({ fonts: [] })),
+    api("/api/runtime/presets").catch(() => ({ presets: [] })),
   ]);
 
   state.settings = setRes.settings;
   state.runtime = setRes.runtime;
   state.fonts = fontRes.fonts || [];
+  state.presets = presetRes.presets || [];
   registerFontFaces(state.fonts);
+  renderPresetOptions();
   applyTheme(state.settings.theme);
   applySoundUI(state.settings.sound_effects);
   applyReasoningMode(state.settings.disable_reasoning);
+  applyHotkeyLabels(state.settings.overlay_hotkey || "Alt+L");
   renderRuntime();
   renderSettings();
 
@@ -288,6 +396,16 @@ async function bootstrap() {
   }
 
   connectEvents();
+}
+
+function renderPresetOptions() {
+  const sel = $("#api-preset-select");
+  if (!sel) return;
+  const opts = [`<option value="">自定义 OpenAI 兼容接口…</option>`];
+  for (const p of state.presets) {
+    opts.push(`<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`);
+  }
+  sel.innerHTML = opts.join("");
 }
 
 function renderProjectSelector() {
@@ -314,6 +432,9 @@ async function selectProject(projectId) {
   state.context = data.context;
   state.liveFeed = recent.entries || [];
   state.editor.offset = 0;
+  state.editor.selected.clear();
+  state.glossaryImpact = null;
+  renderGlossaryImpactBanner();
   renderProjectSelector();
   renderWorkbench();
   switchTab(state.tab);
@@ -345,6 +466,9 @@ function renderWorkbench() {
   if (p.arch) parts.push(p.arch);
   $("#wb-game-meta").textContent = parts.length ? parts.join(" · ") : "已就绪 · 支持词典导入与实时翻译";
 
+  const srcSel = $("#wb-source-lang");
+  if (srcSel) srcSel.value = p.source_lang || "auto";
+
   const hookPill = $("#wb-hook-pill");
   hookPill.textContent = p.hook_deployed ? "已接入 · 可直接游玩" : "待启动时自动接入";
   hookPill.classList.toggle("deployed", Boolean(p.hook_deployed));
@@ -356,6 +480,18 @@ function renderWorkbench() {
       protWarn.hidden = false;
     } else {
       protWarn.hidden = true;
+    }
+  }
+
+  // Dynamic-load expectation banner when static UI count is tiny
+  const dynHint = $("#wb-dynamic-hint");
+  if (dynHint) {
+    if (st.total < 25 && st.live === 0) {
+      dynHint.textContent =
+        "💡 提示：该游戏采用动态加载剧情或外置剧本，安全预扫描仅提取界面文本。启动游戏游玩时，画面中出现的对白将自动实时拦截翻译（首次约 0.3 秒，之后永久离线秒出）。";
+      dynHint.hidden = false;
+    } else {
+      dynHint.hidden = true;
     }
   }
 
@@ -374,10 +510,10 @@ function renderWorkbench() {
   $("#wb-ring-fg").style.strokeDashoffset = String(circumference * (1 - pct / 100));
   $("#wb-pct").textContent = `${pct}%`;
 
-  $("#st-total").textContent = st.total ?? 0;
-  $("#st-done").textContent = st.done ?? 0;
-  $("#st-pending").textContent = st.pending ?? 0;
-  $("#st-flagged").textContent = (st.flagged || 0) + (st.failed || 0);
+  animateNum($("#st-total"), st.total ?? 0);
+  animateNum($("#st-done"), st.done ?? 0);
+  animateNum($("#st-pending"), st.pending ?? 0);
+  animateNum($("#st-flagged"), (st.flagged || 0) + (st.failed || 0));
 
   const badge = $("#nav-entry-badge");
   badge.hidden = !st.total;
@@ -424,27 +560,35 @@ function renderLiveFeed() {
   }
   box.innerHTML = state.liveFeed
     .slice(0, 12)
-    .map(
-      (item) => `
-      <div class="feed-row" data-orig="${escapeHtml(item.original)}">
-        <span class="feed-orig">${escapeHtml(item.original)}</span>
-        <span class="feed-tr">${escapeHtml(item.translation || "（等待译文）")}</span>
-        <span class="badge ${item.source === "xuat_live" ? "live" : "static"}">${item.source === "xuat_live" ? "实时" : "静态"}</span>
-        <span class="badge ${escapeHtml(item.status)}">${STATUS_LABELS[item.status] || item.status}</span>
-      </div>
-    `
-    )
+    .map((item) => {
+      const isNew = state.freshEntryIds.has(item.id);
+      return `
+        <div class="feed-row ${isNew ? "is-new" : ""}" data-orig="${escapeHtml(item.original)}">
+          <span class="feed-orig">${escapeHtml(item.original)}</span>
+          <span class="feed-tr">${escapeHtml(item.translation || "（等待译文）")}</span>
+          <span class="badge ${item.source === "xuat_live" ? "live" : "static"}">${item.source === "xuat_live" ? "实时" : "静态"}</span>
+          <span class="badge ${escapeHtml(item.status)}">${STATUS_LABELS[item.status] || item.status}</span>
+        </div>
+      `;
+    })
     .join("");
+
+  if (state.freshEntryIds.size) {
+    setTimeout(() => state.freshEntryIds.clear(), 1200);
+  }
 
   $$(".feed-row").forEach((row) => {
     row.addEventListener("click", () => {
+      sfx.tap();
       state.editor.search = row.dataset.orig || "";
       state.editor.source = "all";
       state.editor.status = "all";
+      state.editor.extraFilter = "";
       state.editor.offset = 0;
       $("#editor-search").value = state.editor.search;
       $$("#editor-sources button").forEach((b) => b.classList.toggle("active", b.dataset.source === "all"));
       $$("#editor-filters .pill").forEach((b) => b.classList.toggle("active", b.dataset.status === "all"));
+      $$("#editor-extra-filters .pill").forEach((b) => b.classList.toggle("active", b.dataset.extra === ""));
       switchTab("editor");
     });
   });
@@ -469,7 +613,6 @@ function renderRuntime() {
   $("#engine-label").textContent = labelMap[tr.state] || "引擎待命";
   $("#engine-sub").textContent = tr.mode === "api" ? tr.label : (tr.backend ? `${tr.backend} 加速` : "点击预热或设置");
 
-  // Settings model mini cards
   $("#card-tr-name").textContent = tr.label || "未检测到翻译模型";
   const trBadge = $("#card-tr-state");
   trBadge.textContent = { ready: "运行中", starting: "启动中…", idle: "未启动", missing: "缺失" }[tr.state] || tr.state;
@@ -481,7 +624,7 @@ function renderRuntime() {
   rsBadge.className = `badge ${rs.state || ""}`;
 
   if (rt.gpu_name) {
-    $("#set-gpu-hint").textContent = `已识别显卡：${rt.gpu_name}（支持自动加速与 CPU 回退）`;
+    $("#set-gpu-hint").textContent = `已识别显卡：${rt.gpu_name}（支持 CUDA / Vulkan 自动加速与 CPU 回退）`;
   }
 }
 
@@ -551,18 +694,11 @@ function applyTaskState(nextTask, { fromHttpStart = false } = {}) {
     return;
   }
   const prev = state.task;
-  // Guard against SSE-vs-HTTP race: never overwrite a newer seq or terminal state of same task
   if (prev && prev.task_id === nextTask.task_id) {
     const prevTerminal = prev.status !== "running";
-    if (prevTerminal && nextTask.status === "running") {
-      return;
-    }
-    if ((nextTask.seq ?? 0) < (prev.seq ?? 0)) {
-      return;
-    }
-    if (fromHttpStart && prevTerminal) {
-      return;
-    }
+    if (prevTerminal && nextTask.status === "running") return;
+    if ((nextTask.seq ?? 0) < (prev.seq ?? 0)) return;
+    if (fromHttpStart && prevTerminal) return;
   }
   const transitionedToDone =
     nextTask.status === "completed" &&
@@ -571,7 +707,6 @@ function applyTaskState(nextTask, { fromHttpStart = false } = {}) {
   state.task = nextTask;
   renderTaskProgress({ showDoneBanner: transitionedToDone });
 
-  // Safety poll while running so progress bar can NEVER get stuck even if SSE drops
   if (state.task.status === "running") {
     if (!taskPollTimer) {
       taskPollTimer = setInterval(async () => {
@@ -605,7 +740,12 @@ function renderTaskProgress({ showDoneBanner = false } = {}) {
   const bar = $("#global-progress");
   const fill = $("#gp-fill");
   const cancelBtn = $("#btn-cancel-task");
+  const progressPanel = $("#wb-progress-panel");
   const t = state.task;
+
+  if (progressPanel) {
+    progressPanel.classList.toggle("is-running", Boolean(t && t.status === "running"));
+  }
 
   if (t && t.status === "running") {
     clearTimeout(doneHideTimer);
@@ -648,7 +788,7 @@ function renderTaskProgress({ showDoneBanner = false } = {}) {
         bar.hidden = true;
         bar.classList.remove("is-done");
       }
-    }, 2400);
+    }, 2600);
     return;
   }
 
@@ -659,7 +799,7 @@ function renderTaskProgress({ showDoneBanner = false } = {}) {
   }
 }
 
-/* ── Editor (View & Inline Edit Original / Translation) ────────────── */
+/* ── Editor (View, Multi-Select Bulk Actions, Page Jump & Inline Edit) ─ */
 
 function buildEntryBadgesHtml(e) {
   const srcBadge =
@@ -673,11 +813,29 @@ function buildEntryBadgesHtml(e) {
       : !hideReview && e.status !== "skipped" && e.review_level === "PASS"
       ? `<span class="badge">已审校</span>`
       : "";
+  const lockBadge = e.locked && e.status !== "skipped" ? `<span class="badge">已锁</span>` : "";
   return (
     srcBadge +
     `<span class="badge ${escapeHtml(e.status)}">${STATUS_LABELS[e.status] || e.status}</span>` +
-    revBadge
+    revBadge +
+    lockBadge
   );
+}
+
+function updateBulkDock() {
+  const dock = $("#editor-bulk-dock");
+  const count = state.editor.selected.size;
+  if (!dock) return;
+  const visible = state.tab === "editor" && count > 0;
+  dock.hidden = !visible;
+  if (visible) {
+    $("#bulk-selected-count").textContent = `已选 ${count} 条`;
+  }
+  const pageIds = state.editor.entries.map((e) => e.id);
+  const chkAll = $("#chk-select-page");
+  if (chkAll) {
+    chkAll.checked = pageIds.length > 0 && pageIds.every((id) => state.editor.selected.has(id));
+  }
 }
 
 async function loadEntries({ skipWorkbench = false } = {}) {
@@ -685,6 +843,7 @@ async function loadEntries({ skipWorkbench = false } = {}) {
   const q = new URLSearchParams({
     source: state.editor.source,
     status: state.editor.status,
+    extra_filter: state.editor.extraFilter || "",
     search: state.editor.search,
     offset: String(state.editor.offset),
     limit: String(state.editor.limit),
@@ -705,7 +864,7 @@ function renderEditorList() {
     const emptyHint =
       state.editor.source === "live"
         ? "暂无游戏内实时翻译记录。启动游戏游玩时，画面中出现的动态与剧情文本会自动捕获并实时显示在这里。"
-        : "当前筛选下没有词条。可在工作台点击「扫描静态文本」、启动游戏实时捕获，或点击右上角「+ 添加」。";
+        : "当前筛选下没有词条。可在工作台点击「扫描安全文本」、启动游戏实时捕获，或点击右上角「+ 添加」。";
     list.innerHTML = `<div class="feed-empty" style="margin:18px">${emptyHint}</div>`;
   } else {
     list.innerHTML = entries
@@ -716,6 +875,7 @@ function renderEditorList() {
           ? `<div class="entry-note fail">提示：${escapeHtml(e.quality_note)}</div>`
           : "";
         const isSkipped = e.status === "skipped";
+        const isSel = state.editor.selected.has(e.id);
         const hasPrev = Boolean(!isSkipped && (e.prev_translation || "").trim() && e.prev_translation !== e.translation);
         const skipToggleHtml = isSkipped
           ? `<button class="row-btn btn-unskip-row" title="恢复翻译此条">恢复</button>`
@@ -723,7 +883,10 @@ function renderEditorList() {
         const taVal = isSkipped ? "" : e.translation;
         const taPlaceholder = isSkipped ? "已设为不翻译，游戏中将保留原文" : "输入译文…";
         return `
-          <div class="entry-row" data-id="${e.id}" data-source="${escapeHtml(e.source || "")}">
+          <div class="entry-row ${isSel ? "is-selected" : ""}" data-id="${e.id}" data-source="${escapeHtml(e.source || "")}">
+            <label class="row-check-wrap">
+              <input type="checkbox" class="row-check" ${isSel ? "checked" : ""} />
+            </label>
             <div>
               <div class="entry-orig">${escapeHtml(e.original)}</div>
               ${noteHtml}
@@ -744,15 +907,29 @@ function renderEditorList() {
       .join("");
   }
 
-  // Wire row interactions
   $$(".entry-row").forEach((row) => {
     const id = Number(row.dataset.id);
+    const chk = row.querySelector(".row-check");
     const ta = row.querySelector(".entry-textarea");
     const saveBtn = row.querySelector(".btn-save-row");
     const retransBtn = row.querySelector(".btn-retrans-row");
     const undoBtn = row.querySelector(".btn-undo-row");
     const skipBtn = row.querySelector(".btn-skip-row");
     const unskipBtn = row.querySelector(".btn-unskip-row");
+
+    if (chk) {
+      chk.addEventListener("change", () => {
+        if (chk.checked) {
+          state.editor.selected.add(id);
+          row.classList.add("is-selected");
+        } else {
+          state.editor.selected.delete(id);
+          row.classList.remove("is-selected");
+        }
+        sfx.tap();
+        updateBulkDock();
+      });
+    }
 
     const autoResize = () => {
       ta.style.height = "auto";
@@ -790,7 +967,7 @@ function renderEditorList() {
           if (saveBtn) saveBtn.textContent = "保存";
         }, 1200);
         sfx.save();
-        toast("译文已保存并同步到游戏");
+        toast("译文已保存并热同步到游戏");
       } catch (err) {
         saveBtn.textContent = "保存";
         toast(err.message, "err");
@@ -823,7 +1000,6 @@ function renderEditorList() {
     });
 
     if (saveBtn) {
-      // Prevent textarea blur from double-firing right before click
       saveBtn.addEventListener("mousedown", (ev) => ev.preventDefault());
       saveBtn.addEventListener("click", () => saveEntry({ force: true }));
     }
@@ -841,10 +1017,10 @@ function renderEditorList() {
           ta.dataset.origVal = res.entry.translation;
           autoResize();
           state.stats = res.stats;
-          const badges = row.querySelector(".entry-badges");
-          badges.innerHTML = buildEntryBadgesHtml(res.entry);
+          row.querySelector(".entry-badges").innerHTML = buildEntryBadgesHtml(res.entry);
           renderWorkbench();
-          toast(res.ok ? "重译完成" : `重译提醒：${res.note}`, res.ok ? "ok" : "err");
+          if (res.ok) sfx.save();
+          toast(res.ok ? "重译完成并同步" : `重译提醒：${res.note}`, res.ok ? "ok" : "err");
         } catch (err) {
           toast(err.message, "err");
         } finally {
@@ -859,6 +1035,7 @@ function renderEditorList() {
         try {
           const res = await api(`/api/projects/${state.project.id}/entries/${id}/restore`, { method: "POST" });
           state.stats = res.stats;
+          sfx.save();
           loadEntries();
           toast("已还原上一版译文并同步");
         } catch (err) {
@@ -872,6 +1049,7 @@ function renderEditorList() {
         try {
           const res = await api(`/api/projects/${state.project.id}/entries/${id}/skip`, { method: "POST" });
           state.stats = res.stats;
+          sfx.tap();
           loadEntries();
           toast("已设为不翻译，游戏中将保留原文");
         } catch (err) {
@@ -885,6 +1063,7 @@ function renderEditorList() {
         try {
           const res = await api(`/api/projects/${state.project.id}/entries/${id}/unskip`, { method: "POST" });
           state.stats = res.stats;
+          sfx.tap();
           loadEntries();
           toast("已恢复该词条");
         } catch (err) {
@@ -894,18 +1073,37 @@ function renderEditorList() {
     }
   });
 
-  // Pagination
+  // Pagination + Page Jump
   const { offset, limit, total } = state.editor;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const curPage = Math.min(totalPages, Math.floor(offset / limit) + 1);
   const start = total ? offset + 1 : 0;
   const end = Math.min(offset + limit, total);
   $("#editor-page-info").textContent = `显示 ${start}–${end} / 共 ${total} 条`;
+  $("#editor-page-jump").value = String(curPage);
+  $("#editor-page-jump").max = String(totalPages);
+  $("#editor-page-total").textContent = `/ ${totalPages}`;
   $("#btn-prev-page").disabled = offset <= 0;
   $("#btn-next-page").disabled = offset + limit >= total;
+  updateBulkDock();
 }
 
-/* ── Glossary & Memory ─────────────────────────────────────────────── */
+/* ── Glossary & Memory (with Impact Propagation) ───────────────────── */
 
 const GLOSSARY_CATS = ["术语", "角色", "地名", "物品", "UI"];
+
+function renderGlossaryImpactBanner() {
+  const banner = $("#glossary-impact-banner");
+  const info = state.glossaryImpact;
+  if (!banner) return;
+  if (!info || !info.count || !state.project || state.glossarySubtab !== "project-glossary") {
+    banner.hidden = true;
+    return;
+  }
+  $("#glossary-impact-text").textContent =
+    `检测到 ${info.count} 条已译词条包含「${info.term}」但尚未使用新译名「${info.translation}」，可一键按新术语统一重译并同步到游戏。`;
+  banner.hidden = false;
+}
 
 async function refreshGlossaryCounts() {
   try {
@@ -925,6 +1123,7 @@ async function loadGlossaryView() {
   $("#panel-glossary").hidden = isMem;
   $("#panel-memory").hidden = !isMem;
   $("#btn-glossary-import").hidden = isMem;
+  renderGlossaryImpactBanner();
   refreshGlossaryCounts();
 
   if (isMem) {
@@ -978,6 +1177,7 @@ async function loadGlossaryView() {
     $$("[data-del-mem]").forEach((b) =>
       b.addEventListener("click", async () => {
         await api(`/api/memory/${b.dataset.delMem}`, { method: "DELETE" });
+        sfx.tap();
         loadGlossaryView();
       })
     );
@@ -993,7 +1193,7 @@ async function loadGlossaryView() {
   const data = await api(`${baseUrl}?search=${q}`);
   const list = $("#glossary-list");
   if (!data.items.length) {
-    list.innerHTML = `<div class="feed-empty">${q ? "未找到匹配的术语。" : "暂无术语。添加角色名或专有名词后，翻译与审校会自动保持一致。"}</div>`;
+    list.innerHTML = `<div class="feed-empty">${q ? "未找到匹配的术语。" : "暂无术语。添加角色名或专有名词后，实时翻译与审校会自动保持精准一致。"}</div>`;
     return;
   }
   list.innerHTML = data.items
@@ -1030,12 +1230,18 @@ async function loadGlossaryView() {
         return toast("原文和译名均不能为空", "err");
       }
       try {
-        await api(`${baseUrl}/${id}`, { method: "PUT", body: { term, translation, category } });
+        const res = await api(`${baseUrl}/${id}`, { method: "PUT", body: { term, translation, category } });
         srcInp.dataset.orig = term;
         dstInp.dataset.orig = translation;
         catSel.dataset.orig = category;
         sfx.save();
-        toast("术语已更新");
+        if (sub === "project-glossary" && (res.impacted_count || 0) > 0) {
+          state.glossaryImpact = { term, translation, count: res.impacted_count };
+          renderGlossaryImpactBanner();
+          toast(`术语已更新（发现 ${res.impacted_count} 条旧译可一键同步）`);
+        } else {
+          toast("术语已更新");
+        }
       } catch (err) {
         toast(err.message, "err");
         srcInp.value = srcInp.dataset.orig;
@@ -1058,6 +1264,7 @@ async function loadGlossaryView() {
   $$("[data-del-term]").forEach((b) =>
     b.addEventListener("click", async () => {
       await api(`${baseUrl}/${b.dataset.delTerm}`, { method: "DELETE" });
+      sfx.tap();
       loadGlossaryView();
     })
   );
@@ -1166,9 +1373,12 @@ function renderSettings() {
   $("#settings-api-panel").hidden = mode !== "api";
 
   $$("#seg-hardware button").forEach((b) => b.classList.toggle("active", b.dataset.val === s.hardware_mode));
+  $$("#seg-quote-style button").forEach((b) => b.classList.toggle("active", b.dataset.val === (s.quote_style || "auto")));
   $("#chk-disable-reasoning").checked = Boolean(s.disable_reasoning);
   $("#chk-auto-sync").checked = Boolean(s.auto_sync_xuat);
   $("#chk-sound-effects").checked = s.sound_effects !== false;
+  const hkSel = $("#sel-overlay-hotkey");
+  if (hkSel) hkSel.value = s.overlay_hotkey || "Alt+L";
 
   $("#api-tr-url").value = s.translate_role?.base_url || "";
   $("#api-tr-model").value = s.translate_role?.model || "";
@@ -1180,6 +1390,7 @@ function renderSettings() {
   applyTheme(s.theme);
   applySoundUI(s.sound_effects);
   applyReasoningMode(s.disable_reasoning);
+  applyHotkeyLabels(s.overlay_hotkey || "Alt+L");
   renderFontPicker();
   renderRuntime();
 }
@@ -1188,6 +1399,8 @@ async function saveSettingsFromUI() {
   const mode = $("#seg-mode button.active")?.dataset.val || "local";
   const hardware_mode = $("#seg-hardware button.active")?.dataset.val || "auto";
   const theme = $("#seg-theme button.active")?.dataset.val || "dark";
+  const quote_style = $("#seg-quote-style button.active")?.dataset.val || "auto";
+  const overlay_hotkey = $("#sel-overlay-hotkey")?.value || "Alt+L";
   const rsUrl = $("#api-rs-url").value.trim();
   const rsModel = $("#api-rs-model").value.trim();
   const rsKey = $("#api-rs-key").value.trim();
@@ -1198,6 +1411,8 @@ async function saveSettingsFromUI() {
   const payload = {
     theme,
     hardware_mode,
+    quote_style,
+    overlay_hotkey,
     disable_reasoning: $("#chk-disable-reasoning").checked,
     sound_effects: $("#chk-sound-effects").checked,
     auto_sync_xuat: $("#chk-auto-sync").checked,
@@ -1217,12 +1432,16 @@ async function saveSettingsFromUI() {
       api_key: rsKey,
     },
   };
-  const res = await api("/api/settings", { method: "PUT", body: payload });
-  state.settings = res.settings;
-  state.runtime = res.runtime;
-  renderSettings();
-  sfx.save();
-  toast("设置已保存");
+  try {
+    const res = await api("/api/settings", { method: "PUT", body: payload });
+    state.settings = res.settings;
+    state.runtime = res.runtime;
+    renderSettings();
+    sfx.save();
+    toast("设置已保存并立即生效");
+  } catch (err) {
+    toast(err.message, "err");
+  }
 }
 
 /* ── SSE Live Stream ───────────────────────────────────────────────── */
@@ -1276,10 +1495,10 @@ function connectEvents() {
     } else if (msg.type === "live_entry") {
       const entry = msg.data.entry;
       if (state.project && msg.data.project_id === state.project.id && entry) {
+        state.freshEntryIds.add(entry.id);
         state.liveFeed = [entry, ...state.liveFeed.filter((x) => x.id !== entry.id)].slice(0, 30);
-        if (msg.data.stats) {
-          state.stats = msg.data.stats;
-        }
+        if (msg.data.stats) state.stats = msg.data.stats;
+        if (!msg.data.from_cache && entry.source === "xuat_live") sfx.live();
         renderWorkbench();
         if (state.tab === "editor") {
           scheduleLiveSync();
@@ -1313,7 +1532,8 @@ async function openGameDir(dirPath) {
     switchTab("workbench");
     closeModal("modal-open-path");
     const imp = res.imported?.added || 0;
-    toast(imp ? `已打开「${res.project.name}」，已读取词条 ${imp} 条` : `已打开「${res.project.name}」`);
+    sfx.save();
+    toast(imp ? `已打开「${res.project.name}」，安全读取词条 ${imp} 条` : `已打开「${res.project.name}」`);
   } catch (err) {
     toast(err.message, "err");
   }
@@ -1331,6 +1551,7 @@ async function nativePickAndOpen() {
 function openCmdPalette() {
   const noReason = Boolean(state.settings?.disable_reasoning);
   const soundOn = state.settings?.sound_effects !== false;
+  const hk = state.settings?.overlay_hotkey || "Alt+L";
   const actions = [
     { label: "打开 Unity 游戏文件夹", run: () => openModal("modal-open-path") },
     { label: "前往工作台", run: () => switchTab("workbench") },
@@ -1348,21 +1569,21 @@ function openCmdPalette() {
       },
     },
     { label: soundOn ? "关闭界面交互音效（静音）" : "开启界面交互音效", run: () => $("#btn-sound").click() },
-    { label: "切换深色 / 浅色外观", run: () => $("#btn-theme").click() },
+    { label: "切换黑曜暗夜 / 宣纸雅白外观", run: () => $("#btn-theme").click() },
   ];
   if (state.project) {
     const projActions = [
       {
         label: noReason
-          ? "一键自动汉化（扫描+翻译+接入）"
-          : "一键自动汉化（扫描+语境+翻译+审校+接入）",
+          ? "一键自动汉化（安全扫描+翻译+接入）"
+          : "一键自动汉化（安全扫描+语境+翻译+审校+接入）",
         run: () => $("#btn-auto-localize").click(),
       },
-      { label: "导出汉化文本（JSON / TXT / MD / CSV）与离线补丁", run: () => openModal("modal-export") },
-      { label: "呼出 / 隐藏游戏内悬浮编辑窗 (Alt+L)", run: () => $("#btn-toggle-overlay").click() },
+      { label: "导出文本、便携工程包 (.ul10n.json) 与离线补丁", run: () => openModal("modal-export") },
+      { label: `呼出 / 隐藏游戏内悬浮编辑窗 (${hk})`, run: () => $("#btn-toggle-overlay").click() },
       { label: "批量查找替换译文", run: () => openModal("modal-replace") },
       { label: "启动当前游戏（自动接入并同步最新词典）", run: () => $("#btn-launch-game").click() },
-      { label: "扫描静态文本", run: () => $("#btn-scan-texts").click() },
+      { label: "扫描安全静态文本", run: () => $("#btn-scan-texts").click() },
       { label: "开始批量翻译待翻词条", run: () => $("#btn-start-translate").click() },
       { label: "清空当前游戏翻译与扫描记录", run: () => openModal("modal-clear") },
     ];
@@ -1385,6 +1606,7 @@ function openCmdPalette() {
       .join("");
     $$(".cmd-item").forEach((btn) =>
       btn.addEventListener("click", () => {
+        sfx.tap();
         closeModal("modal-cmd");
         list[Number(btn.dataset.idx)].run();
       })
@@ -1419,7 +1641,26 @@ function bindEvents() {
     }
   });
 
-  $("#btn-open-game").addEventListener("click", () => openModal("modal-open-path"));
+  $("#wb-source-lang").addEventListener("change", async (e) => {
+    if (!state.project) return;
+    const source_lang = e.target.value;
+    try {
+      const res = await api(`/api/projects/${state.project.id}/source-lang`, {
+        method: "PATCH",
+        body: { source_lang },
+      });
+      state.project = res.project;
+      sfx.save();
+      toast(`已将游戏源语言设为「${SOURCE_LANG_LABELS[source_lang] || source_lang}」并同步插件配置`);
+    } catch (err) {
+      toast(err.message, "err");
+    }
+  });
+
+  $("#btn-open-game").addEventListener("click", () => {
+    sfx.tap();
+    openModal("modal-open-path");
+  });
   $("#btn-empty-pick").addEventListener("click", nativePickAndOpen);
   $("#btn-modal-native-pick").addEventListener("click", nativePickAndOpen);
   $("#btn-empty-open-path").addEventListener("click", () => openGameDir($("#input-empty-path").value));
@@ -1445,6 +1686,10 @@ function bindEvents() {
     setSoundEnabled(e.target.checked);
   });
 
+  $("#btn-preview-sfx").addEventListener("click", () => {
+    sfx.done({ force: true });
+  });
+
   $("#chk-disable-reasoning").addEventListener("change", async (e) => {
     const disabled = Boolean(e.target.checked);
     sfx.toggle(disabled);
@@ -1458,11 +1703,7 @@ function bindEvents() {
       state.runtime = res.runtime;
       renderRuntime();
       applyReasoningMode(res.settings.disable_reasoning);
-      toast(
-        disabled
-          ? "已关闭推理与审校，切换为直翻模式"
-          : "已恢复游戏背景识别与审校功能"
-      );
+      toast(disabled ? "已关闭推理与审校，切换为直翻模式" : "已恢复游戏背景识别与审校功能");
     } catch (err) {
       e.target.checked = !disabled;
       applyReasoningMode(!disabled);
@@ -1488,7 +1729,11 @@ function bindEvents() {
   });
 
   $("#btn-cmd").addEventListener("click", openCmdPalette);
-  $("#engine-status-btn").addEventListener("click", () => switchTab("settings"));
+  $("#engine-status-btn").addEventListener("click", () => {
+    sfx.tap();
+    switchTab("settings");
+  });
+
   $("#btn-cancel-task").addEventListener("click", async () => {
     const btn = $("#btn-cancel-task");
     btn.disabled = true;
@@ -1512,6 +1757,7 @@ function bindEvents() {
   };
   $("#btn-wb-more").addEventListener("click", (e) => {
     e.stopPropagation();
+    sfx.tap();
     moreMenu.hidden = !moreMenu.hidden;
   });
   moreMenu.addEventListener("click", (e) => {
@@ -1546,7 +1792,8 @@ function bindEvents() {
         body: { loader },
       });
       await selectProject(state.project.id);
-      toast(`已切换加载器并完成接入`);
+      sfx.save();
+      toast("已切换加载器并完成接入");
     } catch (err) {
       toast(err.message, "err");
     }
@@ -1568,8 +1815,9 @@ function bindEvents() {
         await selectProject(state.project.id);
       }
       sfx.launch();
+      const hk = state.settings?.overlay_hotkey || "Alt+L";
       const prefix = res.auto_deployed ? "已自动接入插件并启动" : "已同步词典并启动";
-      toast(`${prefix} ${res.executable}，游戏中按 Alt+L 可呼出悬浮改译窗`);
+      toast(`${prefix} ${res.executable}，游戏中按 ${hk} 可呼出悬浮改译窗`);
     } catch (err) {
       toast(err.message, "err");
     } finally {
@@ -1595,8 +1843,9 @@ function bindEvents() {
       closeModal("modal-clear");
       await selectProject(state.project.id);
       if (state.tab === "editor") loadEntries();
+      sfx.save();
       const msg = rescan
-        ? `已清空 ${res.cleared} 条旧记录，并重新扫出 ${res.rescanned} 条纯静态界面文本`
+        ? `已清空 ${res.cleared} 条旧记录，并重新安全扫出 ${res.rescanned} 条文本`
         : `已彻底清空 ${res.cleared} 条记录，当前已归零`;
       toast(msg);
     } catch (err) {
@@ -1633,15 +1882,17 @@ function bindEvents() {
     if (!state.project) return;
     try {
       const res = await api(`/api/projects/${state.project.id}/context/sync-glossary`, { method: "POST" });
+      sfx.save();
       toast(res.added > 0 ? `已将 ${res.added} 条语境专名导入本游戏术语表` : "语境中的专名已在术语表中");
     } catch (err) {
       toast(err.message, "err");
     }
   });
 
-  // Export text (JSON / TXT / Bilingual / MD / CSV) & Standalone Patch
+  // Export text, Portable Bundle (.ul10n.json) & Standalone Patch
   const openExport = () => {
     if (!state.project) return;
+    sfx.tap();
     openModal("modal-export");
   };
   $("#btn-open-export").addEventListener("click", openExport);
@@ -1662,6 +1913,45 @@ function bindEvents() {
       sfx.done();
       toast(`已开始导出 ${fmt.toUpperCase()} 文件`);
     });
+  });
+
+  $("#btn-export-bundle").addEventListener("click", () => {
+    if (!state.project) return;
+    const a = document.createElement("a");
+    a.href = `/api/projects/${state.project.id}/export-bundle`;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    sfx.done();
+    toast("已导出便携汉化工程包 (.ul10n.json)");
+  });
+
+  $("#btn-import-bundle").addEventListener("click", () => {
+    if (!state.project) return;
+    $("#input-import-bundle").value = "";
+    $("#input-import-bundle").click();
+  });
+
+  $("#input-import-bundle").addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !state.project) return;
+    try {
+      const raw = await file.text();
+      const bundle = JSON.parse(raw);
+      const res = await api(`/api/projects/${state.project.id}/import-bundle`, {
+        method: "POST",
+        body: { bundle },
+      });
+      closeModal("modal-export");
+      await selectProject(state.project.id);
+      sfx.done();
+      toast(
+        `工程包导入完成：新增词条 ${res.entries_added}、补全 ${res.entries_updated}、新增术语 ${res.glossary_added}`
+      );
+    } catch (err) {
+      toast(`工程包导入失败：${err.message}`, "err");
+    }
   });
 
   $("#btn-export-patch").addEventListener("click", () => {
@@ -1715,12 +2005,19 @@ function bindEvents() {
       const res = await api(`/api/projects/${state.project.id}/scan`, { method: "POST" });
       await selectProject(state.project.id);
       sfx.done();
-      toast(res.added > 0 ? `静态文本扫描完成，新增 ${res.added} 条词条` : `静态文本扫描完成，当前共 ${res.stats.total} 条词条`);
+      const locCnt = res.by_source?.localization || 0;
+      const locNote = locCnt > 0 ? `（含官方本地化表 ${locCnt} 条）` : "";
+      const truncNote = res.truncated ? " · 已达单次扫描安全上限" : "";
+      toast(
+        res.added > 0
+          ? `安全扫描完成，新增 ${res.added} 条词条${locNote}${truncNote}`
+          : `安全扫描完成，当前共 ${res.stats.total} 条词条${locNote}`
+      );
     } catch (err) {
       toast(err.message, "err");
     } finally {
       btn.disabled = false;
-      btn.textContent = "扫描静态文本";
+      btn.textContent = "扫描安全文本";
     }
   });
 
@@ -1729,7 +2026,8 @@ function bindEvents() {
     try {
       await api(`/api/projects/${state.project.id}/uninstall`, { method: "POST" });
       await selectProject(state.project.id);
-      toast("已干净卸载");
+      sfx.save();
+      toast("已按文件清单干净卸载");
     } catch (err) {
       toast(err.message, "err");
     }
@@ -1742,6 +2040,7 @@ function bindEvents() {
         method: "POST",
         body: { include_failed: true },
       });
+      sfx.launch();
       applyTaskState(res.task, { fromHttpStart: true });
     } catch (err) {
       toast(err.message, "err");
@@ -1757,6 +2056,7 @@ function bindEvents() {
         method: "POST",
         body: { limit: 300, only_unreviewed: true, mode: "smart" },
       });
+      sfx.launch();
       applyTaskState(res.task, { fromHttpStart: true });
     } catch (err) {
       toast(err.message, "err");
@@ -1770,6 +2070,7 @@ function bindEvents() {
         method: "POST",
         body: { limit: 500, only_unreviewed: false, mode: "full" },
       });
+      sfx.launch();
       applyTaskState(res.task, { fromHttpStart: true });
     } catch (err) {
       toast(err.message, "err");
@@ -1780,6 +2081,7 @@ function bindEvents() {
     if (!state.project) return;
     try {
       const res = await api(`/api/projects/${state.project.id}/tasks/context`, { method: "POST" });
+      sfx.launch();
       applyTaskState(res.task, { fromHttpStart: true });
     } catch (err) {
       toast(err.message, "err");
@@ -1789,6 +2091,7 @@ function bindEvents() {
   const toggleOverlay = async () => {
     try {
       const res = await api("/api/overlay/toggle", { method: "POST" });
+      sfx.toggle(Boolean(res.visible));
       toast(res.visible ? `已呼出悬浮编辑窗（游戏中也可按 ${res.hotkey} 切换）` : `已隐藏悬浮编辑窗（按 ${res.hotkey} 随时呼出）`);
     } catch (err) {
       toast(err.message, "err");
@@ -1797,7 +2100,10 @@ function bindEvents() {
   $("#btn-toggle-overlay").addEventListener("click", toggleOverlay);
   $("#btn-editor-overlay").addEventListener("click", toggleOverlay);
 
-  $("#btn-goto-editor").addEventListener("click", () => switchTab("editor"));
+  $("#btn-goto-editor").addEventListener("click", () => {
+    sfx.tap();
+    switchTab("editor");
+  });
   $("#btn-quick-add").addEventListener("click", () => openModal("modal-import"));
   $("#btn-editor-add").addEventListener("click", () => openModal("modal-import"));
 
@@ -1815,13 +2121,14 @@ function bindEvents() {
       state.stats = res.stats;
       renderWorkbench();
       if (state.tab === "editor") loadEntries();
+      sfx.save();
       toast(`已添加 ${res.imported.added} 条词条`);
     } catch (err) {
       toast(err.message, "err");
     }
   });
 
-  // Edit context modal
+  // Edit context modal (now includes `terms`!)
   $("#btn-edit-context").addEventListener("click", () => {
     const c = state.context || {};
     $("#ctx-genre").value = c.genre || "";
@@ -1829,6 +2136,7 @@ function bindEvents() {
     $("#ctx-style").value = c.style || "";
     $("#ctx-summary").value = c.summary || "";
     $("#ctx-characters").value = (c.characters || []).join("，");
+    $("#ctx-terms").value = (c.terms || []).join("，");
     $("#ctx-notes").value = (c.notes || []).join("，");
     openModal("modal-context");
   });
@@ -1843,8 +2151,8 @@ function bindEvents() {
       style: $("#ctx-style").value.trim(),
       summary: $("#ctx-summary").value.trim(),
       characters: splitList($("#ctx-characters").value),
+      terms: splitList($("#ctx-terms").value),
       notes: splitList($("#ctx-notes").value),
-      terms: state.context?.terms || [],
     };
     const res = await api(`/api/projects/${state.project.id}/context`, { method: "PUT", body });
     state.context = res.context;
@@ -1854,7 +2162,7 @@ function bindEvents() {
     toast("游戏语境已保存");
   });
 
-  // Editor filters & search
+  // Editor filters, search, multi-select bulk dock & page jump
   let searchTimer = null;
   $("#editor-search").addEventListener("input", (e) => {
     clearTimeout(searchTimer);
@@ -1887,12 +2195,83 @@ function bindEvents() {
     });
   });
 
+  $$("#editor-extra-filters .pill").forEach((pill) => {
+    pill.addEventListener("click", () => {
+      sfx.tap();
+      $$("#editor-extra-filters .pill").forEach((b) => b.classList.remove("active"));
+      pill.classList.add("active");
+      state.editor.extraFilter = pill.dataset.extra || "";
+      state.editor.offset = 0;
+      loadEntries();
+    });
+  });
+
+  $("#chk-select-page").addEventListener("change", (e) => {
+    const on = e.target.checked;
+    for (const entry of state.editor.entries) {
+      if (on) state.editor.selected.add(entry.id);
+      else state.editor.selected.delete(entry.id);
+    }
+    sfx.tap();
+    renderEditorList();
+  });
+
+  $("#btn-bulk-clear").addEventListener("click", () => {
+    state.editor.selected.clear();
+    sfx.tap();
+    renderEditorList();
+  });
+
+  $$("[data-bulk-act]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!state.project || !state.editor.selected.size) return;
+      const action = btn.dataset.bulkAct;
+      const entry_ids = Array.from(state.editor.selected);
+      try {
+        const res = await api(`/api/projects/${state.project.id}/entries/bulk`, {
+          method: "POST",
+          body: { entry_ids, action },
+        });
+        state.editor.selected.clear();
+        if (res.task) {
+          sfx.launch();
+          applyTaskState(res.task, { fromHttpStart: true });
+          updateBulkDock();
+        } else {
+          state.stats = res.stats;
+          sfx.save();
+          loadEntries();
+          toast(`批量操作完成，共处理 ${res.changed} 条词条`);
+        }
+      } catch (err) {
+        toast(err.message, "err");
+      }
+    });
+  });
+
+  $("#editor-page-size").addEventListener("change", (e) => {
+    state.editor.limit = Number(e.target.value) || 40;
+    state.editor.offset = 0;
+    sfx.tap();
+    loadEntries();
+  });
+
+  $("#editor-page-jump").addEventListener("change", (e) => {
+    const totalPages = Math.max(1, Math.ceil(state.editor.total / state.editor.limit));
+    const page = Math.max(1, Math.min(totalPages, Number(e.target.value) || 1));
+    state.editor.offset = (page - 1) * state.editor.limit;
+    sfx.tap();
+    loadEntries();
+  });
+
   $("#btn-prev-page").addEventListener("click", () => {
     state.editor.offset = Math.max(0, state.editor.offset - state.editor.limit);
+    sfx.tap();
     loadEntries();
   });
   $("#btn-next-page").addEventListener("click", () => {
     state.editor.offset += state.editor.limit;
+    sfx.tap();
     loadEntries();
   });
 
@@ -1907,25 +2286,52 @@ function bindEvents() {
     })
   );
 
+  $("#btn-dismiss-glossary-impact").addEventListener("click", () => {
+    state.glossaryImpact = null;
+    renderGlossaryImpactBanner();
+  });
+
+  $("#btn-apply-glossary-impact").addEventListener("click", async () => {
+    const info = state.glossaryImpact;
+    if (!state.project || !info) return;
+    try {
+      const res = await api(`/api/projects/${state.project.id}/glossary/retranslate-impacted`, {
+        method: "POST",
+        body: { term: info.term, translation: info.translation },
+      });
+      state.glossaryImpact = null;
+      renderGlossaryImpactBanner();
+      sfx.launch();
+      applyTaskState(res.task, { fromHttpStart: true });
+    } catch (err) {
+      toast(err.message, "err");
+    }
+  });
+
   $("#form-add-term").addEventListener("submit", async (e) => {
     e.preventDefault();
     const isProj = state.glossarySubtab === "project-glossary";
     if (isProj && !state.project) return toast("请先打开一个游戏项目", "err");
+    const term = $("#term-src").value.trim();
+    const translation = $("#term-dst").value.trim();
     const url = isProj ? `/api/projects/${state.project.id}/glossary` : "/api/glossary";
     try {
-      await api(url, {
+      const res = await api(url, {
         method: "POST",
-        body: {
-          term: $("#term-src").value,
-          translation: $("#term-dst").value,
-          category: $("#term-cat").value,
-        },
+        body: { term, translation, category: $("#term-cat").value },
       });
       $("#term-src").value = "";
       $("#term-dst").value = "";
+      if (isProj && (res.impacted_count || 0) > 0) {
+        state.glossaryImpact = { term, translation, count: res.impacted_count };
+      }
       loadGlossaryView();
       sfx.save();
-      toast("术语已添加");
+      toast(
+        isProj && (res.impacted_count || 0) > 0
+          ? `术语已添加（发现 ${res.impacted_count} 条旧译可一键同步）`
+          : "术语已添加"
+      );
     } catch (err) {
       toast(err.message, "err");
     }
@@ -1955,6 +2361,7 @@ function bindEvents() {
       const res = await api(url, { method: "POST", body: { content } });
       closeModal("modal-glossary-import");
       loadGlossaryView();
+      sfx.save();
       toast(res.imported > 0 ? `已批量导入 ${res.imported} 条术语` : "未识别到「原文=译名」格式的行");
     } catch (err) {
       toast(err.message, "err");
@@ -1980,6 +2387,7 @@ function bindEvents() {
         : "/api/memory";
     try {
       const res = await api(url, { method: "DELETE" });
+      state.glossaryImpact = null;
       loadGlossaryView();
       toast(`已清空 ${res.removed ?? 0} 条记录`);
     } catch (err) {
@@ -1993,7 +2401,50 @@ function bindEvents() {
     memTimer = setTimeout(loadGlossaryView, 220);
   });
 
-  // Settings controls
+  // Settings controls & Cloud API Presets + Model Fetcher
+  $("#api-preset-select").addEventListener("change", (e) => {
+    const pid = e.target.value;
+    const preset = state.presets.find((p) => p.id === pid);
+    if (!preset) return;
+    sfx.tap();
+    $("#api-tr-url").value = preset.base_url || "";
+    if (preset.model) $("#api-tr-model").value = preset.model;
+    $("#api-preset-hint").textContent = `${preset.name}：${preset.hint || "已自动填入推荐配置，粘贴 API Key 并保存即可。"}`;
+    toast(`已套用「${preset.name}」预设，请确认 API Key 后点保存`);
+  });
+
+  const bindFetchModels = (btnSel, role, urlSel, keySel, listSel, inputSel) => {
+    $(btnSel).addEventListener("click", async () => {
+      const btn = $(btnSel);
+      btn.disabled = true;
+      btn.textContent = "拉取中…";
+      try {
+        const res = await api("/api/runtime/models", {
+          method: "POST",
+          body: {
+            role,
+            base_url: $(urlSel).value.trim() || (role === "reason" ? $("#api-tr-url").value.trim() : ""),
+            api_key: $(keySel).value.trim() || (role === "reason" ? $("#api-tr-key").value.trim() : ""),
+          },
+        });
+        const models = res.models || [];
+        $(listSel).innerHTML = models.map((m) => `<option value="${escapeHtml(m)}"></option>`).join("");
+        sfx.save();
+        toast(models.length ? `已拉取 ${models.length} 个可用模型，点击模型输入框即可挑选` : "接口未返回可用模型列表");
+        if (models.length && !$(inputSel).value.trim()) {
+          $(inputSel).value = models[0];
+        }
+      } catch (err) {
+        toast(err.message, "err");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "拉取模型列表";
+      }
+    });
+  };
+  bindFetchModels("#btn-fetch-tr-models", "translate", "#api-tr-url", "#api-tr-key", "#api-tr-model-list", "#api-tr-model");
+  bindFetchModels("#btn-fetch-rs-models", "reason", "#api-rs-url", "#api-rs-key", "#api-rs-model-list", "#api-rs-model");
+
   $$(".segmented").forEach((seg) => {
     seg.querySelectorAll("button").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -2018,6 +2469,7 @@ function bindEvents() {
       const res = await api("/api/runtime/start", { method: "POST", body: { role: "translate" } });
       state.runtime = res.runtime;
       renderRuntime();
+      sfx.done();
       toast("翻译引擎已就绪");
     } catch (err) {
       toast(err.message, "err");
@@ -2028,6 +2480,7 @@ function bindEvents() {
     const res = await api("/api/runtime/stop", { method: "POST", body: { role: "translate" } });
     state.runtime = res.runtime;
     renderRuntime();
+    sfx.tap();
     toast("翻译引擎已停止");
   });
 
@@ -2035,6 +2488,7 @@ function bindEvents() {
     const res = await api("/api/runtime/stop", { method: "POST", body: { role: "reason" } });
     state.runtime = res.runtime;
     renderRuntime();
+    sfx.tap();
     toast("审校模型显存已释放");
   });
 
@@ -2053,6 +2507,7 @@ function bindEvents() {
           api_key: $("#api-tr-key").value.trim(),
         },
       });
+      sfx.save();
       toast(`翻译接口连接成功：${res.reply}`);
     } catch (err) {
       toast(err.message, "err");
@@ -2080,6 +2535,7 @@ function bindEvents() {
           api_key: rsKey || $("#api-tr-key").value.trim(),
         },
       });
+      sfx.save();
       toast(`审校接口连接成功：${res.reply}`);
     } catch (err) {
       toast(err.message, "err");
@@ -2106,7 +2562,12 @@ function bindEvents() {
     } else if (e.key === "Escape") {
       $$(".modal-backdrop").forEach((m) => (m.hidden = true));
       closeMoreMenu();
-    } else if (e.key === "/" && state.tab === "editor" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
+    } else if (
+      e.key === "/" &&
+      state.tab === "editor" &&
+      document.activeElement.tagName !== "INPUT" &&
+      document.activeElement.tagName !== "TEXTAREA"
+    ) {
       e.preventDefault();
       $("#editor-search").focus();
     }

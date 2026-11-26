@@ -1,12 +1,11 @@
-"""Windows global-hotkey floating overlay HUD (`Alt+L`) for live in-game translation editing.
+"""Windows global-hotkey floating overlay HUD for live in-game translation & glossary editing.
 
 Features:
-- System-wide `Alt+L` toggle even while a Unity game has focus.
+- System-wide customizable global hotkey (default `Alt+L`, live rebindable from Settings).
 - Instant 3-way filter: 实时 (live captured) / 全部 (all) / 待修 (flagged + failed).
-- Opacity toggle (97% / 82%) for unobtrusive overlay over gameplay.
+- Opacity toggle (97% / 80%) for unobtrusive overlay over gameplay.
 - Inline edit + Save (`Ctrl+Enter`), async AI Retranslate, 1-click Undo (`prev_translation`),
-  and Skip/Ignore — every change hot-syncs immediately to `00_UL10nForge.txt` so XUAT
-  refreshes visible text inside the running game without restarting.
+  Skip/Ignore, AND quick inline「存为术语」bar — every change hot-syncs immediately to the game.
 - Non-disruptive live refresh: incoming game lines never overwrite text you're actively typing.
 """
 from __future__ import annotations
@@ -16,6 +15,7 @@ import ctypes.wintypes
 import queue
 import sys
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -25,23 +25,68 @@ _MOD_ALT = 0x0001
 _MOD_CONTROL = 0x0002
 _MOD_SHIFT = 0x0004
 _MOD_NOREPEAT = 0x4000
-_VK_L = 0x4C
 _WM_HOTKEY = 0x0312
 _WM_QUIT = 0x0012
+_WM_REBIND = 0x0400 + 42
 _HOTKEY_ID = 0x554C
-_HOTKEY_CANDIDATES = (
-    ("Alt+L", _MOD_ALT | _MOD_NOREPEAT, _VK_L),
-    ("Alt+Shift+L", _MOD_ALT | _MOD_SHIFT | _MOD_NOREPEAT, _VK_L),
-    ("Ctrl+Shift+L", _MOD_CONTROL | _MOD_SHIFT | _MOD_NOREPEAT, _VK_L),
+
+_KEY_VK_MAP: dict[str, int] = {
+    **{chr(c): c for c in range(ord("A"), ord("Z") + 1)},
+    **{str(d): ord(str(d)) for d in range(10)},
+    "F1": 0x70, "F2": 0x71, "F3": 0x72, "F4": 0x73,
+    "F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
+    "F9": 0x78, "F10": 0x79, "F11": 0x7A, "F12": 0x7B,
+}
+
+_FALLBACK_CANDIDATES: tuple[tuple[str, int, int], ...] = (
+    ("Alt+L", _MOD_ALT | _MOD_NOREPEAT, 0x4C),
+    ("Alt+Shift+L", _MOD_ALT | _MOD_SHIFT | _MOD_NOREPEAT, 0x4C),
+    ("Ctrl+Shift+L", _MOD_CONTROL | _MOD_SHIFT | _MOD_NOREPEAT, 0x4C),
+    ("F8", _MOD_NOREPEAT, 0x77),
 )
 
 
+def parse_hotkey_spec(label: str) -> tuple[str, int, int] | None:
+    """Parse hotkey spec like `Alt+L`, `Ctrl+Shift+L`, or `F8` into `(label, mods, vk)`."""
+    raw = (label or "").strip()
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split("+") if p.strip()]
+    if not parts:
+        return None
+    mods = _MOD_NOREPEAT
+    vk = 0
+    norm_parts: list[str] = []
+    for p in parts:
+        low = p.lower()
+        if low == "alt":
+            mods |= _MOD_ALT
+            norm_parts.append("Alt")
+        elif low in ("ctrl", "control"):
+            mods |= _MOD_CONTROL
+            norm_parts.append("Ctrl")
+        elif low == "shift":
+            mods |= _MOD_SHIFT
+            norm_parts.append("Shift")
+        else:
+            up = p.upper()
+            if up in _KEY_VK_MAP:
+                vk = _KEY_VK_MAP[up]
+                norm_parts.append(up)
+            else:
+                return None
+    if not vk:
+        return None
+    return "+".join(norm_parts), mods, vk
+
+
 class InGameOverlayHUD:
-    """Thread-safe native topmost overlay window with Windows global hotkey (`Alt+L`)."""
+    """Thread-safe native topmost overlay window with customizable Windows global hotkey."""
 
     def __init__(self, services: AppServices, hotkey_label: str = "Alt+L") -> None:
         self.services = services
-        self.hotkey_label = hotkey_label
+        self.hotkey_label = (hotkey_label or "Alt+L").strip() or "Alt+L"
+        self._desired_hotkey = self.hotkey_label
         self._cmd_q: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._ui_thread: threading.Thread | None = None
         self._hk_thread: threading.Thread | None = None
@@ -50,6 +95,7 @@ class InGameOverlayHUD:
         self._visible = False
         self._hotkey_registered = False
         self._started = False
+        self._recent_live_ids: dict[int, float] = {}
 
     @property
     def status(self) -> dict[str, Any]:
@@ -84,6 +130,18 @@ class InGameOverlayHUD:
             except Exception:
                 pass
 
+    def update_hotkey(self, new_label: str) -> None:
+        """Dynamically re-register the global hotkey without restarting the app."""
+        spec = parse_hotkey_spec(new_label)
+        if not spec:
+            return
+        self._desired_hotkey = spec[0]
+        if sys.platform == "win32" and self._hk_thread_id:
+            try:
+                ctypes.windll.user32.PostThreadMessageW(self._hk_thread_id, _WM_REBIND, 0, 0)
+            except Exception:
+                pass
+
     def toggle(self) -> bool:
         if not self._started:
             self.start()
@@ -100,21 +158,39 @@ class InGameOverlayHUD:
 
     def _on_bus_event(self, payload: dict[str, Any]) -> None:
         if payload.get("type") == "live_entry":
+            data = payload.get("data") or {}
+            ent = data.get("entry") or {}
+            eid = ent.get("id")
+            if eid is not None:
+                self._recent_live_ids[int(eid)] = time.monotonic()
             self._cmd_q.put(("refresh", None))
+
+    def _register_preferred_hotkey(self, user32) -> bool:
+        try:
+            user32.UnregisterHotKey(None, _HOTKEY_ID)
+        except Exception:
+            pass
+        candidates: list[tuple[str, int, int]] = []
+        parsed = parse_hotkey_spec(self._desired_hotkey)
+        if parsed:
+            candidates.append(parsed)
+        for cand in _FALLBACK_CANDIDATES:
+            if not any(c[0] == cand[0] for c in candidates):
+                candidates.append(cand)
+        for label, mods, vk in candidates:
+            if user32.RegisterHotKey(None, _HOTKEY_ID, mods, vk):
+                self.hotkey_label = label
+                self._hotkey_registered = True
+                self._cmd_q.put(("hotkey_label", label))
+                return True
+        self._hotkey_registered = False
+        return False
 
     def _run_hotkey_loop(self) -> None:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
         self._hk_thread_id = int(kernel32.GetCurrentThreadId())
-        ok = False
-        for label, mods, vk in _HOTKEY_CANDIDATES:
-            if user32.RegisterHotKey(None, _HOTKEY_ID, mods, vk):
-                self.hotkey_label = label
-                ok = True
-                break
-        self._hotkey_registered = ok
-        if not ok:
-            return
+        self._register_preferred_hotkey(user32)
         msg = ctypes.wintypes.MSG()
         try:
             while not self._stop_evt.is_set():
@@ -123,6 +199,8 @@ class InGameOverlayHUD:
                     break
                 if msg.message == _WM_HOTKEY and msg.wParam == _HOTKEY_ID:
                     self._cmd_q.put(("toggle", None))
+                elif msg.message == _WM_REBIND:
+                    self._register_preferred_hotkey(user32)
         finally:
             try:
                 user32.UnregisterHotKey(None, _HOTKEY_ID)
@@ -137,21 +215,21 @@ class InGameOverlayHUD:
         except Exception:
             return
 
-        # Restrained graphite-neutral palette matching UL10nForge desktop aesthetic
-        bg = "#121418"
-        surface = "#191c22"
-        elevated = "#22262f"
-        border = "#2e3440"
-        fg = "#eef1f5"
-        muted = "#8b94a3"
-        accent = "#2ea87e"
-        accent_hover = "#39be90"
-        accent_soft = "#163128"
-        warn = "#d99b38"
-        danger = "#d96363"
+        # Refined Obsidian Jade studio palette matching UL10nForge WebUI
+        bg = "#0d1016"
+        surface = "#141822"
+        elevated = "#1c2230"
+        border = "#2a3242"
+        fg = "#f1f4f9"
+        muted = "#8b96a8"
+        accent = "#34c794"
+        accent_hover = "#42dba6"
+        accent_soft = "#14352a"
+        warn = "#eab354"
+        danger = "#e66b6b"
 
         root = tk.Tk()
-        root.title(f"UL10nForge · 游戏内译文 ({self.hotkey_label})")
+        root.title(f"UL10nForge · 游戏内悬浮改译 ({self.hotkey_label})")
         root.configure(bg=bg)
         root.attributes("-topmost", True)
         try:
@@ -160,11 +238,11 @@ class InGameOverlayHUD:
         except Exception:
             pass
 
-        win_w, win_h = 540, 620
+        win_w, win_h = 560, 668
         screen_w = root.winfo_screenwidth()
         x_pos = max(20, screen_w - win_w - 24)
-        root.geometry(f"{win_w}x{win_h}+{x_pos}+44")
-        root.minsize(450, 480)
+        root.geometry(f"{win_w}x{win_h}+{x_pos}+38")
+        root.minsize(470, 520)
         root.withdraw()
 
         style = ttk.Style(root)
@@ -178,7 +256,7 @@ class InGameOverlayHUD:
             fieldbackground=surface,
             foreground=fg,
             bordercolor=border,
-            rowheight=30,
+            rowheight=31,
             font=("Microsoft YaHei UI", 9),
         )
         style.configure(
@@ -204,7 +282,8 @@ class InGameOverlayHUD:
             "busy": False,
         }
 
-        # ── Top Bar ───────────────────────────────────────────────────────
+        # ── Top Accent Hairline + Header ──────────────────────────────────
+        tk.Frame(root, bg=accent, height=2).pack(fill="x")
         header = tk.Frame(root, bg=surface, padx=12, pady=9)
         header.pack(fill="x")
         lbl_title = tk.Label(
@@ -224,7 +303,7 @@ class InGameOverlayHUD:
             activebackground=border,
             activeforeground=fg,
             relief="flat",
-            padx=8,
+            padx=9,
             pady=2,
             cursor="hand2",
             font=("Microsoft YaHei UI", 8),
@@ -306,10 +385,10 @@ class InGameOverlayHUD:
             style="HUD.Treeview",
             selectmode="browse",
         )
-        tree.heading("orig", text="原文")
+        tree.heading("orig", text="原文（● 表示刚出现）")
         tree.heading("trans", text="译文")
-        tree.column("orig", width=240, anchor="w")
-        tree.column("trans", width=255, anchor="w")
+        tree.column("orig", width=250, anchor="w")
+        tree.column("trans", width=265, anchor="w")
         scroll = ttk.Scrollbar(list_wrap, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scroll.set)
         tree.pack(side="left", fill="both", expand=True)
@@ -324,7 +403,7 @@ class InGameOverlayHUD:
             highlightbackground=border,
             highlightthickness=1,
         )
-        editor.pack(fill="x", padx=10, pady=10)
+        editor.pack(fill="x", padx=10, pady=(10, 6))
 
         orig_head = tk.Frame(editor, bg=surface)
         orig_head.pack(fill="x")
@@ -406,7 +485,7 @@ class InGameOverlayHUD:
 
         btn_skip = tk.Button(
             foot,
-            text="忽略",
+            text="不翻",
             bg=elevated,
             fg=muted,
             activebackground="#3a2326",
@@ -423,9 +502,9 @@ class InGameOverlayHUD:
             foot,
             text="保存并生效",
             bg=accent,
-            fg="#06231a",
+            fg="#052118",
             activebackground=accent_hover,
-            activeforeground="#06231a",
+            activeforeground="#052118",
             relief="flat",
             padx=14,
             pady=5,
@@ -434,8 +513,73 @@ class InGameOverlayHUD:
         )
         btn_save.pack(side="right")
 
+        # ── Quick Inline Glossary Bar (顺手存术语，杜绝后续句继续翻错) ──────
+        glos_bar = tk.Frame(
+            root,
+            bg=surface,
+            padx=12,
+            pady=8,
+            highlightbackground=border,
+            highlightthickness=1,
+        )
+        glos_bar.pack(fill="x", padx=10, pady=(0, 10))
+        tk.Label(
+            glos_bar,
+            text="顺手存术语（存入后本游戏后续实时翻译立即按此译名统一）：",
+            bg=surface,
+            fg=muted,
+            font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="w", pady=(0, 5))
+        glos_row = tk.Frame(glos_bar, bg=surface)
+        glos_row.pack(fill="x")
+        term_src_var = tk.StringVar()
+        term_dst_var = tk.StringVar()
+        ent_term_src = tk.Entry(
+            glos_row,
+            textvariable=term_src_var,
+            bg=bg,
+            fg=fg,
+            insertbackground=fg,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=border,
+            highlightcolor=accent,
+            font=("Microsoft YaHei UI", 8),
+            width=18,
+        )
+        ent_term_src.pack(side="left", fill="x", expand=True, ipady=3)
+        tk.Label(glos_row, text="=", bg=surface, fg=muted, font=("Microsoft YaHei UI", 9, "bold")).pack(side="left", padx=5)
+        ent_term_dst = tk.Entry(
+            glos_row,
+            textvariable=term_dst_var,
+            bg=bg,
+            fg=fg,
+            insertbackground=fg,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=border,
+            highlightcolor=accent,
+            font=("Microsoft YaHei UI", 8),
+            width=18,
+        )
+        ent_term_dst.pack(side="left", fill="x", expand=True, ipady=3)
+        btn_add_term = tk.Button(
+            glos_row,
+            text="存术语",
+            bg=accent_soft,
+            fg=accent,
+            activebackground=accent,
+            activeforeground="#052118",
+            relief="flat",
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        btn_add_term.pack(side="right", padx=(6, 0))
+
         lbl_status = tk.Label(
-            editor,
+            glos_bar,
             text=f"游戏中随时按 {self.hotkey_label} 呼出或收起",
             bg=surface,
             fg=muted,
@@ -510,13 +654,16 @@ class InGameOverlayHUD:
             mode_lbl = {"live": "实时", "all": "全部", "flagged": "待修"}.get(flt, flt)
             lbl_title.configure(text=f"{proj.name} · {mode_lbl} {total}")
 
+            now = time.monotonic()
             prev_sel = ui_state["selected_id"] if keep_selection else None
             tree.delete(*tree.get_children())
             ui_state["entries"].clear()
             for e in entries:
                 iid = str(e.id)
                 ui_state["entries"][iid] = e
-                orig_flat = e.original.replace("\n", " ↵ ")
+                ts = self._recent_live_ids.get(int(e.id), 0.0) if e.id is not None else 0.0
+                fresh_dot = "● " if (now - ts) <= 12.0 else ""
+                orig_flat = fresh_dot + e.original.replace("\n", " ↵ ")
                 tr_flat = (e.translation or "（待翻译）").replace("\n", " ↵ ")
                 tree.insert("", "end", iid=iid, values=(orig_flat, tr_flat))
 
@@ -551,6 +698,26 @@ class InGameOverlayHUD:
                     _set_status("未找到该词条", danger)
             except Exception as exc:
                 _set_status(f"保存失败：{exc}", danger)
+            return "break"
+
+        def _add_quick_term(_ev=None):
+            pid = ui_state.get("project_id")
+            if not pid:
+                _set_status("请先打开一个游戏项目", warn)
+                return "break"
+            src_t = term_src_var.get().strip()
+            dst_t = term_dst_var.get().strip()
+            if not src_t or not dst_t:
+                _set_status("请同时填写原文专名与固定译名", warn)
+                return "break"
+            item, impacted = self.services.add_project_glossary_term(pid, src_t, dst_t)
+            if item:
+                term_src_var.set("")
+                term_dst_var.set("")
+                extra = f"（发现 {impacted} 条旧译可在工作台一键同步）" if impacted > 0 else ""
+                _set_status(f"已存术语「{item.term} = {item.translation}」{extra}", accent)
+            else:
+                _set_status("存入术语失败", danger)
             return "break"
 
         def _retranslate_current() -> None:
@@ -596,7 +763,7 @@ class InGameOverlayHUD:
             if updated:
                 ui_state["selected_id"] = None
                 ui_state["loaded_tr"] = ""
-                _set_status("已忽略该词条", muted)
+                _set_status("已设为不翻译，游戏中保留原文", muted)
                 _refresh_list(keep_selection=False)
 
         def _switch_filter(flt: str) -> None:
@@ -639,6 +806,8 @@ class InGameOverlayHUD:
         btn_retrans.configure(command=_retranslate_current)
         btn_undo.configure(command=_undo_current)
         btn_skip.configure(command=_skip_current)
+        btn_add_term.configure(command=_add_quick_term)
+        ent_term_dst.bind("<Return>", _add_quick_term)
         tree.bind("<<TreeviewSelect>>", _on_select)
         txt_tr.bind("<Control-Return>", _save_current)
         root.bind("<Escape>", lambda _e: _hide_win())
@@ -672,6 +841,11 @@ class InGameOverlayHUD:
                     _show_win()
                 elif cmd == "hide":
                     _hide_win()
+                elif cmd == "hotkey_label":
+                    lbl = str(payload or self.hotkey_label)
+                    root.title(f"UL10nForge · 游戏内悬浮改译 ({lbl})")
+                    btn_hide.configure(text=f"收起 ({lbl})")
+                    _set_status(f"全局热键已生效：{lbl}", accent)
                 elif cmd == "refresh" and self._visible:
                     need_refresh = True
                 elif cmd == "retrans_done":

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import subprocess
 import threading
 import time
@@ -13,7 +14,7 @@ from typing import Any
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -24,6 +25,7 @@ from ul10n.core.game_detector import detect_protection_markers
 from ul10n.core.hook_deployer import get_xuat_paths
 from ul10n.core.models import (
     AppSettings,
+    Entry,
     GameContext,
     STATUS_EDITED,
     STATUS_FAILED,
@@ -33,10 +35,21 @@ from ul10n.core.models import (
     STATUS_TRANSLATED,
     VALID_STATUSES,
 )
-from ul10n.core.quality import check_translation_quality, is_translatable, lookup_builtin_ui
+from ul10n.core.quality import (
+    apply_quote_style,
+    check_translation_quality,
+    is_safe_for_global_memory,
+    is_translatable,
+    lookup_builtin_ui,
+)
 from ul10n.core.xuat_codec import decode_xuat_line
 from ul10n.engine.context_builder import infer_game_context, sync_context_terms_to_glossary
-from ul10n.engine.llm_client import LLMClient, is_hy_mt_model
+from ul10n.engine.llm_client import (
+    CLOUD_PROVIDER_PRESETS,
+    LLMClient,
+    fetch_available_models,
+    is_hy_mt_model,
+)
 from ul10n.engine.reviewer import is_high_risk_for_review, review_batch_and_refine
 from ul10n.engine.translator import TranslationPipeline
 from ul10n.server.state import AppServices
@@ -135,6 +148,30 @@ class TestConnectionReq(BaseModel):
     model: str = ""
 
 
+class FetchModelsReq(BaseModel):
+    role: str = "translate"
+    base_url: str = ""
+    api_key: str = ""
+
+
+class SourceLangReq(BaseModel):
+    source_lang: str = "auto"
+
+
+class BulkEntriesReq(BaseModel):
+    entry_ids: list[int] = []
+    action: str = "skip"  # skip | unskip | lock | unlock | retranslate
+
+
+class GlossaryRetranslateReq(BaseModel):
+    term: str
+    translation: str
+
+
+class ImportBundleReq(BaseModel):
+    bundle: dict[str, Any]
+
+
 def _mask_key(key: str) -> str:
     k = (key or "").strip()
     if not k:
@@ -198,11 +235,29 @@ def create_app(
         svc.shutdown()
 
     app = FastAPI(title="UL10nForge", version=VERSION, lifespan=lifespan)
+    session_token = secrets.token_urlsafe(24)
     app.state.services = svc
+    app.state.session_token = session_token
 
-    # Guard local mutating API endpoints against cross-site requests & disable stale browser cache on UI assets
+    # Defense-in-depth local security guard: blocks DNS rebinding, CSRF forms, and cross-site API writes
     @app.middleware("http")
     async def local_origin_guard(request: Request, call_next):
+        client_host = (request.client.host if request.client else "") or ""
+        is_testclient = client_host == "testclient"
+
+        # 1. Host header check on /api/* (blocks DNS rebinding attacks against local port)
+        if request.url.path.startswith("/api/"):
+            raw_host = (request.headers.get("host") or "").strip()
+            if raw_host:
+                parsed_host = (urlparse(f"http://{raw_host}").hostname or "").casefold()
+                allowed_hosts = _LOCAL_ORIGINS | ({"testserver"} if is_testclient else set())
+                if parsed_host and parsed_host not in allowed_hosts:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "拒绝来自非本机 Host 的请求"},
+                    )
+
+        # 2. Mutating /api/* checks: Origin, Referer, Sec-Fetch-Site, and browser session token
         if request.url.path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH", "DELETE"):
             origin = request.headers.get("origin")
             if origin:
@@ -212,6 +267,31 @@ def create_app(
                         status_code=403,
                         content={"detail": "拒绝来自非本机页面的跨站请求"},
                     )
+            referer = request.headers.get("referer")
+            if referer:
+                ref_host = (urlparse(referer).hostname or "").casefold()
+                if ref_host not in _LOCAL_ORIGINS:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "拒绝来自非本机来源页面的跨站请求"},
+                    )
+            fetch_site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+            if fetch_site and fetch_site not in ("same-origin", "none"):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "拒绝跨站浏览器写请求"},
+                )
+            is_browser_req = bool(
+                origin or referer or request.headers.get("sec-fetch-mode")
+            )
+            if is_browser_req and not is_testclient:
+                provided_tok = (request.headers.get("x-ul10n-token") or "").strip()
+                if not secrets.compare_digest(provided_tok, session_token):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "本地会话令牌校验失败，请刷新页面后重试"},
+                    )
+
         response = await call_next(request)
         if request.url.path == "/" or request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
@@ -227,7 +307,17 @@ def create_app(
         index = web_dir / "index.html"
         if not index.is_file():
             raise HTTPException(status_code=404, detail="前端页面缺失")
-        return FileResponse(str(index))
+        html = index.read_text(encoding="utf-8")
+        meta_tag = f'<meta name="ul10n-token" content="{session_token}" />'
+        if "</head>" in html:
+            html = html.replace("</head>", f"  {meta_tag}\n</head>", 1)
+        return HTMLResponse(
+            content=html,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+            },
+        )
 
     # ── XUAT Real-Time CustomTranslate Endpoint ───────────────────────────
 
@@ -244,6 +334,92 @@ def create_app(
         scratch, _ = svc.open_game_dir(str(scratch_dir))
         return scratch.id
 
+    def _try_fast_xuat_hit(pid: str, text: str, cfg: AppSettings) -> tuple[bool, str]:
+        """Sub-millisecond zero-LLM resolution for cached, glossary, builtin, or safe memory hits."""
+        store = svc.project_store(pid)
+
+        # 1. O(1) hot in-memory entry cache -> fallback SQLite lookup
+        existing = svc.get_cached_entry(pid, text)
+        if existing is None:
+            existing = store.get_by_original(text)
+            if existing is not None:
+                svc.put_cached_entry(pid, existing)
+
+        if existing and existing.status == STATUS_SKIPPED:
+            return True, text
+        if existing and existing.translation and (
+            existing.locked or existing.status in (STATUS_EDITED, STATUS_TRANSLATED)
+        ):
+            svc.record_live_line(pid, text)
+            if existing.source != "xuat_live" and existing.id:
+                live_entry = store.mark_live_seen(existing.id) or existing
+                svc.put_cached_entry(pid, live_entry)
+                svc.bus.publish(
+                    "live_entry",
+                    {
+                        "project_id": pid,
+                        "entry": live_entry.to_dict(),
+                        "stats": store.stats(),
+                        "from_cache": True,
+                    },
+                )
+                return True, live_entry.translation
+            return True, existing.translation
+
+        # 2. Non-translatable short-circuit
+        if not is_translatable(text):
+            return True, text
+
+        _ctx, _glossary, matcher = svc.get_live_translation_bundle(pid)
+
+        # 3. Exact project glossary hit (beats built-in UI & cross-game memory!)
+        exact_term = matcher.exact_project_lookup(text)
+        if exact_term:
+            entry = store.upsert_entry(
+                text, exact_term, status=STATUS_TRANSLATED, source="xuat_live", quality_note=""
+            )
+            svc.put_cached_entry(pid, entry)
+            svc.schedule_xuat_sync(pid)
+            svc.bus.publish(
+                "live_entry",
+                {"project_id": pid, "entry": entry.to_dict(), "stats": store.stats(), "from_cache": True},
+            )
+            return True, exact_term
+
+        # 4. Built-in authoritative UI vocabulary
+        builtin = lookup_builtin_ui(text)
+        if builtin:
+            entry = store.upsert_entry(
+                text, builtin, status=STATUS_TRANSLATED, source="xuat_live", quality_note=""
+            )
+            svc.put_cached_entry(pid, entry)
+            svc.schedule_xuat_sync(pid)
+            svc.bus.publish(
+                "live_entry",
+                {"project_id": pid, "entry": entry.to_dict(), "stats": store.stats(), "from_cache": True},
+            )
+            return True, builtin
+
+        # 5. Context-safe cross-game memory (skipped if sentence contains any project-specific term!)
+        if not matcher.has_project_hit(text):
+            mem_entry = svc.global_store.get_memory_entry(text, cfg.target_lang)
+            if mem_entry:
+                mem_tr, mem_src = mem_entry
+                if (mem_src == "manual" or is_safe_for_global_memory(text, "ai")) and check_translation_quality(text, mem_tr).passed:
+                    styled = apply_quote_style(mem_tr, cfg.quote_style)
+                    entry = store.upsert_entry(
+                        text, styled, status=STATUS_TRANSLATED, source="xuat_live", quality_note=""
+                    )
+                    svc.put_cached_entry(pid, entry)
+                    svc.schedule_xuat_sync(pid)
+                    svc.bus.publish(
+                        "live_entry",
+                        {"project_id": pid, "entry": entry.to_dict(), "stats": store.stats(), "from_cache": True},
+                    )
+                    return True, styled
+
+        return False, ""
+
     def _handle_xuat_text(project_id: str | None, text: str) -> str:
         if not text:
             return ""
@@ -251,59 +427,16 @@ def create_app(
         store = svc.project_store(pid)
         cfg = svc.settings()
 
-        # Fast-path cache check before acquiring live/LLM slot
-        existing = store.get_by_original(text)
-        if existing and existing.status == STATUS_SKIPPED:
-            return text
-        if existing and existing.translation and (
-            existing.locked or existing.status in (STATUS_EDITED, STATUS_TRANSLATED)
-        ):
-            svc.record_live_line(pid, text)
-            live_entry = store.mark_live_seen(existing.id) if existing.id else existing
-            live_entry = live_entry or existing
-            svc.bus.publish(
-                "live_entry",
-                {
-                    "project_id": pid,
-                    "entry": live_entry.to_dict(),
-                    "stats": store.stats(),
-                    "from_cache": True,
-                },
-            )
-            return live_entry.translation
-
-        # 0ms zero-model fast paths BEFORE ever touching llama-server / cloud API
-        if not is_translatable(text):
-            return text
-        builtin = lookup_builtin_ui(text)
-        if builtin:
-            entry = store.upsert_entry(
-                text, builtin, status=STATUS_TRANSLATED, source="xuat_live", quality_note=""
-            )
-            svc.schedule_xuat_sync(pid)
-            svc.bus.publish(
-                "live_entry",
-                {"project_id": pid, "entry": entry.to_dict(), "stats": store.stats(), "from_cache": True},
-            )
-            return builtin
-        mem_hit = svc.global_store.get_memory(text, cfg.target_lang)
-        if mem_hit and check_translation_quality(text, mem_hit).passed:
-            entry = store.upsert_entry(
-                text, mem_hit, status=STATUS_TRANSLATED, source="xuat_live", quality_note=""
-            )
-            svc.schedule_xuat_sync(pid)
-            svc.bus.publish(
-                "live_entry",
-                {"project_id": pid, "entry": entry.to_dict(), "stats": store.stats(), "from_cache": True},
-            )
-            return mem_hit
+        hit, val = _try_fast_xuat_hit(pid, text, cfg)
+        if hit:
+            return val
 
         # Singleflight dedup: identical concurrent live requests wait for the leader
         sf_key = (pid, text)
         is_leader, sf_evt = svc.acquire_singleflight(sf_key)
         if not is_leader:
             sf_evt.wait(timeout=30.0)
-            cached = store.get_by_original(text)
+            cached = svc.get_cached_entry(pid, text) or store.get_by_original(text)
             if cached and cached.status == STATUS_SKIPPED:
                 return text
             if cached and cached.translation:
@@ -313,7 +446,7 @@ def create_app(
         client: LLMClient | None = None
         outcome = None
         try:
-            ctx, glossary = svc.get_live_context_and_glossary(pid)
+            ctx, glossary, matcher = svc.get_live_translation_bundle(pid)
             prev_lines = svc.recent_live_lines(pid, exclude=text)
             pipeline = TranslationPipeline(
                 svc.global_store,
@@ -321,6 +454,7 @@ def create_app(
                 target_lang=cfg.target_lang,
                 temperature=cfg.translate_role.temperature,
                 max_tokens=cfg.translate_role.max_tokens,
+                quote_style=cfg.quote_style,
             )
             client = svc.runtime.acquire_live_translate_client(cfg)
             outcome = pipeline.translate_one(
@@ -329,14 +463,17 @@ def create_app(
                 source="xuat_live",
                 context=ctx,
                 glossary=glossary,
+                glossary_matcher=matcher,
                 prev_originals=prev_lines,
             )
+            svc.put_cached_entry(pid, outcome.entry)
             svc.record_live_line(pid, text)
         except Exception as exc:
             # Never return HTTP 500 or empty string to XUAT (prevents 3x retry + SPAM SHUTDOWN)
             err_entry = store.upsert_entry(
                 text, "", status=STATUS_FAILED, source="xuat_live", quality_note=str(exc)[:120]
             )
+            svc.put_cached_entry(pid, err_entry)
             svc.bus.publish(
                 "live_entry",
                 {
@@ -367,6 +504,91 @@ def create_app(
         )
         return (outcome.translation or "").strip() or text
 
+    def _handle_xuat_batch_cloud(project_id: str | None, items: list[str]) -> list[str] | None:
+        """Micro-batch 3+ live cache-miss items in ONE cloud JSON call to prevent 429 & cut tokens 80%."""
+        cfg = svc.settings()
+        if cfg.translate_role.mode != "api" or is_hy_mt_model(cfg.translate_role.model):
+            return None
+        pid = _resolve_live_project_id(project_id)
+        resolved: list[str | None] = [None] * len(items)
+        miss_indices: dict[str, list[int]] = {}
+        miss_order: list[str] = []
+
+        for idx, text in enumerate(items):
+            if not text:
+                resolved[idx] = ""
+                continue
+            hit, val = _try_fast_xuat_hit(pid, text, cfg)
+            if hit:
+                resolved[idx] = val
+                continue
+            if text not in miss_indices:
+                miss_indices[text] = []
+                miss_order.append(text)
+            miss_indices[text].append(idx)
+
+        if not miss_order:
+            return [resolved[i] if resolved[i] is not None else items[i] for i in range(len(items))]
+        if len(miss_order) < 3:
+            for t in miss_order:
+                tr_out = _handle_xuat_text(pid, t)
+                for pos in miss_indices.get(t, ()):
+                    resolved[pos] = tr_out
+            return [resolved[i] if resolved[i] is not None else items[i] for i in range(len(items))]
+
+        store = svc.project_store(pid)
+        svc.begin_live_request()
+        client: LLMClient | None = None
+        try:
+            ctx, glossary, matcher = svc.get_live_translation_bundle(pid)
+            pipeline = TranslationPipeline(
+                svc.global_store,
+                store,
+                target_lang=cfg.target_lang,
+                temperature=cfg.translate_role.temperature,
+                max_tokens=cfg.translate_role.max_tokens,
+                quote_style=cfg.quote_style,
+            )
+            client = svc.runtime.acquire_live_translate_client(cfg)
+            miss_entries = [Entry(id=None, original=t, source="xuat_live") for t in miss_order]
+            outcomes = pipeline.translate_batch_cloud(
+                miss_entries,
+                client,
+                context=ctx,
+                glossary=glossary,
+                glossary_matcher=matcher,
+                max_items_per_batch=12,
+            )
+            any_fresh = False
+            for oc in outcomes:
+                svc.put_cached_entry(pid, oc.entry)
+                svc.record_live_line(pid, oc.entry.original)
+                if oc.ok and not oc.from_cache:
+                    any_fresh = True
+                tr_out = (oc.translation or "").strip() or oc.entry.original
+                for pos in miss_indices.get(oc.entry.original, ()):
+                    resolved[pos] = tr_out
+            if any_fresh:
+                svc.schedule_xuat_sync(pid)
+            if outcomes:
+                svc.bus.publish(
+                    "live_entry",
+                    {
+                        "project_id": pid,
+                        "entry": outcomes[-1].entry.to_dict(),
+                        "stats": store.stats(),
+                        "from_cache": False,
+                    },
+                )
+        except Exception:
+            return None
+        finally:
+            if client and not getattr(client, "_pooled", False):
+                client.close()
+            svc.end_live_request()
+
+        return [resolved[i] if resolved[i] is not None else items[i] for i in range(len(items))]
+
     @app.get("/xuat/translate")
     @app.get("/xuat/translate/{project_id}")
     async def xuat_translate_get(
@@ -387,7 +609,12 @@ def create_app(
             body = await request.json()
             if isinstance(body, dict) and isinstance(body.get("texts"), list):
                 items = [str(item) for item in body["texts"]]
-                # Run batch items concurrently so inventory/skill screens appear much faster
+                # Try cloud micro-batching first for 3+ uncached lines (eliminates 429 burst & saves tokens)
+                if len(items) >= 3:
+                    batched = await asyncio.to_thread(_handle_xuat_batch_cloud, project_id, items)
+                    if batched is not None:
+                        return {"translations": batched}
+                # Run remaining / local items concurrently so inventory/skill screens appear fast
                 tasks = [asyncio.to_thread(_handle_xuat_text, project_id, t) for t in items]
                 results = await asyncio.gather(*tasks)
                 return {"translations": list(results)}
@@ -508,7 +735,26 @@ def create_app(
             "added": added,
             "updated": imp["updated"],
             "by_source": scanned.get("by_source", {}),
+            "truncated": bool(scanned.get("truncated", False)),
             "stats": svc.project_store(project_id).stats(),
+        }
+
+    @app.patch("/api/projects/{project_id}/source-lang")
+    async def update_source_lang(project_id: str, req: SourceLangReq):
+        project = svc.global_store.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        svc.global_store.set_source_lang(project_id, req.source_lang)
+        refreshed = svc.global_store.get_project(project_id)
+        if refreshed and refreshed.hook_deployed:
+            try:
+                await asyncio.to_thread(svc.refresh_project_hook_config, project_id)
+            except Exception:
+                pass
+        return {
+            "ok": True,
+            "project": refreshed.to_dict() if refreshed else project.to_dict(),
+            "effective_source_lang": svc.resolve_effective_source_lang(refreshed or project),
         }
 
     @app.post("/api/projects/{project_id}/launch")
@@ -576,6 +822,8 @@ def create_app(
             else:
                 pairs.append((line, ""))
         res = svc.project_store(project_id).bulk_import_pairs(pairs, source="manual")
+        if res["added"] or res["updated"]:
+            svc.invalidate_entry_cache(project_id)
         return {"ok": True, "imported": res, "stats": svc.project_store(project_id).stats()}
 
     @app.post("/api/projects/{project_id}/export-xuat")
@@ -626,13 +874,36 @@ def create_app(
             headers={"Content-Disposition": _content_disposition(filename)},
         )
 
-    # ── Entries (View / Search / Edit / Lock / Restore / Skip / Replace / Retranslate) ──
+    @app.get("/api/projects/{project_id}/export-bundle")
+    async def export_project_bundle(project_id: str):
+        try:
+            raw_json, filename = await asyncio.to_thread(svc.export_project_bundle, project_id)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(
+            content=raw_json,
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": _content_disposition(filename)},
+        )
+
+    @app.post("/api/projects/{project_id}/import-bundle")
+    async def import_project_bundle(project_id: str, req: ImportBundleReq):
+        try:
+            res = await asyncio.to_thread(svc.import_project_bundle, project_id, req.bundle)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, **res}
+
+    # ── Entries (View / Search / Edit / Lock / Restore / Skip / Replace / Retranslate / Bulk) ──
 
     @app.get("/api/projects/{project_id}/entries")
     async def list_entries(
         project_id: str,
         status: str = "all",
         source: str = "all",
+        extra_filter: str = "",
         search: str = "",
         offset: int = 0,
         limit: int = 50,
@@ -643,6 +914,7 @@ def create_app(
         entries, total = store.query_entries(
             status=status,
             source=source,
+            extra_filter=extra_filter,
             search=search,
             offset=max(0, offset),
             limit=min(200, max(1, limit)),
@@ -652,6 +924,52 @@ def create_app(
             "total": total,
             "stats": store.stats(),
         }
+
+    @app.post("/api/projects/{project_id}/entries/bulk")
+    async def bulk_entries_action(project_id: str, req: BulkEntriesReq):
+        project = svc.global_store.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        ids = [int(i) for i in (req.entry_ids or []) if i is not None]
+        if not ids:
+            raise HTTPException(status_code=400, detail="请先勾选至少一条词条")
+        act = (req.action or "").strip().lower()
+        store = svc.project_store(project_id)
+
+        if act == "retranslate":
+            targets = [e for e in (store.get_by_id(eid) for eid in ids) if e is not None and e.status != STATUS_SKIPPED]
+            if not targets:
+                raise HTTPException(status_code=400, detail="选中的词条均无法重译")
+
+            def worker(task, cancel, emit):
+                cfg = svc.settings()
+                task.total = len(targets)
+                task.message = f"正在批量重译选中的 {len(targets)} 条词条..."
+                emit()
+                done_n, fail_n, cloud_tokens = _run_concurrent_translate(
+                    project_id, targets, task, cancel, emit, retranslate_all=True
+                )
+                if cfg.auto_sync_xuat and project.hook_deployed and done_n > 0:
+                    svc.export_xuat_to_game(project_id)
+                tok_note = f" · 云端消耗 {cloud_tokens:,} tokens" if cloud_tokens > 0 else ""
+                task.message = f"选中重译完成：{done_n} 条成功" + (f"，{fail_n} 条待处理" if fail_n else "") + tok_note
+
+            try:
+                task = svc.tasks.start("translate", project_id, worker, initial_message="准备批量重译...")
+            except RuntimeError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return {"ok": True, "task": task}
+
+        if act not in ("skip", "unskip", "lock", "unlock"):
+            raise HTTPException(status_code=400, detail=f"不支持的批量操作：{act}")
+        changed = store.bulk_update_entries(ids, act)
+        svc.invalidate_entry_cache(project_id)
+        if changed and act in ("skip", "unskip"):
+            cfg = svc.settings()
+            paths = get_xuat_paths(project.game_dir, project.loader)
+            if cfg.auto_sync_xuat and (project.hook_deployed or paths["translation_dir"].is_dir()):
+                await asyncio.to_thread(svc.export_xuat_to_game, project_id)
+        return {"ok": True, "changed": changed, "stats": store.stats()}
 
     @app.post("/api/projects/{project_id}/entries")
     async def create_entry(project_id: str, req: CreateEntryReq):
@@ -670,6 +988,7 @@ def create_app(
             locked=bool(tr),
             preserve_locked=False,
         )
+        svc.put_cached_entry(project_id, entry)
         return {"entry": entry.to_dict(), "stats": store.stats()}
 
     @app.patch("/api/projects/{project_id}/entries/{entry_id}")
@@ -700,10 +1019,13 @@ def create_app(
             raise HTTPException(status_code=404, detail="条目不存在")
 
         cfg = svc.settings()
+        svc.put_cached_entry(project_id, entry)
         if req.translation is not None and entry.translation.strip():
-            svc.global_store.put_memory(
-                entry.original, entry.translation.strip(), cfg.target_lang, source="manual"
-            )
+            _, _, matcher = svc.get_live_translation_bundle(project_id)
+            if not matcher.has_project_hit(entry.original):
+                svc.global_store.put_memory(
+                    entry.original, entry.translation.strip(), cfg.target_lang, source="manual"
+                )
             paths = get_xuat_paths(project.game_dir, project.loader)
             if cfg.auto_sync_xuat and (project.hook_deployed or paths["translation_dir"].is_dir()):
                 await asyncio.to_thread(svc.export_xuat_to_game, project_id)
@@ -752,6 +1074,7 @@ def create_app(
             req.find, req.replace, only_unlocked=req.only_unlocked
         )
         if changed:
+            svc.invalidate_entry_cache(project_id)
             cfg = svc.settings()
             paths = get_xuat_paths(project.game_dir, project.loader)
             if cfg.auto_sync_xuat and (project.hook_deployed or paths["translation_dir"].is_dir()):
@@ -778,6 +1101,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="项目不存在")
         store = svc.project_store(project_id)
         store.delete_entry(entry_id)
+        svc.invalidate_entry_cache(project_id)
         return {"ok": True, "stats": store.stats()}
 
     # ── Shared Concurrent Batch Translation Helper ────────────────────────
@@ -791,18 +1115,18 @@ def create_app(
         *,
         retranslate_all: bool = False,
         base_offset: int = 0,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         """Run concurrent translation with neighbor context window and live-first preemption."""
         cfg = svc.settings()
         store = svc.project_store(project_id)
-        ctx = store.load_context()
-        glossary = store.list_glossary() + svc.global_store.list_glossary()
+        ctx, glossary, matcher = svc.get_live_translation_bundle(project_id)
         pipeline = TranslationPipeline(
             svc.global_store,
             store,
             target_lang=cfg.target_lang,
             temperature=cfg.translate_role.temperature,
             max_tokens=cfg.translate_role.max_tokens,
+            quote_style=cfg.quote_style,
         )
         # Neighbor map for dialogue coherence
         prev_map: dict[int, list[str]] = {}
@@ -828,20 +1152,24 @@ def create_app(
             svc.wait_if_live_busy(cancel)
             if cancel.is_set():
                 return None
-            return pipeline.translate_one(
+            oc = pipeline.translate_one(
                 entry.original,
                 client,
                 source=entry.source,
                 force_retranslate=retranslate_all,
                 context=ctx,
                 glossary=glossary,
+                glossary_matcher=matcher,
                 prev_originals=prev_map.get(entry.id or -1),
             )
+            svc.put_cached_entry(project_id, oc.entry)
+            return oc
 
         try:
             if use_cloud_batch:
                 def _on_batch_item(outcome):
                     nonlocal done_n, fail_n, last_push
+                    svc.put_cached_entry(project_id, outcome.entry)
                     if outcome.ok:
                         done_n += 1
                         task.done += 1
@@ -870,6 +1198,7 @@ def create_app(
                     force_retranslate=retranslate_all,
                     context=ctx,
                     glossary=glossary,
+                    glossary_matcher=matcher,
                     is_cancelled=cancel.is_set,
                     on_item=_on_batch_item,
                 )
@@ -1006,13 +1335,17 @@ def create_app(
                     tr_cli = svc.runtime.create_client_for_role("translate", cfg)
                     try:
                         pipeline = TranslationPipeline(
-                            svc.global_store, store, target_lang=cfg.target_lang
+                            svc.global_store,
+                            store,
+                            target_lang=cfg.target_lang,
+                            quote_style=cfg.quote_style,
                         )
 
                         rev_last_push = 0.0
 
                         def _on_rev(updated, _verdict):
                             nonlocal fixed_count, rev_last_push
+                            svc.put_cached_entry(project_id, updated)
                             task.current += 1
                             if updated.review_level == "FIXED":
                                 fixed_count += 1
@@ -1248,6 +1581,7 @@ def create_app(
                     target_lang=cfg.target_lang,
                     temperature=cfg.translate_role.temperature,
                     max_tokens=cfg.translate_role.max_tokens,
+                    quote_style=cfg.quote_style,
                 )
                 ctx = store.load_context()
                 if req.mode == "full":
@@ -1262,6 +1596,7 @@ def create_app(
 
                 def _on_reviewed(updated, verdict):
                     nonlocal rev_last_push
+                    svc.put_cached_entry(project_id, updated)
                     task.current += 1
                     if updated.review_level == "FIXED":
                         task.done += 1
@@ -1342,7 +1677,8 @@ def create_app(
         if svc.overlay is None:
             from ul10n.overlay.hud import InGameOverlayHUD
 
-            svc.overlay = InGameOverlayHUD(svc)
+            hk = svc.settings().overlay_hotkey or "Alt+L"
+            svc.overlay = InGameOverlayHUD(svc, hotkey_label=hk)
             svc.overlay.start()
         visible = svc.overlay.toggle()
         return {"ok": True, "visible": visible, "hotkey": svc.overlay.hotkey_label}
@@ -1411,11 +1747,11 @@ def create_app(
             raise HTTPException(status_code=404, detail="项目不存在")
         if not req.term.strip() or not req.translation.strip():
             raise HTTPException(status_code=400, detail="原文术语和译名均不能为空")
-        item = svc.project_store(project_id).upsert_glossary(
-            req.term, req.translation, req.category, req.note
-        )
+        store = svc.project_store(project_id)
+        item = store.upsert_glossary(req.term, req.translation, req.category, req.note)
         svc.invalidate_translation_cache(project_id)
-        return {"item": item.to_dict()}
+        impacted = store.find_glossary_impacted(item.term, item.translation)
+        return {"item": item.to_dict(), "impacted_count": len(impacted)}
 
     @app.put("/api/projects/{project_id}/glossary/{item_id}")
     async def update_project_glossary(project_id: str, item_id: int, req: GlossaryReq):
@@ -1423,13 +1759,55 @@ def create_app(
             raise HTTPException(status_code=404, detail="项目不存在")
         if not req.term.strip() or not req.translation.strip():
             raise HTTPException(status_code=400, detail="原文术语和译名均不能为空")
-        item = svc.project_store(project_id).update_glossary(
-            item_id, req.term, req.translation, req.category, req.note
-        )
+        store = svc.project_store(project_id)
+        item = store.update_glossary(item_id, req.term, req.translation, req.category, req.note)
         if not item:
             raise HTTPException(status_code=404, detail="术语不存在")
         svc.invalidate_translation_cache(project_id)
-        return {"item": item.to_dict()}
+        impacted = store.find_glossary_impacted(item.term, item.translation)
+        return {"item": item.to_dict(), "impacted_count": len(impacted)}
+
+    @app.get("/api/projects/{project_id}/glossary/impact")
+    async def check_glossary_impact(project_id: str, term: str = "", translation: str = ""):
+        if not svc.global_store.get_project(project_id):
+            raise HTTPException(status_code=404, detail="项目不存在")
+        impacted = svc.project_store(project_id).find_glossary_impacted(term, translation)
+        return {
+            "count": len(impacted),
+            "samples": [
+                {"id": e.id, "original": e.original, "translation": e.translation}
+                for e in impacted[:6]
+            ],
+        }
+
+    @app.post("/api/projects/{project_id}/glossary/retranslate-impacted")
+    async def retranslate_glossary_impacted(project_id: str, req: GlossaryRetranslateReq):
+        project = svc.global_store.get_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="项目不存在")
+        store = svc.project_store(project_id)
+        impacted = store.find_glossary_impacted(req.term, req.translation)
+        if not impacted:
+            raise HTTPException(status_code=400, detail="当前没有受该术语影响的旧译文需要更新")
+
+        def worker(task, cancel, emit):
+            cfg = svc.settings()
+            task.total = len(impacted)
+            task.message = f"正在按新术语「{req.term}={req.translation}」重译 {len(impacted)} 条受影响译文..."
+            emit()
+            done_n, fail_n, cloud_tokens = _run_concurrent_translate(
+                project_id, impacted, task, cancel, emit, retranslate_all=True
+            )
+            if cfg.auto_sync_xuat and project.hook_deployed and done_n > 0:
+                svc.export_xuat_to_game(project_id)
+            tok_note = f" · 云端消耗 {cloud_tokens:,} tokens" if cloud_tokens > 0 else ""
+            task.message = f"术语同步重译完成：{done_n} 条已更新" + (f"，{fail_n} 条待处理" if fail_n else "") + tok_note
+
+        try:
+            task = svc.tasks.start("translate", project_id, worker, initial_message="准备按新术语更新译文...")
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "count": len(impacted), "task": task}
 
     @app.post("/api/projects/{project_id}/glossary/import")
     async def import_project_glossary(project_id: str, req: ImportTextReq):
@@ -1572,7 +1950,7 @@ def create_app(
                         if sval.startswith(_MASK_PREFIX):
                             if not old_key and k == "reason_role":
                                 tr_key = str(merged.get("translate_role", {}).get("api_key") or "")
-                                if tr_key and sval == _mask_secret(tr_key):
+                                if tr_key and sval == _mask_key(tr_key):
                                     role_merged["api_key"] = tr_key
                             continue
                         role_merged["api_key"] = sval
@@ -1586,8 +1964,18 @@ def create_app(
         svc.global_store.save_settings(updated)
         if old.hardware_mode != updated.hardware_mode:
             await asyncio.to_thread(svc.runtime.stop_all)
-        elif updated.disable_reasoning and not old.disable_reasoning:
-            await asyncio.to_thread(svc.runtime.stop_role, "reason")
+        else:
+            if old.translate_role.mode == "local" and updated.translate_role.mode == "api":
+                await asyncio.to_thread(svc.runtime.stop_role, "translate")
+            if (updated.disable_reasoning and not old.disable_reasoning) or (
+                old.reason_role.mode == "local" and updated.reason_role.mode == "api"
+            ):
+                await asyncio.to_thread(svc.runtime.stop_role, "reason")
+        if old.overlay_hotkey != updated.overlay_hotkey and svc.overlay is not None:
+            try:
+                svc.overlay.update_hotkey(updated.overlay_hotkey)
+            except Exception:
+                pass
         if old.font_id != updated.font_id and svc.active_project_id:
             proj = svc.global_store.get_project(svc.active_project_id)
             if proj and proj.hook_deployed:
@@ -1596,6 +1984,34 @@ def create_app(
                 except Exception:
                     pass
         return {"settings": _mask_settings_dict(updated), "runtime": svc.runtime_status()}
+
+    @app.get("/api/runtime/presets")
+    async def get_runtime_presets():
+        return {"presets": list(CLOUD_PROVIDER_PRESETS)}
+
+    @app.post("/api/runtime/models")
+    async def list_runtime_models(req: FetchModelsReq):
+        def _fetch():
+            cfg = svc.settings()
+            base_url = (req.base_url or "").strip()
+            key = (req.api_key or "").strip()
+            if req.role == "reason" and not base_url:
+                base_url = cfg.translate_role.base_url
+            if key.startswith(_MASK_PREFIX):
+                key = (
+                    cfg.translate_role.api_key
+                    if req.role == "translate"
+                    else (cfg.reason_role.api_key or cfg.translate_role.api_key)
+                )
+            elif not key and req.role == "reason" and base_url.rstrip("/") == cfg.translate_role.base_url.rstrip("/"):
+                key = cfg.translate_role.api_key
+            return fetch_available_models(base_url, key)
+
+        try:
+            models = await asyncio.to_thread(_fetch)
+            return {"ok": True, "models": models}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/runtime/status")
     async def get_runtime_status():

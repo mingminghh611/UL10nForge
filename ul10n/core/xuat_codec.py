@@ -21,7 +21,13 @@ _TEMPLATE_PH_RE = re.compile(r"(\{\d+(?::[^}]+)?\}|%[sdif])")
 
 
 def encode_xuat_value(text: str) -> str:
-    """Encode a single key or value for a XUAT translation file line."""
+    """Encode a single key or value for a XUAT translation file line (lossless via \\uXXXX).
+
+    Uses XUAT TextHelper.cs native escapes:
+    - '\\\\' -> '\\\\\\\\', '=' -> '\\\\=', '\\n' -> '\\\\n', '\\r' -> '\\\\r'
+    - '//' -> '/\\\\u002f' (prevents inline comment truncation while round-tripping 100% losslessly)
+    - '%3D' -> '%\\\\u0033D' (prevents legacy '=' decoding corruption while round-tripping losslessly)
+    """
     out: list[str] = []
     i = 0
     n = len(text)
@@ -35,9 +41,14 @@ def encode_xuat_value(text: str) -> str:
             out.append("\\n")
         elif ch == "\r":
             out.append("\\r")
+        elif ch == "#" and not "".join(out).strip():
+            out.append("\\u0023")
         elif ch == "/" and i + 1 < n and text[i + 1] == "/":
-            out.append("\\/\\/")
+            out.append("/\\u002f")
             i += 1
+        elif ch == "%" and i + 2 < n and text[i + 1 : i + 3] == "3D":
+            out.append("%\\u0033D")
+            i += 2
         else:
             out.append(ch)
         i += 1

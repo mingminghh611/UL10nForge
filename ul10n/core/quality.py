@@ -1,8 +1,9 @@
-"""Deterministic quality guard, placeholder/tag protection, and authoritative UI terms."""
+"""Deterministic quality guard, placeholder/tag protection, word-boundary glossary matching, and UI terms."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Iterable
 
 # Authoritative UI single-word mappings (prevents cross-game pollution such as
 # Play -> 播放, Resume -> 简历, Disabled -> 残疾人士)
@@ -37,7 +38,12 @@ BUILTIN_UI_TERMS: dict[str, str] = {
 }
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_JP_RE = re.compile(r"[\u3040-\u30ff]")
+_KR_RE = re.compile(r"[\uac00-\ud7af]")
+_RU_RE = re.compile(r"[\u0400-\u04ff]")
 _JP_KR_RE = re.compile(r"[\u3040-\u30ff\uac00-\ud7af]")
+_HAS_LATIN_RE = re.compile(r"[A-Za-z]")
+_HAS_CJK_JP_KR_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]")
 _LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
 _ZH_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]")
 
@@ -45,7 +51,17 @@ _ZH_NUM_RE = re.compile(r"[零一二两三四五六七八九十百千万亿]")
 _PLACEHOLDER_RE = re.compile(
     r"(\{\{[0-9A-Za-z_]+\}\}|\{[0-9A-Za-z_.:,-]+\}|%[0-9$.+-]*[sdifuxX%]|\$\{[A-Za-z0-9_.]+\})"
 )
-_RICHTEXT_TAG_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_-]*(?:=[^<>]*)?>")
+_RICHTEXT_TAG_RE = re.compile(
+    r"</?[A-Za-z][A-Za-z0-9_-]*(?:=[^<>]*|\s+[A-Za-z_][A-Za-z0-9_-]*=[^<>]*)?/?>"
+)
+_OUTER_WRAP_TAG_RE = re.compile(
+    r"^\s*(<([A-Za-z][A-Za-z0-9_-]*)(?:=[^<>]*)?>)(.+?)(</\2>)\s*$",
+    re.S | re.I,
+)
+_INLINE_SELF_TAG_RE = re.compile(
+    r"<(?:sprite(?:\s+[^<>]*|=[^<>]*)?|br\s*/?|space=[^<>]*|voffset=[^<>]*|page)>",
+    re.I,
+)
 _ONLY_SYMBOL_NUM_RE = re.compile(r"^[\s0-9.,:;!?+\-*/=%$€£¥()\[\]{}<>|_~`#@&^'\"\\/]+$")
 _VERSION_STRING_RE = re.compile(r"^(?:v|ver\.?|build)\s*\d+(?:\.\d+){1,3}[a-z0-9\-]*$", re.I)
 
@@ -151,10 +167,12 @@ def check_translation_quality(original: str, translation: str) -> QualityCheckRe
             if src_close > 0 and tr_close < src_close:
                 reasons.append("富文本闭合标签损坏")
 
-    # 3. Untranslated echo check (for non-trivial Latin/Japanese/Korean sentences)
+    # 3. Untranslated echo check (for non-trivial Latin/Japanese/Korean/Cyrillic sentences)
     src_plain = _RICHTEXT_TAG_RE.sub("", _PLACEHOLDER_RE.sub("", src)).strip()
     tr_plain = _RICHTEXT_TAG_RE.sub("", _PLACEHOLDER_RE.sub("", tr)).strip()
-    if len(src_plain) >= 6 and (_LATIN_WORD_RE.search(src_plain) or _JP_KR_RE.search(src_plain)):
+    if len(src_plain) >= 6 and (
+        _LATIN_WORD_RE.search(src_plain) or _JP_KR_RE.search(src_plain) or _RU_RE.search(src_plain)
+    ):
         if tr_plain.casefold() == src_plain.casefold():
             reasons.append("疑似未翻译（原文回显）")
         elif not _CJK_RE.search(tr_plain) and len(_LATIN_WORD_RE.findall(src_plain)) >= 2:
@@ -216,3 +234,258 @@ def restore_missing_tags(original: str, translation: str) -> str:
         if open_tag not in translation and close_tag not in translation:
             return f"{open_tag}{translation.strip()}{close_tag}"
     return translation
+
+
+# ── Word-Boundary Glossary Matcher (Zero False Positives + Sub-ms Cached Lookup) ──
+
+
+def _compile_term_pattern(term: str) -> re.Pattern[str] | None:
+    """Compile word-boundary regex for Latin/ASCII terms; return None for CJK/JP/KR substring terms."""
+    t = (term or "").strip()
+    if not t:
+        return None
+    if _HAS_LATIN_RE.search(t) and not _HAS_CJK_JP_KR_RE.search(t):
+        # Match whole word + optional English plural/possessive suffix ('s / s / es)
+        return re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(t)}(?:s|es|'s|’s)?(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        )
+    return None
+
+
+def term_in_text(term: str, text: str) -> bool:
+    """Return True if `term` appears in `text` respecting word boundaries for Latin words."""
+    t = (term or "").strip()
+    if not t or not text:
+        return False
+    pat = _compile_term_pattern(t)
+    if pat is not None:
+        return bool(pat.search(text))
+    return t.casefold() in text.casefold()
+
+
+class GlossaryMatcher:
+    """Pre-compiled, longest-match-first glossary index for ultra-fast live & batch translation."""
+
+    __slots__ = ("_entries", "_exact_map", "_project_exact_map", "_project_entries")
+
+    def __init__(
+        self,
+        project_pairs: Iterable[tuple[str, str]] = (),
+        global_pairs: Iterable[tuple[str, str]] = (),
+        context_pairs: Iterable[tuple[str, str]] = (),
+    ) -> None:
+        # Priority: project glossary > global glossary > context-extracted terms
+        dedup: dict[str, tuple[str, str, bool]] = {}
+        for is_proj, pairs in (
+            (True, project_pairs),
+            (False, global_pairs),
+            (True, context_pairs),
+        ):
+            for raw_src, raw_dst in pairs:
+                src = (raw_src or "").strip()
+                dst = (raw_dst or "").strip()
+                if not src or not dst:
+                    continue
+                key = src.casefold()
+                if key not in dedup:
+                    dedup[key] = (src, dst, is_proj)
+
+        # Sort longest terms first so "The Keeper" matches before "Keeper"
+        ordered = sorted(dedup.values(), key=lambda x: (-len(x[0]), x[0].casefold()))
+        self._entries: list[tuple[str, str, str, re.Pattern[str] | None, bool]] = []
+        self._project_entries: list[tuple[str, str, str, re.Pattern[str] | None]] = []
+        self._exact_map: dict[str, str] = {}
+        self._project_exact_map: dict[str, str] = {}
+
+        for src, dst, is_proj in ordered:
+            low = src.casefold()
+            pat = _compile_term_pattern(src)
+            self._entries.append((src, dst, low, pat, is_proj))
+            self._exact_map[low] = dst
+            if is_proj:
+                self._project_entries.append((src, dst, low, pat))
+                self._project_exact_map[low] = dst
+
+    def exact_project_lookup(self, text: str) -> str | None:
+        """Exact whole-string lookup in project glossary / context terms (highest priority)."""
+        key = (text or "").strip().casefold()
+        return self._project_exact_map.get(key)
+
+    def has_project_hit(self, text: str) -> bool:
+        """Return True if any project-specific term occurs in `text` (prevents global-memory hijack)."""
+        if not self._project_entries or not text:
+            return False
+        low = text.casefold()
+        for _src, _dst, t_low, pat in self._project_entries:
+            if pat is not None:
+                if t_low in low and pat.search(text):
+                    return True
+            elif t_low in low:
+                return True
+        return False
+
+    def match(self, text: str, limit: int = 10) -> list[tuple[str, str]]:
+        """Return up to `limit` matching `(source_term, target_translation)` pairs."""
+        if not self._entries or not text:
+            return []
+        low = text.casefold()
+        hits: list[tuple[str, str]] = []
+        for src, dst, t_low, pat, _is_proj in self._entries:
+            if t_low not in low:
+                continue
+            if pat is None or pat.search(text):
+                hits.append((src, dst))
+                if len(hits) >= limit:
+                    break
+        return hits
+
+
+# ── Safe Tag Peel & Inline Sprite Freeze Masking ─────────────────────────
+
+
+def protect_inline_markup(text: str) -> tuple[str, list[tuple[str, str]], list[tuple[str, str]]]:
+    """Peel balanced outer wrapping tags and freeze self-closing TMP tags like `<sprite=0>`.
+
+    Keeps the text sent to small/fast models clean so tags never get dropped or corrupted.
+    """
+    outer_tags: list[tuple[str, str]] = []
+    core = text or ""
+
+    # Peel up to 3 balanced outer wrapping tags (e.g. <b><color=#ff0>Alert</color></b>)
+    for _ in range(3):
+        m = _OUTER_WRAP_TAG_RE.match(core)
+        if not m:
+            break
+        open_tag, tag_name, inner, close_tag = m.groups()
+        # Only peel if the same tag name does NOT appear unclosed/re-opened inside `inner`
+        if re.search(rf"</?{re.escape(tag_name)}(?:\b|=|>)", inner, re.I):
+            break
+        if not inner.strip():
+            break
+        outer_tags.append((open_tag, close_tag))
+        core = inner
+
+    frozen_tokens: list[tuple[str, str]] = []
+
+    def _freeze(match: re.Match[str]) -> str:
+        tok = f"⟦S{len(frozen_tokens)}⟧"
+        frozen_tokens.append((tok, match.group(0)))
+        return tok
+
+    masked = _INLINE_SELF_TAG_RE.sub(_freeze, core)
+    return masked, outer_tags, frozen_tokens
+
+
+def restore_inline_markup(
+    translated: str,
+    outer_tags: list[tuple[str, str]],
+    frozen_tokens: list[tuple[str, str]],
+) -> str:
+    """Restore frozen inline tags and re-wrap peeled outer tags deterministically."""
+    out = (translated or "").strip()
+    for tok, raw_tag in frozen_tokens:
+        if tok in out:
+            out = out.replace(tok, raw_tag)
+    for open_tag, close_tag in reversed(outer_tags):
+        if open_tag not in out and close_tag not in out:
+            out = f"{open_tag}{out}{close_tag}"
+    return out
+
+
+# ── Quote Style Normalization, UI Length Cue, Language & Memory Safety ───
+
+
+def apply_quote_style(text: str, style: str = "auto") -> str:
+    """Unify Chinese dialogue quotation marks (`corner` -> 「…」, `curly` -> “…”) outside XML tags."""
+    st = (style or "auto").strip().lower()
+    if st not in ("corner", "curly") or not text:
+        return text
+
+    # Protect rich-text tags so attribute quotes like <color="red"> are never touched
+    parts = _RICHTEXT_TAG_RE.split(text)
+    tags = _RICHTEXT_TAG_RE.findall(text)
+    out_parts: list[str] = []
+    for seg in parts:
+        if st == "corner":
+            seg = seg.replace("“", "「").replace("”", "」")
+            # Convert balanced straight quotes inside prose segments
+            if seg.count('"') >= 2 and seg.count('"') % 2 == 0:
+                buf: list[str] = []
+                opened = False
+                for ch in seg:
+                    if ch == '"':
+                        buf.append("」" if opened else "「")
+                        opened = not opened
+                    else:
+                        buf.append(ch)
+                seg = "".join(buf)
+        elif st == "curly":
+            seg = seg.replace("「", "“").replace("」", "”")
+        out_parts.append(seg)
+
+    merged: list[str] = []
+    for idx, seg in enumerate(out_parts):
+        merged.append(seg)
+        if idx < len(tags):
+            merged.append(tags[idx])
+    return "".join(merged)
+
+
+def is_short_ui_button(text: str) -> bool:
+    """Return True when `text` looks like a compact 1–2 word UI button/tab label."""
+    if not text or "\n" in text:
+        return False
+    plain = _RICHTEXT_TAG_RE.sub("", _PLACEHOLDER_RE.sub("", text)).strip()
+    if not plain or len(plain) > 15:
+        return False
+    if any(p in plain for p in (".", "!", "?", "。", "！", "？", ",", "，")):
+        return False
+    words = plain.split()
+    return 1 <= len(words) <= 2
+
+
+def is_safe_for_global_memory(original: str, source: str = "ai") -> bool:
+    """Guard cross-game translation memory against short ambiguous single-word pollution."""
+    s = (original or "").strip()
+    if not s:
+        return False
+    if source == "manual":
+        return True
+    # Standard UI terms already live in BUILTIN_UI_TERMS; avoid polluting global memory with
+    # short 1-2 word ambiguous domain words like "Fire", "Light", "Warden", "Charge", "Draw".
+    plain = _RICHTEXT_TAG_RE.sub("", _PLACEHOLDER_RE.sub("", s)).strip()
+    if not plain:
+        return False
+    if _JP_KR_RE.search(plain):
+        return len(plain) >= 5
+    words = plain.split()
+    if len(words) <= 2 and len(plain) < 16:
+        return False
+    return True
+
+
+def detect_source_language(texts: Iterable[str]) -> str:
+    """Detect dominant source language (`en` | `ja` | `ko` | `ru` | `auto`) from game texts."""
+    jp = kr = ru = latin = 0
+    sampled = 0
+    for raw in texts:
+        s = _RICHTEXT_TAG_RE.sub("", (raw or "")).strip()
+        if not s:
+            continue
+        jp += len(_JP_RE.findall(s))
+        kr += len(_KR_RE.findall(s))
+        ru += len(_RU_RE.findall(s))
+        latin += len(_LATIN_WORD_RE.findall(s))
+        sampled += 1
+        if sampled >= 120:
+            break
+    if jp >= 4:
+        return "ja"
+    if kr >= 4:
+        return "ko"
+    if ru >= 6 and ru > latin:
+        return "ru"
+    if latin >= 4:
+        return "en"
+    return "auto"

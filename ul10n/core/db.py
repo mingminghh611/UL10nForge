@@ -76,7 +76,8 @@ class GlobalStore:
                     loader TEXT DEFAULT 'bepinex',
                     hook_deployed INTEGER DEFAULT 0,
                     last_opened TEXT DEFAULT '',
-                    created_at TEXT DEFAULT ''
+                    created_at TEXT DEFAULT '',
+                    source_lang TEXT DEFAULT 'auto'
                 );
                 CREATE TABLE IF NOT EXISTS global_memory(
                     src_hash TEXT NOT NULL,
@@ -96,6 +97,9 @@ class GlobalStore:
                     note TEXT DEFAULT ''
                 );
             """)
+            pcols = {r["name"] for r in self.conn.execute("PRAGMA table_info(projects)").fetchall()}
+            if "source_lang" not in pcols:
+                self.conn.execute("ALTER TABLE projects ADD COLUMN source_lang TEXT DEFAULT 'auto'")
             self.conn.commit()
 
     def close(self) -> None:
@@ -131,16 +135,17 @@ class GlobalStore:
         now = _now()
         with self._lock:
             existing = self.conn.execute(
-                "SELECT created_at, hook_deployed, loader FROM projects WHERE id=?",
+                "SELECT created_at, hook_deployed, loader, source_lang FROM projects WHERE id=?",
                 (project.id,),
             ).fetchone()
             created_at = existing["created_at"] if existing else (project.created_at or now)
+            src_lang = project.source_lang or (existing["source_lang"] if existing else "auto") or "auto"
             self.conn.execute(
                 """
                 INSERT INTO projects(
                     id, name, game_dir, runtime_type, arch, unity_version,
-                    loader, hook_deployed, last_opened, created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    loader, hook_deployed, last_opened, created_at, source_lang
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     name=excluded.name,
                     game_dir=excluded.game_dir,
@@ -149,7 +154,8 @@ class GlobalStore:
                     unity_version=excluded.unity_version,
                     loader=excluded.loader,
                     hook_deployed=excluded.hook_deployed,
-                    last_opened=excluded.last_opened
+                    last_opened=excluded.last_opened,
+                    source_lang=excluded.source_lang
                 """,
                 (
                     project.id,
@@ -162,12 +168,25 @@ class GlobalStore:
                     int(project.hook_deployed),
                     now,
                     created_at,
+                    src_lang,
                 ),
             )
             self.conn.commit()
         project.created_at = created_at
         project.last_opened = now
+        project.source_lang = src_lang
         return project
+
+    def set_source_lang(self, project_id: str, source_lang: str) -> None:
+        lang = (source_lang or "auto").strip().lower()
+        if lang not in ("auto", "en", "ja", "ko", "ru", "fr", "de", "es"):
+            lang = "auto"
+        with self._lock:
+            self.conn.execute(
+                "UPDATE projects SET source_lang=?, last_opened=? WHERE id=?",
+                (lang, _now(), project_id),
+            )
+            self.conn.commit()
 
     def list_projects(self) -> list[GameProject]:
         with self._lock:
@@ -204,6 +223,7 @@ class GlobalStore:
 
     @staticmethod
     def _row_to_project(row: sqlite3.Row) -> GameProject:
+        keys = row.keys()
         return GameProject(
             id=row["id"],
             name=row["name"],
@@ -215,18 +235,23 @@ class GlobalStore:
             hook_deployed=bool(row["hook_deployed"]),
             last_opened=row["last_opened"],
             created_at=row["created_at"],
+            source_lang=(row["source_lang"] if "source_lang" in keys and row["source_lang"] else "auto"),
         )
 
     # ── Global Translation Memory ─────────────────────────────────────────
 
-    def get_memory(self, original: str, target_lang: str = "zh-CN") -> str | None:
+    def get_memory_entry(self, original: str, target_lang: str = "zh-CN") -> tuple[str, str] | None:
         h = _hash_text(original)
         with self._lock:
             row = self.conn.execute(
-                "SELECT translation FROM global_memory WHERE src_hash=? AND target_lang=?",
+                "SELECT translation, source FROM global_memory WHERE src_hash=? AND target_lang=?",
                 (h, target_lang),
             ).fetchone()
-        return str(row["translation"]) if row else None
+        return (str(row["translation"]), str(row["source"] or "ai")) if row else None
+
+    def get_memory(self, original: str, target_lang: str = "zh-CN") -> str | None:
+        item = self.get_memory_entry(original, target_lang)
+        return item[0] if item else None
 
     def put_memory(
         self, original: str, translation: str, target_lang: str = "zh-CN", source: str = "ai"
@@ -671,11 +696,73 @@ class ProjectStore:
             row = self.conn.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
         return self._row_to_entry(row) if row else None
 
+    def bulk_update_entries(self, entry_ids: list[int], action: str) -> int:
+        """Apply a batch action (`skip` | `unskip` | `lock` | `unlock`) to selected entry IDs."""
+        ids = [int(i) for i in entry_ids if i is not None]
+        if not ids:
+            return 0
+        now = _now()
+        act = (action or "").strip().lower()
+        changed = 0
+        with self._lock:
+            for eid in ids:
+                row = self.conn.execute("SELECT * FROM entries WHERE id=?", (eid,)).fetchone()
+                if not row:
+                    continue
+                if act == "skip":
+                    old_tr = str(row["translation"] or "")
+                    prev_tr = old_tr or str(row["prev_translation"] or "")
+                    self.conn.execute(
+                        "UPDATE entries SET translation='', prev_translation=?, status=?, locked=1, "
+                        "review_level='', review_reason='', quality_note='', updated_at=? WHERE id=?",
+                        (prev_tr, STATUS_SKIPPED, now, eid),
+                    )
+                    changed += 1
+                elif act == "unskip":
+                    if row["status"] != STATUS_SKIPPED:
+                        continue
+                    restored = str(row["prev_translation"] or "").strip()
+                    next_st = STATUS_TRANSLATED if restored else STATUS_PENDING
+                    self.conn.execute(
+                        "UPDATE entries SET translation=?, status=?, locked=0, quality_note='', "
+                        "review_reason='', updated_at=? WHERE id=?",
+                        (restored, next_st, now, eid),
+                    )
+                    changed += 1
+                elif act == "lock":
+                    self.conn.execute(
+                        "UPDATE entries SET locked=1, updated_at=? WHERE id=?", (now, eid)
+                    )
+                    changed += 1
+                elif act == "unlock":
+                    self.conn.execute(
+                        "UPDATE entries SET locked=0, updated_at=? WHERE id=?", (now, eid)
+                    )
+                    changed += 1
+            self.conn.commit()
+        return changed
+
+    def find_glossary_impacted(self, term: str, expected_translation: str) -> list[Entry]:
+        """Find existing translated/edited entries containing `term` (word-boundary safe) missing `expected_translation`."""
+        from ul10n.core.quality import term_in_text
+
+        t = (term or "").strip()
+        dst = (expected_translation or "").strip()
+        if not t or not dst:
+            return []
+        candidates = self.all_entries((STATUS_TRANSLATED, STATUS_EDITED, STATUS_FLAGGED))
+        return [
+            e
+            for e in candidates
+            if e.translation and term_in_text(t, e.original) and dst not in e.translation
+        ]
+
     def query_entries(
         self,
         *,
         status: str = "all",
         source: str = "all",
+        extra_filter: str = "",
         search: str = "",
         offset: int = 0,
         limit: int = 50,
@@ -684,6 +771,7 @@ class ProjectStore:
         params: list[Any] = []
         src = (source or "all").strip().lower()
         st = (status or "all").strip().lower()
+        ef = (extra_filter or "").strip().lower()
         is_live = st == "live" or src in ("live", "xuat_live")
 
         # Source filter (static vs live)
@@ -703,6 +791,12 @@ class ProjectStore:
         elif st and st not in ("all", "live", "static"):
             where.append("status = ?")
             params.append(st)
+
+        # Optional extra quick filter
+        if ef == "tags":
+            where.append("(original LIKE '%<%' OR original LIKE '%{%' OR original LIKE '%\\%%' ESCAPE '\\')")
+        elif ef == "long":
+            where.append("(LENGTH(original) >= 40 OR original LIKE '%' || CHAR(10) || '%')")
 
         if search.strip():
             like = f"%{search.strip()}%"

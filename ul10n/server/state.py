@@ -1,8 +1,11 @@
-"""Application service container tying together stores, runtime manager, priority gate, and task runner."""
+"""Application service container tying together stores, runtime manager, hot caches, and task runner."""
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime
+import json
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +29,7 @@ from ul10n.core.models import (
     STATUS_SKIPPED,
     STATUS_TRANSLATED,
 )
+from ul10n.core.quality import GlossaryMatcher, detect_source_language
 from ul10n.core.text_scanner import scan_unity_static_texts_detailed
 from ul10n.core.xuat_codec import (
     ExportStats,
@@ -36,7 +40,10 @@ from ul10n.core.xuat_codec import (
 )
 from ul10n.engine.runtime_manager import LlamaRuntimeManager
 from ul10n.engine.tasks import EventBus, TaskManager
-from ul10n.engine.translator import TranslationPipeline
+from ul10n.engine.translator import TranslationPipeline, build_glossary_matcher
+
+_LIVE_CONTEXT_TTL_SEC = 45.0
+_LIVE_ENTRY_CACHE_MAX = 8000
 
 
 class AppServices:
@@ -69,9 +76,12 @@ class AppServices:
         self._sync_lock = threading.Lock()
         self._sync_timers: dict[str, threading.Timer] = {}
         self._export_locks: dict[str, threading.Lock] = {}
+
+        # Hot in-memory caches: compiled GlossaryMatcher + live entry dict (<0.05ms XUAT hits)
         self._live_cache_lock = threading.Lock()
-        self._live_ctx_cache: dict[str, tuple[GameContext, list[GlossaryItem]]] = {}
-        self._live_recent_lines: dict[str, deque[str]] = {}
+        self._live_ctx_cache: dict[str, tuple[GameContext, list[GlossaryItem], GlossaryMatcher]] = {}
+        self._live_entry_cache: dict[str, dict[str, Entry]] = {}
+        self._live_recent_lines: dict[str, deque[tuple[float, str]]] = {}
 
         # Restore most recently opened project if available
         projects = self.global_store.list_projects()
@@ -114,47 +124,90 @@ class AppServices:
                 self._inflight_live.pop(key, None)
         evt.set()
 
-    def get_live_context_and_glossary(self, project_id: str) -> tuple[GameContext, list[GlossaryItem]]:
-        """Return cached `(GameContext, project+global glossary)` with 0ms lookup for live translation."""
+    # ── Compiled Glossary & O(1) Live Entry Hot Cache ─────────────────────
+
+    def get_live_translation_bundle(
+        self, project_id: str
+    ) -> tuple[GameContext, list[GlossaryItem], GlossaryMatcher]:
+        """Return cached `(GameContext, combined_glossary, compiled_GlossaryMatcher)` in <0.05ms."""
         with self._live_cache_lock:
             cached = self._live_ctx_cache.get(project_id)
             if cached is not None:
                 return cached
         store = self.project_store(project_id)
         ctx = store.load_context()
-        terms = store.list_glossary() + self.global_store.list_glossary()
-        pair = (ctx, terms)
+        proj_terms = store.list_glossary()
+        glob_terms = self.global_store.list_glossary()
+        matcher = build_glossary_matcher(proj_terms, glob_terms, ctx)
+        bundle = (ctx, proj_terms + glob_terms, matcher)
         with self._live_cache_lock:
-            self._live_ctx_cache[project_id] = pair
-        return pair
+            self._live_ctx_cache[project_id] = bundle
+        return bundle
+
+    def get_live_context_and_glossary(self, project_id: str) -> tuple[GameContext, list[GlossaryItem]]:
+        """Backward-compatible wrapper returning `(GameContext, project+global glossary)`."""
+        ctx, terms, _matcher = self.get_live_translation_bundle(project_id)
+        return ctx, terms
 
     def invalidate_translation_cache(self, project_id: str | None = None) -> None:
-        """Invalidate cached context/glossary (pass None when global glossary changes)."""
+        """Invalidate cached context/glossary matcher (pass None when global glossary changes)."""
         with self._live_cache_lock:
             if project_id is None:
                 self._live_ctx_cache.clear()
             else:
                 self._live_ctx_cache.pop(project_id, None)
 
+    def get_cached_entry(self, project_id: str, original: str) -> Entry | None:
+        with self._live_cache_lock:
+            bucket = self._live_entry_cache.get(project_id)
+            return bucket.get(original) if bucket is not None else None
+
+    def put_cached_entry(self, project_id: str, entry: Entry) -> None:
+        if not entry or not entry.original:
+            return
+        with self._live_cache_lock:
+            bucket = self._live_entry_cache.setdefault(project_id, {})
+            if len(bucket) >= _LIVE_ENTRY_CACHE_MAX and entry.original not in bucket:
+                bucket.clear()
+            bucket[entry.original] = entry
+
+    def invalidate_entry_cache(self, project_id: str | None = None) -> None:
+        with self._live_cache_lock:
+            if project_id is None:
+                self._live_entry_cache.clear()
+            else:
+                self._live_entry_cache.pop(project_id, None)
+
     def record_live_line(self, project_id: str, original: str) -> None:
+        """Record dialogue-like live lines with timestamp (skips noisy short menu buttons)."""
         text = (original or "").strip()
         if not text:
             return
+        # Filter out ultra-short UI buttons ("Back", "Settings", "Audio") so menu clicks never pollute dialogue context
+        looks_dialogue = len(text) >= 14 or any(p in text for p in (".", "!", "?", "。", "！", "？", ",", "，"))
+        if not looks_dialogue:
+            return
+        now = time.monotonic()
         with self._live_cache_lock:
             buf = self._live_recent_lines.get(project_id)
             if buf is None:
                 buf = deque(maxlen=4)
                 self._live_recent_lines[project_id] = buf
-            if not buf or buf[-1] != text:
-                buf.append(text)
+            # Clear stale scene context after inactivity
+            if buf and (now - buf[-1][0]) > _LIVE_CONTEXT_TTL_SEC:
+                buf.clear()
+            if not buf or buf[-1][1] != text:
+                buf.append((now, text))
 
     def recent_live_lines(self, project_id: str, *, exclude: str = "") -> list[str]:
         ex = (exclude or "").strip()
+        now = time.monotonic()
         with self._live_cache_lock:
             buf = self._live_recent_lines.get(project_id)
             if not buf:
                 return []
-            return [line for line in buf if line != ex][-3:]
+            fresh = [line for ts, line in buf if (now - ts) <= _LIVE_CONTEXT_TTL_SEC and line != ex]
+            return fresh[-3:]
 
     # ── Settings & Stores ─────────────────────────────────────────────────
 
@@ -173,8 +226,22 @@ class AppServices:
                 self._project_stores[project_id] = store
             return store
 
+    def resolve_effective_source_lang(self, project: GameProject) -> str:
+        """Resolve concrete XUAT `FromLanguage` value (honoring explicit user choice or safe auto-detect)."""
+        explicit = (project.source_lang or "auto").strip().lower()
+        if explicit and explicit != "auto":
+            return explicit
+        store = self.project_store(project.id)
+        entries = store.all_entries()
+        if not entries:
+            return "auto"
+        detected = detect_source_language(e.original for e in entries[:150])
+        return detected or "auto"
+
     def remove_project(self, project_id: str) -> None:
         """Remove a project cleanly, closing its SQLite handle and deleting its project DB."""
+        self.invalidate_translation_cache(project_id)
+        self.invalidate_entry_cache(project_id)
         with self._store_lock:
             st = self._project_stores.pop(project_id, None)
             if st is not None:
@@ -211,6 +278,7 @@ class AppServices:
         if clear_context:
             store.set_kv("game_context", {})
         self.invalidate_translation_cache(project_id)
+        self.invalidate_entry_cache(project_id)
         with self._live_cache_lock:
             self._live_recent_lines.pop(project_id, None)
         # Mark prescan version done so reopening won't unexpectedly re-run unless user scans
@@ -256,6 +324,7 @@ class AppServices:
         pid = project_id_for_dir(info.game_dir)
         existing = self.global_store.get_project(pid)
         loader = existing.loader if existing else info.recommended_loader
+        src_lang = existing.source_lang if existing else "auto"
         paths = get_xuat_paths(info.game_dir, loader)
         hook_deployed = bool(
             (existing and existing.hook_deployed) or paths["config"].is_file()
@@ -270,6 +339,7 @@ class AppServices:
                 unity_version=info.unity_version,
                 loader=loader,
                 hook_deployed=hook_deployed,
+                source_lang=src_lang,
             )
         )
         self.active_project_id = pid
@@ -282,17 +352,24 @@ class AppServices:
         return project, import_stats
 
     def scan_game_texts(self, project_id: str) -> dict[str, Any]:
-        """Strictly read-only static scan of Unity UI, assets, text files, and code strings."""
+        """Strictly read-only 100%-safe scan of Unity UI components & official localization tables."""
         project = self.global_store.get_project(project_id)
         if not project:
-            return {"added": 0, "updated": 0, "skipped": 0, "by_source": {}}
+            return {"added": 0, "updated": 0, "skipped": 0, "by_source": {}, "truncated": False}
         report = scan_unity_static_texts_detailed(project.game_dir)
         if not report.texts:
-            return {"added": 0, "updated": 0, "skipped": 0, "by_source": report.by_source}
+            return {
+                "added": 0,
+                "updated": 0,
+                "skipped": 0,
+                "by_source": report.by_source,
+                "truncated": report.truncated,
+            }
         pairs = [(t, "") for t in report.texts]
         res = self.project_store(project_id).bulk_import_pairs(pairs, source="prescan")
         self.project_store(project_id).set_kv("prescan_version", 2)
-        return {**res, "by_source": report.by_source}
+        self.invalidate_entry_cache(project_id)
+        return {**res, "by_source": report.by_source, "truncated": report.truncated}
 
     def import_xuat_from_game(self, project_id: str) -> dict[str, int]:
         project = self.global_store.get_project(project_id)
@@ -311,6 +388,8 @@ class AppServices:
                 res = store.bulk_import_pairs(pairs, source="xuat_import")
                 for k in totals:
                     totals[k] += res[k]
+        if totals["added"] or totals["updated"]:
+            self.invalidate_entry_cache(project_id)
         return totals
 
     def export_xuat_to_game(self, project_id: str) -> ExportStats | None:
@@ -371,6 +450,7 @@ class AppServices:
             t.start()
 
     def _publish_entry_update(self, project_id: str, entry: Entry, *, from_cache: bool = True) -> None:
+        self.put_cached_entry(project_id, entry)
         store = self.project_store(project_id)
         self.bus.publish(
             "live_entry",
@@ -382,7 +462,22 @@ class AppServices:
             },
         )
 
-    # ── Shared Entry Actions (Used by Both WebUI & Alt+L Overlay HUD) ────
+    # ── Shared Entry & Glossary Actions (Used by Both WebUI & Alt+L Overlay HUD) ──
+
+    def add_project_glossary_term(
+        self, project_id: str, term: str, translation: str, category: str = "术语", note: str = ""
+    ) -> tuple[GlossaryItem | None, int]:
+        """Add/update a project glossary term, invalidate live matcher, and return impacted count."""
+        if not self.global_store.get_project(project_id):
+            return None, 0
+        t, tr = term.strip(), translation.strip()
+        if not t or not tr:
+            return None, 0
+        store = self.project_store(project_id)
+        item = store.upsert_glossary(t, tr, category=category, note=note)
+        self.invalidate_translation_cache(project_id)
+        impacted = len(store.find_glossary_impacted(t, tr))
+        return item, impacted
 
     def save_manual_translation(self, project_id: str, entry_id: int, translation: str) -> Entry | None:
         """Save a manual edit, lock it, record global memory, and hot-sync into the game."""
@@ -404,9 +499,11 @@ class AppServices:
             return None
         cfg = self.settings()
         if entry.translation.strip():
-            self.global_store.put_memory(
-                entry.original, entry.translation.strip(), cfg.target_lang, source="manual"
-            )
+            _, _, matcher = self.get_live_translation_bundle(project_id)
+            if not matcher.has_project_hit(entry.original):
+                self.global_store.put_memory(
+                    entry.original, entry.translation.strip(), cfg.target_lang, source="manual"
+                )
             self._sync_xuat_if_enabled(project)
         self._publish_entry_update(project_id, entry, from_cache=True)
         return entry
@@ -422,9 +519,11 @@ class AppServices:
             return None
         cfg = self.settings()
         if entry.translation.strip():
-            self.global_store.put_memory(
-                entry.original, entry.translation.strip(), cfg.target_lang, source="manual"
-            )
+            _, _, matcher = self.get_live_translation_bundle(project_id)
+            if not matcher.has_project_hit(entry.original):
+                self.global_store.put_memory(
+                    entry.original, entry.translation.strip(), cfg.target_lang, source="manual"
+                )
             self._sync_xuat_if_enabled(project)
         self._publish_entry_update(project_id, entry, from_cache=True)
         return entry
@@ -487,12 +586,14 @@ class AppServices:
         if not entry:
             return None, False, "条目不存在"
         cfg = self.settings()
+        ctx, glossary, matcher = self.get_live_translation_bundle(project_id)
         pipeline = TranslationPipeline(
             self.global_store,
             store,
             target_lang=cfg.target_lang,
             temperature=cfg.translate_role.temperature,
             max_tokens=cfg.translate_role.max_tokens,
+            quote_style=cfg.quote_style,
         )
         client = self.runtime.create_client_for_role("translate", cfg)
         try:
@@ -502,6 +603,9 @@ class AppServices:
                 source=entry.source,
                 force_retranslate=True,
                 fix_hint=fix_hint,
+                context=ctx,
+                glossary=glossary,
+                glossary_matcher=matcher,
             )
         finally:
             client.close()
@@ -509,6 +613,110 @@ class AppServices:
             self._sync_xuat_if_enabled(project)
         self._publish_entry_update(project_id, outcome.entry, from_cache=False)
         return outcome.entry, outcome.ok, outcome.note
+
+    # ── Portable `.ul10n.json` Project Bundle Export / Import ─────────────
+
+    def export_project_bundle(self, project_id: str) -> tuple[bytes, str]:
+        """Export a portable `.ul10n.json` package (context + glossary + curated entries) for sharing."""
+        project = self.global_store.get_project(project_id)
+        if not project:
+            raise FileNotFoundError("未找到该项目")
+        store = self.project_store(project_id)
+        entries = [
+            e
+            for e in store.all_entries((STATUS_TRANSLATED, STATUS_EDITED))
+            if (e.translation or "").strip()
+        ]
+        payload = {
+            "format": "ul10nforge-bundle",
+            "schema_version": 1,
+            "game_name": project.name,
+            "unity_version": project.unity_version,
+            "source_lang": project.source_lang,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "context": store.load_context().to_dict(),
+            "glossary": [
+                {
+                    "term": g.term,
+                    "translation": g.translation,
+                    "category": g.category,
+                    "note": g.note,
+                }
+                for g in store.list_glossary()
+            ],
+            "entries": [
+                {
+                    "original": e.original,
+                    "translation": e.translation,
+                    "status": e.status,
+                }
+                for e in entries
+            ],
+        }
+        raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        safe_name = "".join(c for c in project.name if c not in r'\/:*?"<>|').strip() or "UnityGame"
+        return raw, f"{safe_name}.ul10n.json"
+
+    def import_project_bundle(self, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Safely import a `.ul10n.json` bundle into an open project without clobbering locked edits."""
+        project = self.global_store.get_project(project_id)
+        if not project:
+            raise FileNotFoundError("未找到该项目")
+        if not isinstance(payload, dict) or payload.get("format") != "ul10nforge-bundle":
+            raise ValueError("无效的汉化工程包格式（缺少 ul10nforge-bundle 标识）")
+
+        store = self.project_store(project_id)
+        imported_context = False
+        raw_ctx = payload.get("context")
+        if isinstance(raw_ctx, dict):
+            cur_ctx = store.load_context()
+            incoming_ctx = GameContext.from_dict(raw_ctx)
+            if not cur_ctx.is_ready and incoming_ctx.is_ready:
+                store.save_context(incoming_ctx)
+                imported_context = True
+
+        existing_terms = {g.term.strip().casefold() for g in store.list_glossary()}
+        glossary_added = 0
+        for g in payload.get("glossary") or []:
+            if not isinstance(g, dict):
+                continue
+            t = str(g.get("term") or "").strip()
+            tr = str(g.get("translation") or "").strip()
+            if not t or not tr or t.casefold() in existing_terms:
+                continue
+            store.upsert_glossary(
+                t,
+                tr,
+                category=str(g.get("category") or "术语"),
+                note=str(g.get("note") or "工程包导入"),
+            )
+            existing_terms.add(t.casefold())
+            glossary_added += 1
+
+        pairs: list[tuple[str, str]] = []
+        for item in payload.get("entries") or []:
+            if not isinstance(item, dict):
+                continue
+            orig = str(item.get("original") or "")
+            tr = str(item.get("translation") or "")
+            if orig and tr:
+                pairs.append((orig, tr))
+
+        entry_res = store.bulk_import_pairs(pairs, source="xuat_import")
+        self.invalidate_translation_cache(project_id)
+        self.invalidate_entry_cache(project_id)
+        if entry_res["added"] or entry_res["updated"]:
+            self._sync_xuat_if_enabled(project)
+
+        return {
+            "entries_added": entry_res["added"],
+            "entries_updated": entry_res["updated"],
+            "entries_skipped": entry_res["skipped"],
+            "glossary_added": glossary_added,
+            "context_imported": imported_context,
+            "stats": store.stats(),
+            "context": store.load_context().to_dict(),
+        }
 
     # ── Hook Deployment & Standalone Offline Patch Export ─────────────────
 
@@ -525,6 +733,7 @@ class AppServices:
                 pass
         info = detect_game(project.game_dir)
         cfg = self.settings()
+        eff_src_lang = self.resolve_effective_source_lang(project)
         result = deploy_hook(
             info,
             app_root=self.app_root,
@@ -532,6 +741,7 @@ class AppServices:
             server_port=cfg.server_port,
             loader=target_loader,
             target_lang=cfg.target_lang,
+            source_lang=eff_src_lang,
             font_id=cfg.font_id,
         )
         store = self.project_store(project_id)
@@ -544,6 +754,7 @@ class AppServices:
             "arch": result.arch,
             "files_written": result.files_written,
             "font_bundle": result.font_bundle,
+            "source_lang": eff_src_lang,
         }
 
     def refresh_project_hook_config(self, project_id: str) -> None:
@@ -553,6 +764,7 @@ class AppServices:
         info = detect_game(project.game_dir)
         cfg = self.settings()
         manifest = self.project_store(project_id).get_kv("hook_manifest") or {}
+        eff_src_lang = self.resolve_effective_source_lang(project)
         refresh_hook_config(
             info,
             app_root=self.app_root,
@@ -560,6 +772,7 @@ class AppServices:
             server_port=cfg.server_port,
             loader=project.loader,
             target_lang=cfg.target_lang,
+            source_lang=eff_src_lang,
             preexisting_loader=bool(manifest.get("preexisting_loader", False)),
             font_id=cfg.font_id,
         )
@@ -584,12 +797,14 @@ class AppServices:
         cfg = self.settings()
         store = self.project_store(project_id)
         dict_text, _exported, _skipped, _regex = render_xuat_dict_text(store.all_entries())
+        eff_src_lang = self.resolve_effective_source_lang(project)
         zip_bytes = build_standalone_patch_zip(
             info,
             app_root=self.app_root,
             curated_dict_text=dict_text,
             loader=project.loader,
             target_lang=cfg.target_lang,
+            source_lang=eff_src_lang,
             font_id=cfg.font_id,
         )
         safe_name = "".join(c for c in project.name if c not in r'\/:*?"<>|').strip() or "UnityGame"

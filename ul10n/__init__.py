@@ -1,3 +1,3 @@
-"""UL10nForge v2 — Zero-invasive Unity display-layer localization studio."""
+"""UL10nForge — Zero-invasive Unity display-layer localization studio."""
 
-VERSION = "2.0.0-mvp"
+VERSION = "1.0.1"

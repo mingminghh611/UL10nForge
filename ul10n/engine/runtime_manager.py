@@ -117,21 +117,57 @@ class ManagedServer:
         return f"http://127.0.0.1:{self.port}/v1"
 
 
-def _detect_nvidia_gpu() -> str | None:
+def _detect_gpu_info() -> tuple[str | None, str]:
+    """Detect active discrete/integrated GPU across NVIDIA, AMD, and Intel on Windows."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    # 1. Fast nvidia-smi probe for NVIDIA GPUs
     try:
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=2.5,
             creationflags=flags,
         )
         if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip().splitlines()[0].strip()
+            name = out.stdout.strip().splitlines()[0].strip()
+            return name, "nvidia"
     except Exception:
         pass
-    return None
+
+    # 2. Fallback probe for AMD / Intel GPUs via Windows PowerShell CIM
+    if sys.platform == "win32":
+        try:
+            out = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3.5,
+                creationflags=flags,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                names = [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+                # Prefer discrete NVIDIA/AMD/Intel Arc adapters over generic virtual display drivers
+                filtered = [
+                    n for n in names
+                    if not any(skip in n.casefold() for skip in ("microsoft basic", "virtual", "parsec", "oray", "sunlogin", "todesk"))
+                ]
+                ordered = filtered or names
+                for kw, vendor in (("nvidia", "nvidia"), ("radeon", "amd"), ("amd", "amd"), ("arc", "intel"), ("intel", "intel")):
+                    for n in ordered:
+                        if kw in n.casefold():
+                            return n, vendor
+                if ordered:
+                    return ordered[0], "other"
+        except Exception:
+            pass
+    return None, ""
 
 
 def _pick_free_port(preferred: int) -> int:
@@ -170,7 +206,8 @@ class LlamaRuntimeManager:
         self._starting: set[str] = set()
         self._client_pool: dict[tuple[str, str, str, str, str, bool], LLMClient] = {}
         self._job_handle = _create_kill_on_close_job()
-        self._nvidia_gpu = _detect_nvidia_gpu()
+        self._gpu_name, self._gpu_vendor = _detect_gpu_info()
+        self._nvidia_gpu = self._gpu_name if self._gpu_vendor == "nvidia" else None
         self._stop_reaper = threading.Event()
         self._reaper_thread = threading.Thread(target=self._reaper_loop, daemon=True)
         self._reaper_thread.start()
@@ -210,12 +247,15 @@ class LlamaRuntimeManager:
             # RTX 50-series (Blackwell sm_120) lacks native kernels in CUDA 12.4 builds
             # and hits slow PTX JIT; route Blackwell directly to Vulkan (125+ tok/s).
             is_blackwell = bool(self._nvidia_gpu and "rtx 50" in self._nvidia_gpu.casefold())
+            force_gpu = hardware_mode == "gpu"
             if has_cuda_bundle and self._nvidia_gpu and not is_blackwell:
+                return cuda_exe, "CUDA", -1
+            if has_vulkan_bundle and (force_gpu or self._gpu_name or not has_cuda_bundle):
+                return vulkan_exe, "Vulkan", -1
+            if has_cuda_bundle and (self._nvidia_gpu or force_gpu):
                 return cuda_exe, "CUDA", -1
             if has_vulkan_bundle:
                 return vulkan_exe, "Vulkan", -1
-            if has_cuda_bundle and self._nvidia_gpu:
-                return cuda_exe, "CUDA", -1
             if cuda_exe.is_file():
                 return cuda_exe, "CPU", 0
 
@@ -260,7 +300,8 @@ class LlamaRuntimeManager:
                     "backend": backend,
                 }
             return {
-                "gpu_name": self._nvidia_gpu or "",
+                "gpu_name": self._gpu_name or "",
+                "gpu_vendor": self._gpu_vendor or "",
                 "hardware_mode": settings.hardware_mode,
                 "roles": roles_info,
             }

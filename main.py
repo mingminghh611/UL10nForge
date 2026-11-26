@@ -52,7 +52,8 @@ def main() -> None:
     if not args.no_overlay:
         from ul10n.overlay.hud import InGameOverlayHUD
 
-        overlay = InGameOverlayHUD(app.state.services)
+        hk = app.state.services.settings().overlay_hotkey or "Alt+L"
+        overlay = InGameOverlayHUD(app.state.services, hotkey_label=hk)
         app.state.services.overlay = overlay
         overlay.start()
     uvicorn.run(app, host=args.host, port=port, log_level="warning")

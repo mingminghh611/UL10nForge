@@ -95,18 +95,35 @@ def _safe_extract_zip(
     return written, created
 
 
+def _normalize_from_lang(source_lang: str | None) -> str:
+    """Normalize source language for XUAT `FromLanguage=` (supports auto/en/ja/ko/ru/fr/de/es)."""
+    s = (source_lang or "auto").strip().lower()
+    if s in ("ja", "jp", "ja-jp"):
+        return "ja"
+    if s in ("ko", "kr", "ko-kr"):
+        return "ko"
+    if s in ("ru", "ru-ru"):
+        return "ru"
+    if s in ("en", "en-us", "en-gb"):
+        return "en"
+    if s in ("fr", "de", "es", "pt", "it"):
+        return s
+    return "auto"
+
+
 def _build_xuat_config(
     *,
     endpoint_url: str,
     fallback_tmp_font_rel: str,
     override_font_name: str = "Microsoft YaHei",
     target_lang: str = "zh",
-    source_lang: str = "en",
+    source_lang: str = "auto",
     offline_only: bool = False,
     is_il2cpp: bool = False,
 ) -> str:
     """Build AutoTranslatorConfig.ini tuned for maximum stability on Mono and IL2CPP."""
     lang = "zh" if target_lang.lower().startswith("zh") else target_lang
+    from_lang = _normalize_from_lang(source_lang)
     endpoint_line = "Endpoint=" if offline_only else "Endpoint=CustomTranslate"
     custom_block = (
         ""
@@ -128,7 +145,7 @@ def _build_xuat_config(
         "\n"
         "[General]\n"
         f"Language={lang}\n"
-        f"FromLanguage={source_lang}\n"
+        f"FromLanguage={from_lang}\n"
         "\n"
         "[Files]\n"
         "Directory=Translation\\{Lang}\\Text\n"
@@ -225,6 +242,7 @@ def deploy_hook(
     server_port: int,
     loader: str | None = None,
     target_lang: str = "zh-CN",
+    source_lang: str = "auto",
     font_id: str = DEFAULT_FONT_ID,
 ) -> DeployResult:
     """Deploy BepInEx/MelonLoader + XUAT + Chinese Font fallback into a Unity game directory."""
@@ -335,6 +353,7 @@ def deploy_hook(
         fallback_tmp_font_rel=fallback_tmp_rel,
         override_font_name=font_opt.ugui_font,
         target_lang=target_lang,
+        source_lang=source_lang,
         is_il2cpp=(runtime_type == "il2cpp"),
     )
     cfg_existed = paths["config"].exists()
@@ -378,6 +397,7 @@ def refresh_hook_config(
     server_port: int,
     loader: str | None = None,
     target_lang: str = "zh",
+    source_lang: str = "auto",
     preexisting_loader: bool = False,
     font_id: str = DEFAULT_FONT_ID,
 ) -> None:
@@ -436,6 +456,7 @@ def refresh_hook_config(
         fallback_tmp_font_rel=fallback_tmp_rel,
         override_font_name=font_opt.ugui_font,
         target_lang=target_lang,
+        source_lang=source_lang,
         is_il2cpp=(game_info.runtime_type == "il2cpp"),
     )
     paths["config"].write_text(cfg_text, encoding="utf-8", newline="\n")
@@ -532,6 +553,7 @@ def build_standalone_patch_zip(
     curated_dict_text: str,
     loader: str | None = None,
     target_lang: str = "zh-CN",
+    source_lang: str = "auto",
     font_id: str = DEFAULT_FONT_ID,
 ) -> bytes:
     """Build a standalone, zero-dependency offline Chinese patch `.zip` ready to share."""
@@ -579,12 +601,20 @@ def build_standalone_patch_zip(
 
         if chosen_loader == "bepinex":
             out_zf.writestr("BepInEx/config/BepInEx.cfg", _safe_bepinex_cfg_text().encode("utf-8"))
+        elif chosen_loader == "melonloader":
+            cpp2il_cands = sorted(kits_dir.glob("Cpp2IL*.exe")) if kits_dir.is_dir() else []
+            if cpp2il_cands:
+                cpp_rel = "MelonLoader/Dependencies/Il2CppAssemblyGenerator/Cpp2IL/Cpp2IL.exe"
+                if cpp_rel not in added:
+                    out_zf.write(cpp2il_cands[0], arcname=cpp_rel)
+                    added.add(cpp_rel)
 
         cfg_text = _build_xuat_config(
             endpoint_url="",
             fallback_tmp_font_rel=fallback_tmp_rel,
             override_font_name=font_opt.ugui_font,
             target_lang=target_lang,
+            source_lang=source_lang,
             offline_only=True,
             is_il2cpp=(runtime_type == "il2cpp"),
         )

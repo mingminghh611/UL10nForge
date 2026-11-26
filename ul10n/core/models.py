@@ -52,6 +52,7 @@ class GameProject:
     hook_deployed: bool = False
     last_opened: str = ""
     created_at: str = ""
+    source_lang: str = "auto"       # auto | en | ja | ko | ru | fr | de | es
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -166,6 +167,8 @@ class AppSettings:
     disable_reasoning: bool = False  # True = skip context inference & AI review, direct translate -> deploy
     sound_effects: bool = True       # Subtle UI feedback chimes
     font_id: str = "notoserif"       # Selected in-game Chinese font (notoserif | lxgwwenkai | fusionpixel)
+    quote_style: str = "auto"        # auto | corner (「…」) | curly (“…”)
+    overlay_hotkey: str = "Alt+L"    # Global in-game HUD toggle hotkey
     translate_role: RoleEndpointConfig = field(
         default_factory=lambda: RoleEndpointConfig(mode="local", temperature=0.25, max_tokens=1024)
     )
@@ -183,6 +186,8 @@ class AppSettings:
             "disable_reasoning": self.disable_reasoning,
             "sound_effects": self.sound_effects,
             "font_id": self.font_id,
+            "quote_style": self.quote_style,
+            "overlay_hotkey": self.overlay_hotkey,
             "translate_role": self.translate_role.to_dict(),
             "reason_role": self.reason_role.to_dict(),
         }
@@ -191,6 +196,9 @@ class AppSettings:
     def from_dict(cls, data: dict[str, Any] | None) -> AppSettings:
         if not isinstance(data, dict):
             return cls()
+        quote_style = str(data.get("quote_style", "auto") or "auto").strip().lower()
+        if quote_style not in ("auto", "corner", "curly"):
+            quote_style = "auto"
         return cls(
             theme=str(data.get("theme", "dark") or "dark"),
             target_lang=str(data.get("target_lang", "zh-CN") or "zh-CN"),
@@ -200,6 +208,8 @@ class AppSettings:
             disable_reasoning=bool(data.get("disable_reasoning", False)),
             sound_effects=bool(data.get("sound_effects", True)),
             font_id=str(data.get("font_id", "notoserif") or "notoserif"),
+            quote_style=quote_style,
+            overlay_hotkey=str(data.get("overlay_hotkey", "Alt+L") or "Alt+L").strip() or "Alt+L",
             translate_role=RoleEndpointConfig.from_dict(data.get("translate_role")),
             reason_role=RoleEndpointConfig.from_dict(data.get("reason_role")),
         )
